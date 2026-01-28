@@ -1,0 +1,81 @@
+profiles:
+  dev_small:
+    tokenizer:
+      rnt2_model_path: data/runs/rnt2_dev.pt
+      block_size: 64
+      escape_mode: exact
+    core:
+      hidden_size: 256
+      layers: 4
+      heads: 4
+      vocab_size: 1024
+    kv:
+      window_size: 128
+      kv_quant_bits: 8
+      latent_slots: 32
+    c3:
+      tile_size: 128
+      cache_vram_budget_mb: 2048
+      prefetch_depth: 2
+      compression: zstd
+    router:
+      top_k: 2
+      stability_threshold: 0.1
+      mem_cost_weight: 0.01
+    agent:
+      web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
+      tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
+  core_only:
+    tokenizer:
+      rnt2_model_path: data/runs/rnt2_dev.pt
+      block_size: 64
+      escape_mode: exact
+    core:
+      hidden_size: 512
+      layers: 6
+      heads: 8
+      vocab_size: 2048
+    kv:
+      window_size: 256
+      kv_quant_bits: 8
+      latent_slots: 64
+  c3_paged:
+    tokenizer:
+      rnt2_model_path: data/runs/rnt2_dev.pt
+      block_size: 64
+      escape_mode: exact
+    core:
+      hidden_size: 512
+      layers: 6
+      heads: 8
+      vocab_size: 2048
+    kv:
+      window_size: 256
+      kv_quant_bits: 8
+      latent_slots: 64
+    c3:
+      tile_size: 128
+      cache_vram_budget_mb: 4096
+      prefetch_depth: 4
+      compression: zstd
+    router:
+      top_k: 4
+      stability_threshold: 0.15
+      mem_cost_weight: 0.02
+  agent:
+    tokenizer:
+      rnt2_model_path: data/runs/rnt2_dev.pt
+      block_size: 64
+      escape_mode: exact
+    core:
+      hidden_size: 256
+      layers: 4
+      heads: 4
+      vocab_size: 1024
+    kv:
+      window_size: 128
+      kv_quant_bits: 8
+      latent_slots: 32
+    agent:
+      web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
+      tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
