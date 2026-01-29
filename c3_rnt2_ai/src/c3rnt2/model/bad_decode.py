@@ -5,6 +5,7 @@ from typing import List, Tuple
 
 import torch
 
+from ..device import autocast_context
 
 @dataclass
 class BADStats:
@@ -82,53 +83,55 @@ def bad_decode(
     ids, total_len = model.encode_prompt(prompt)
     stats = BADStats()
     generated = list(ids)
+    with torch.inference_mode():
+        with autocast_context(enabled=model.device.type == "cuda", dtype=model.config.dtype):
+            model.reset_state()
+            last_logits_full, state_full = model.init_state(prompt_ids=ids, return_logits=True, write_memory=True)
+            last_logits_draft, state_draft = model.init_state(
+                prompt_ids=ids,
+                num_layers=model.config.draft_layers,
+                return_logits=True,
+                write_memory=False,
+            )
 
-    model.reset_state()
-    state_full = model.init_state(batch=1)
-    state_draft = model.init_state(batch=1)
+            remaining = max_new_tokens
+            while remaining > 0:
+                draft_block = min(block_size, remaining)
+                draft_tokens: List[int] = []
+                for _ in range(draft_block):
+                    if last_logits_draft is None:
+                        last_logits_draft, state_draft = model.step(
+                            generated[-1], state_draft, num_layers=model.config.draft_layers, write_memory=False
+                        )
+                    next_tok = _sample_logits(last_logits_draft, temperature, top_p, generated + draft_tokens, repetition_penalty, no_repeat_ngram)
+                    draft_tokens.append(next_tok)
+                    last_logits_draft, state_draft = model.step(next_tok, state_draft, num_layers=model.config.draft_layers, write_memory=False)
+                stats.proposed += len(draft_tokens)
 
-    # warmup states with prompt
-    last_logits_full = None
-    last_logits_draft = None
-    for tok in ids:
-        last_logits_full, state_full = model.step(tok, state_full, write_memory=True)
-        last_logits_draft, state_draft = model.step(tok, state_draft, num_layers=model.config.draft_layers, write_memory=False)
+                accepted = 0
+                for tok in draft_tokens:
+                    if last_logits_full is None:
+                        last_logits_full, state_full = model.step(generated[-1], state_full, write_memory=True)
+                    ent = _entropy(last_logits_full)
+                    escape_mode = getattr(model, "escape_mode", "")
+                    if adaptive_granularity and ent > entropy_threshold and escape_mode in {"exact", "exact-copy", "escape"}:
+                        stats.entropy_high += 1
+                        start = getattr(model, "byte_token_start", 0)
+                        byte_slice = last_logits_full[:, start : start + 256]
+                        next_tok = _sample_logits(byte_slice, temperature, top_p, generated, repetition_penalty, no_repeat_ngram) + start
+                    else:
+                        next_tok = _sample_logits(last_logits_full, temperature, top_p, generated, repetition_penalty, no_repeat_ngram)
+                    if next_tok == tok:
+                        generated.append(tok)
+                        accepted += 1
+                        stats.accepted += 1
+                        last_logits_full, state_full = model.step(tok, state_full, write_memory=True)
+                    else:
+                        generated.append(next_tok)
+                        stats.rejected += 1
+                        last_logits_full, state_full = model.step(next_tok, state_full, write_memory=True)
+                        break
+                remaining -= max(1, accepted)
 
-    remaining = max_new_tokens
-    while remaining > 0:
-        draft_block = min(block_size, remaining)
-        draft_tokens: List[int] = []
-        for _ in range(draft_block):
-            if last_logits_draft is None:
-                last_logits_draft, state_draft = model.step(generated[-1], state_draft, num_layers=model.config.draft_layers, write_memory=False)
-            next_tok = _sample_logits(last_logits_draft, temperature, top_p, generated + draft_tokens, repetition_penalty, no_repeat_ngram)
-            draft_tokens.append(next_tok)
-            last_logits_draft, state_draft = model.step(next_tok, state_draft, num_layers=model.config.draft_layers, write_memory=False)
-        stats.proposed += len(draft_tokens)
-
-        accepted = 0
-        for tok in draft_tokens:
-            if last_logits_full is None:
-                last_logits_full, state_full = model.step(generated[-1], state_full, write_memory=True)
-            ent = _entropy(last_logits_full)
-            if adaptive_granularity and ent > entropy_threshold and getattr(model, "escape_mode", "") == "exact":
-                stats.entropy_high += 1
-                start = getattr(model, "byte_token_start", 0)
-                byte_slice = last_logits_full[:, start : start + 256]
-                next_tok = _sample_logits(byte_slice, temperature, top_p, generated, repetition_penalty, no_repeat_ngram) + start
-            else:
-                next_tok = _sample_logits(last_logits_full, temperature, top_p, generated, repetition_penalty, no_repeat_ngram)
-            if next_tok == tok:
-                generated.append(tok)
-                accepted += 1
-                stats.accepted += 1
-                last_logits_full, state_full = model.step(tok, state_full, write_memory=True)
-            else:
-                generated.append(next_tok)
-                stats.rejected += 1
-                last_logits_full, state_full = model.step(next_tok, state_full, write_memory=True)
-                break
-        remaining -= max(1, accepted)
-
-    text = model.decode_ids(generated, total_len=None)
-    return text, stats
+            text = model.decode_ids(generated, total_len=None)
+            return text, stats

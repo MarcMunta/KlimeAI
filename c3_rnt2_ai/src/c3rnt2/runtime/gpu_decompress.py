@@ -12,21 +12,30 @@ except Exception:  # pragma: no cover
     torch = None
 
 
-def _to_tensor(tile: np.ndarray, device: str = "cpu"):
+def _to_tensor(tile: np.ndarray, device: str = "cpu", pin_memory: bool = False, non_blocking: bool = False):
     if torch is None:
         raise RuntimeError("PyTorch not available")
     tensor = torch.from_numpy(tile.copy())
-    return tensor.to(device)
+    if pin_memory and device.startswith("cuda"):
+        tensor = tensor.pin_memory()
+    return tensor.to(device, non_blocking=non_blocking)
 
 
-def decompress_to_tensor(tile: Any, device: str = "cpu", codec: str | None = None, shape: Tuple[int, int] | None = None):
+def decompress_to_tensor(
+    tile: Any,
+    device: str = "cpu",
+    codec: str | None = None,
+    shape: Tuple[int, int] | None = None,
+    pin_memory: bool = False,
+    non_blocking: bool = False,
+):
     \"\"\"Decompress tile payload if needed and move to device.\"\"\"
     if isinstance(tile, np.ndarray):
-        return _to_tensor(tile, device=device)
+        return _to_tensor(tile, device=device, pin_memory=pin_memory, non_blocking=non_blocking)
     if isinstance(tile, (bytes, bytearray)):
         if codec is None or shape is None:
             raise ValueError("codec and shape required for compressed tiles")
         raw = decompress(bytes(tile), codec=codec)
         arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-        return _to_tensor(arr, device=device)
+        return _to_tensor(arr, device=device, pin_memory=pin_memory, non_blocking=non_blocking)
     raise TypeError("Unsupported tile type")

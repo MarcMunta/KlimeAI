@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -28,9 +28,45 @@ class VortexStream:
 @dataclass
 class VortexMacroCodebook:
     sequences: List[List[int]]
+    _trie: dict = field(default_factory=dict, init=False, repr=False)
+    _trie_ready: bool = field(default=False, init=False, repr=False)
 
     def lookup(self, idx: int) -> List[int]:
         return self.sequences[idx]
+
+    def _build_trie(self) -> None:
+        trie: dict = {}
+        for idx, seq in enumerate(self.sequences):
+            if len(seq) < 2:
+                continue
+            node = trie
+            for tok in seq:
+                node = node.setdefault(int(tok), {})
+            node["_id"] = idx
+        self._trie = trie
+        self._trie_ready = True
+
+    def _ensure_trie(self) -> None:
+        if not self._trie_ready:
+            self._build_trie()
+
+    def match_longest(self, patch_ids: List[int], start: int) -> Optional[Tuple[int, int]]:
+        if not self.sequences:
+            return None
+        self._ensure_trie()
+        node = self._trie
+        best: Optional[Tuple[int, int]] = None
+        i = start
+        while i < len(patch_ids):
+            tok = patch_ids[i]
+            if tok not in node:
+                break
+            node = node[tok]
+            i += 1
+            macro_id = node.get("_id")
+            if isinstance(macro_id, int):
+                best = (macro_id, i - start)
+        return best
 
     @property
     def size(self) -> int:
@@ -95,23 +131,12 @@ def encode(text: str, model: VortexTokModel) -> VortexStream:
         patch_ids.append(-1 if code is None else code)
 
     tokens: List[VortexToken] = []
-    macro_map: Dict[Tuple[int, ...], int] = {}
-    max_macro_len = 0
-    for idx, seq in enumerate(model.macro_codebook.sequences):
-        macro_map[tuple(seq)] = idx
-        max_macro_len = max(max_macro_len, len(seq))
+    macro_codebook = model.macro_codebook
 
     i = 0
     while i < len(blocks):
         if patch_ids[i] >= 0:
-            matched = None
-            if max_macro_len > 1:
-                for size in range(max_macro_len, 1, -1):
-                    if i + size <= len(patch_ids):
-                        seq = tuple(patch_ids[i : i + size])
-                        if seq in macro_map:
-                            matched = (macro_map[seq], size)
-                            break
+            matched = macro_codebook.match_longest(patch_ids, i)
             if matched:
                 macro_id, size = matched
                 tokens.append(VortexToken(kind="MACRO", value=macro_id))

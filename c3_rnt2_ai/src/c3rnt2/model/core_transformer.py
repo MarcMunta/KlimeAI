@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 import torch
 from torch import nn
@@ -105,7 +105,14 @@ class CoreTransformer(nn.Module):
         model.bad_block_size = int(bad_cfg.get("block_size", decode_cfg.get("draft_block", 8)))
         model.bad_entropy = float(bad_cfg.get("entropy_threshold", decode_cfg.get("entropy_threshold", 3.5)))
         model.decode_cfg = decode_cfg
-        model.to(model.device, dtype=model.dtype if model.device.type == "cuda" else None)
+        model.to(device_info.device, dtype=model.dtype if device_info.device.startswith("cuda") else None)
+        # Sync device/dtype with actual parameters for downstream helpers
+        param = next(model.parameters(), None)
+        if param is not None:
+            model.device = param.device
+            model.dtype = param.dtype
+        else:
+            model.device = torch.device(device_info.device)
         if core.get("compile") and hasattr(torch, "compile"):
             model.forward = torch.compile(model.forward)  # type: ignore[method-assign]
         return model
@@ -143,9 +150,29 @@ class CoreTransformer(nn.Module):
     def decode_ids(self, ids: List[int], total_len: int | None = None) -> str:
         return decode_from_ids(ids, self.tokenizer, total_len=total_len)
 
-    def init_state(self, batch: int = 1) -> List[VBlockState]:
+    def init_state(
+        self,
+        prompt_ids: Iterable[int] | torch.Tensor | None = None,
+        batch: int = 1,
+        num_layers: int | None = None,
+        write_memory: bool = True,
+        return_logits: bool = False,
+    ) -> List[VBlockState] | tuple[torch.Tensor | None, List[VBlockState]]:
         dtype = self.embed.weight.dtype
-        return [block.init_state(batch, self.device, dtype) for block in self.blocks]
+        state = [block.init_state(batch, self.device, dtype) for block in self.blocks]
+        if prompt_ids is None:
+            return (None, state) if return_logits else state
+        if isinstance(prompt_ids, torch.Tensor):
+            prompt_list = prompt_ids.flatten().tolist()
+        else:
+            prompt_list = list(prompt_ids)
+        last_logits: torch.Tensor | None = None
+        with torch.inference_mode():
+            for tok in prompt_list:
+                last_logits, state = self.step(int(tok), state, num_layers=num_layers, write_memory=write_memory)
+        if return_logits:
+            return last_logits, state
+        return state
 
     def reset_state(self) -> None:
         for block in self.blocks:
@@ -181,16 +208,18 @@ class CoreTransformer(nn.Module):
             "entropy_threshold": getattr(self, "bad_entropy", 3.5),
         }
         bad_cfg.update(kwargs)
-        text, _stats = bad_decode(
-            self,
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            block_size=bad_cfg["block_size"],
-            entropy_threshold=bad_cfg["entropy_threshold"],
-            temperature=bad_cfg.get("temperature", 1.0),
-            top_p=bad_cfg.get("top_p", 1.0),
-            repetition_penalty=bad_cfg.get("repetition_penalty", 1.0),
-            no_repeat_ngram=bad_cfg.get("no_repeat_ngram", 0),
-            adaptive_granularity=bad_cfg.get("adaptive_granularity", True),
-        )
+        with torch.inference_mode():
+            with autocast_context(enabled=self.device.type == "cuda", dtype=self.config.dtype):
+                text, _stats = bad_decode(
+                    self,
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    block_size=bad_cfg["block_size"],
+                    entropy_threshold=bad_cfg["entropy_threshold"],
+                    temperature=bad_cfg.get("temperature", 1.0),
+                    top_p=bad_cfg.get("top_p", 1.0),
+                    repetition_penalty=bad_cfg.get("repetition_penalty", 1.0),
+                    no_repeat_ngram=bad_cfg.get("no_repeat_ngram", 0),
+                    adaptive_granularity=bad_cfg.get("adaptive_granularity", True),
+                )
         return text

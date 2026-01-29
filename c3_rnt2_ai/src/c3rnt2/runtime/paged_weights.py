@@ -14,17 +14,28 @@ from .prefetch import Prefetcher
 class PagedWeightsStats:
     page_faults: int = 0
     bytes_transferred: int = 0
+    compressed_bytes: int = 0
+    decompressed_bytes: int = 0
 
 
 class PagedWeights:
     """Tile-based weight manager with CPU storage and GPU cache (MVP)."""
 
-    def __init__(self, tile_store: Dict[int, Any], cache: CacheManager, device: str = "cpu"):
+    def __init__(
+        self,
+        tile_store: Dict[int, Any],
+        cache: CacheManager,
+        device: str = "cpu",
+        prefetch_depth: int = 2,
+        pin_memory: bool | None = None,
+    ):
         self.tile_store = tile_store
         self.cache = cache
         self.device = device
+        self.pin_memory = pin_memory if pin_memory is not None else device.startswith("cuda")
+        self.non_blocking = device.startswith("cuda")
         self.stats = PagedWeightsStats()
-        self.prefetcher = Prefetcher(self._load_tile, depth=2, device=device)
+        self.prefetcher = Prefetcher(self._load_tile, depth=prefetch_depth, device=device)
 
     def _load_tile(self, tile_id: int):
         tile = self.tile_store[tile_id]
@@ -37,11 +48,22 @@ class PagedWeights:
             shape = tuple(tile.get("shape")) if tile.get("shape") else None
             size_bytes = int(tile.get("nbytes") or (len(payload) if payload is not None else 0))
             self.stats.bytes_transferred += size_bytes
-            tensor = decompress_to_tensor(payload, device=self.device, codec=codec, shape=shape)
+            self.stats.compressed_bytes += size_bytes
+            tensor = decompress_to_tensor(
+                payload,
+                device=self.device,
+                codec=codec,
+                shape=shape,
+                pin_memory=self.pin_memory,
+                non_blocking=self.non_blocking,
+            )
         else:
             size_bytes = int(tile.nbytes)
             self.stats.bytes_transferred += size_bytes
-            tensor = decompress_to_tensor(tile, device=self.device)
+            self.stats.compressed_bytes += size_bytes
+            tensor = decompress_to_tensor(tile, device=self.device, pin_memory=self.pin_memory, non_blocking=self.non_blocking)
+        if hasattr(tensor, "numel"):
+            self.stats.decompressed_bytes += int(tensor.numel() * tensor.element_size())
         self.cache.put((tile_id,), tensor, size_bytes)
         return tensor
 

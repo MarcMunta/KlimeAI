@@ -48,6 +48,9 @@ class LAVAMemory(nn.Module):
             self.importance.zero_()
             self.stats = LavaStats()
 
+    def reset_stats(self) -> None:
+        self.stats = LavaStats()
+
     def save_state(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

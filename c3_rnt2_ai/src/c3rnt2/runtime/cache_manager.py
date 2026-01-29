@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass, field
+import heapq
+from dataclasses import dataclass
 from typing import Dict, Hashable, Optional
 
 
@@ -23,6 +23,7 @@ class CacheEntry:
     value: object
     size_bytes: int
     stability: float = 0.0
+    version: int = 0
 
 
 class CacheManager:
@@ -31,14 +32,21 @@ class CacheManager:
     def __init__(self, capacity_bytes: int):
         self.capacity_bytes = capacity_bytes
         self.current_bytes = 0
-        self._entries: OrderedDict[Hashable, CacheEntry] = OrderedDict()
+        self._entries: Dict[Hashable, CacheEntry] = {}
+        self._heap: list[tuple[float, int, Hashable]] = []
+        self._version = 0
         self.metrics = CacheMetrics()
 
+    def _touch(self, key: Hashable, entry: CacheEntry) -> None:
+        self._version += 1
+        entry.version = self._version
+        heapq.heappush(self._heap, (entry.stability, entry.version, key))
+
     def get(self, key: Hashable) -> Optional[object]:
-        if key in self._entries:
-            entry = self._entries.pop(key)
+        entry = self._entries.get(key)
+        if entry is not None:
             entry.stability += 0.1
-            self._entries[key] = entry
+            self._touch(key, entry)
             self.metrics.hits += 1
             return entry.value
         self.metrics.misses += 1
@@ -51,23 +59,22 @@ class CacheManager:
         entry = CacheEntry(value=value, size_bytes=size_bytes, stability=stability)
         self._entries[key] = entry
         self.current_bytes += size_bytes
+        self._touch(key, entry)
         self._evict_if_needed()
 
     def _evict_if_needed(self) -> None:
         while self.current_bytes > self.capacity_bytes and self._entries:
-            # evict lowest stability among oldest
-            lowest_key = None
-            lowest_score = None
-            for k, entry in self._entries.items():
-                score = entry.stability
-                if lowest_score is None or score < lowest_score:
-                    lowest_score = score
-                    lowest_key = k
-            if lowest_key is None:
+            while self._heap:
+                _stability, version, key = heapq.heappop(self._heap)
+                entry = self._entries.get(key)
+                if entry is None or entry.version != version:
+                    continue
+                self._entries.pop(key, None)
+                self.current_bytes -= entry.size_bytes
+                self.metrics.evictions += 1
                 break
-            entry = self._entries.pop(lowest_key)
-            self.current_bytes -= entry.size_bytes
-            self.metrics.evictions += 1
+            else:
+                break
 
     def stats(self) -> Dict[str, float]:
         return {

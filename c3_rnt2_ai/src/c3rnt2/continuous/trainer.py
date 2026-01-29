@@ -8,8 +8,10 @@ from typing import List, Optional
 
 import torch
 from torch import nn
+from torch.nn.utils.rnn import pad_sequence
 
 from ..model.core_transformer import CoreTransformer
+from ..device import autocast_context
 from .dataset import collect_samples
 from .lora import LoRAConfig, inject_lora, load_lora_state, save_lora_state
 from .registry import begin_run, finalize_run, load_registry, rollback
@@ -63,29 +65,54 @@ class ContinualTrainer:
 
             optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=float(self.settings.get("continuous", {}).get("lr", 1e-4)))
             max_steps = int(self.settings.get("continuous", {}).get("max_steps_per_tick", self.settings.get("continuous", {}).get("max_steps", 50)))
+            batch_tokens = int(self.settings.get("continuous", {}).get("batch_tokens", 2048))
 
             base_loss = self._eval_loss(model, holdout)
             model.train()
+            use_scaler = model.device.type == "cuda" and model.dtype == torch.float16
+            scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
             loss_val = 0.0
             for _ in range(max_steps):
-                sample = random.choice(train_samples)
-                ids, _ = model.encode_prompt(sample.response)
-                if len(ids) < 2:
+                sequences = []
+                token_count = 0
+                attempts = 0
+                while token_count < batch_tokens and attempts < max(4, len(train_samples)):
+                    sample = random.choice(train_samples)
+                    ids, _ = model.encode_prompt(sample.response)
+                    attempts += 1
+                    if len(ids) < 2:
+                        continue
+                    seq = torch.tensor(ids, dtype=torch.long)
+                    sequences.append(seq)
+                    token_count += len(ids)
+                if not sequences:
                     continue
-                input_ids = torch.tensor([ids[:-1]], dtype=torch.long, device=model.device)
-                targets = torch.tensor([ids[1:]], dtype=torch.long, device=model.device)
-                logits = model.forward(input_ids)
-                loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-                mem_cost = sum(block.lava.stats.reads + block.lava.stats.writes for block in model.blocks)
-                loss = loss + 1e-6 * mem_cost
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                inputs = [seq[:-1] for seq in sequences]
+                targets = [seq[1:] for seq in sequences]
+                input_ids = pad_sequence(inputs, batch_first=True, padding_value=0).to(model.device)
+                target_ids = pad_sequence(targets, batch_first=True, padding_value=-100).to(model.device)
+                for block in model.blocks:
+                    block.lava.reset_stats()
+                optimizer.zero_grad(set_to_none=True)
+                with autocast_context(enabled=model.device.type == "cuda", dtype=model.config.dtype):
+                    logits = model.forward(input_ids)
+                    loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), ignore_index=-100)
+                    mem_cost = sum(block.lava.stats.reads + block.lava.stats.writes for block in model.blocks)
+                    loss = loss + 1e-6 * mem_cost
+                if use_scaler:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
                 loss_val = float(loss.item())
 
             new_loss = self._eval_loss(model, holdout)
             min_improve = float(self.settings.get("continuous", {}).get("eval", {}).get("min_improvement", 0.0))
-            improved = base_loss is None or (base_loss - new_loss) / max(1e-6, base_loss) >= min_improve
+            improved = False
+            if base_loss is not None and new_loss is not None:
+                improved = (base_loss - new_loss) / max(1e-6, base_loss) >= min_improve
 
             # Save adapter for this run
             save_lora_state(model, self._adapter_path(run_id))
@@ -108,14 +135,15 @@ class ContinualTrainer:
             return None
         model.eval()
         losses = []
-        with torch.no_grad():
+        with torch.inference_mode():
             for sample in samples[: max(1, len(samples))]:
                 ids, _ = model.encode_prompt(sample.response)
                 if len(ids) < 2:
                     continue
                 input_ids = torch.tensor([ids[:-1]], dtype=torch.long, device=model.device)
                 targets = torch.tensor([ids[1:]], dtype=torch.long, device=model.device)
-                logits = model.forward(input_ids)
-                loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+                with autocast_context(enabled=model.device.type == "cuda", dtype=model.config.dtype):
+                    logits = model.forward(input_ids)
+                    loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
                 losses.append(float(loss.item()))
         return sum(losses) / max(1, len(losses))
