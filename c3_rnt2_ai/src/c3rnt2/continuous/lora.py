@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from pathlib import Path
+from typing import Dict, Iterable, Optional
 
 import torch
 from torch import nn
@@ -32,10 +33,16 @@ class LoRALinear(nn.Module):
         return base_out + lora_out * (self.config.alpha / self.config.rank)
 
 
-def inject_lora(model: nn.Module, config: LoRAConfig) -> Dict[str, LoRALinear]:
+def _matches(name: str, target_modules: Optional[Iterable[str]]) -> bool:
+    if not target_modules:
+        return True
+    return any(t in name for t in target_modules)
+
+
+def inject_lora(model: nn.Module, config: LoRAConfig, target_modules: Optional[Iterable[str]] = None) -> Dict[str, LoRALinear]:
     wrapped: Dict[str, LoRALinear] = {}
     for name, module in list(model.named_modules()):
-        if isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear) and _matches(name, target_modules):
             parent = model
             if "." in name:
                 parts = name.split(".")
@@ -48,3 +55,28 @@ def inject_lora(model: nn.Module, config: LoRAConfig) -> Dict[str, LoRALinear]:
             setattr(parent, leaf_name, wrapped_module)
             wrapped[name] = wrapped_module
     return wrapped
+
+
+def save_lora_state(model: nn.Module, path: Path) -> None:
+    payload = {}
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear):
+            payload[name] = {
+                "A": module.A.detach().cpu(),
+                "B": module.B.detach().cpu(),
+                "rank": module.config.rank,
+                "alpha": module.config.alpha,
+            }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+
+
+def load_lora_state(model: nn.Module, path: Path) -> bool:
+    if not path.exists():
+        return False
+    payload = torch.load(path, map_location="cpu")
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear) and name in payload:
+            module.A.data.copy_(payload[name]["A"])
+            module.B.data.copy_(payload[name]["B"])
+    return True

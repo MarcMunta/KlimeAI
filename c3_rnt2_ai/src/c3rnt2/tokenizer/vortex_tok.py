@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class VortexToken:
-    kind: str  # PATCH, MACRO, ESC
+    kind: str  # PATCH, MACRO, SUBPATCH, ESC
     value: object
 
 
@@ -41,6 +41,7 @@ class VortexMacroCodebook:
 class VortexTokModel:
     patch_codebook: RNT2Codebook
     macro_codebook: VortexMacroCodebook
+    sub_codebook: Optional[RNT2Codebook] = None
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -49,6 +50,8 @@ class VortexTokModel:
             "block_size": self.patch_codebook.block_size,
             "patch_entries": self.patch_codebook.entries,
             "macro_sequences": self.macro_codebook.sequences,
+            "sub_block_size": self.sub_codebook.block_size if self.sub_codebook else None,
+            "sub_entries": self.sub_codebook.entries if self.sub_codebook else None,
         }
         if torch:
             torch.save(payload, path)
@@ -70,7 +73,12 @@ class VortexTokModel:
                 payload = pickle.load(f)
         patch = RNT2Codebook(block_size=payload["block_size"], entries=list(payload["patch_entries"]))
         macro = VortexMacroCodebook(sequences=list(payload.get("macro_sequences", [])))
-        return VortexTokModel(patch_codebook=patch, macro_codebook=macro)
+        sub_entries = payload.get("sub_entries")
+        sub_block_size = payload.get("sub_block_size")
+        sub = None
+        if sub_entries and sub_block_size:
+            sub = RNT2Codebook(block_size=int(sub_block_size), entries=list(sub_entries))
+        return VortexTokModel(patch_codebook=patch, macro_codebook=macro, sub_codebook=sub)
 
 
 def _split_blocks(data: bytes, block_size: int) -> List[bytes]:
@@ -112,6 +120,24 @@ def encode(text: str, model: VortexTokModel) -> VortexStream:
             tokens.append(VortexToken(kind="PATCH", value=patch_ids[i]))
             i += 1
         else:
+            # fallback: try sub-blocks if available
+            sub = model.sub_codebook
+            if sub is not None and sub.block_size > 0:
+                sub_tokens: List[VortexToken] = []
+                ok = True
+                block = blocks[i]
+                for j in range(0, len(block), sub.block_size):
+                    chunk = block[j : j + sub.block_size]
+                    padded = chunk.ljust(sub.block_size, b"\x00")
+                    code = sub.find(padded)
+                    if code is None:
+                        ok = False
+                        break
+                    sub_tokens.append(VortexToken(kind="SUBPATCH", value=code))
+                if ok and sub_tokens:
+                    tokens.extend(sub_tokens)
+                    i += 1
+                    continue
             tokens.append(VortexToken(kind="ESC", value=blocks[i]))
             i += 1
 
@@ -126,6 +152,10 @@ def decode(stream: VortexStream, model: VortexTokModel) -> str:
         elif token.kind == "MACRO":
             for pid in model.macro_codebook.lookup(int(token.value)):
                 out.extend(model.patch_codebook.lookup(int(pid)))
+        elif token.kind == "SUBPATCH":
+            if model.sub_codebook is None:
+                raise ValueError("SUBPATCH token without sub_codebook")
+            out.extend(model.sub_codebook.lookup(int(token.value)))
         elif token.kind == "ESC":
             out.extend(bytes(token.value))
         else:
@@ -137,12 +167,14 @@ def decode(stream: VortexStream, model: VortexTokModel) -> str:
 def metrics(stream: VortexStream) -> dict:
     tokens = len(stream.tokens)
     esc = sum(1 for t in stream.tokens if t.kind == "ESC")
+    macro = sum(1 for t in stream.tokens if t.kind == "MACRO")
     ratio = stream.total_len / max(1, tokens)
     return {
         "tokens": tokens,
         "bytes": stream.total_len,
         "bytes_per_token": round(ratio, 4),
         "escapes_pct": round((esc / max(1, tokens)) * 100.0, 2),
+        "macro_hit_rate": round((macro / max(1, tokens)) * 100.0, 2),
     }
 
 
@@ -151,20 +183,24 @@ def encode_to_ids(text: str, model: VortexTokModel) -> Tuple[List[int], int]:
     ids: List[int] = []
     patch_size = model.patch_codebook.size
     macro_size = model.macro_codebook.size
+    sub_size = model.sub_codebook.size if model.sub_codebook else 0
     for token in stream.tokens:
         if token.kind == "PATCH":
             ids.append(int(token.value))
         elif token.kind == "MACRO":
             ids.append(patch_size + int(token.value))
+        elif token.kind == "SUBPATCH":
+            ids.append(patch_size + macro_size + int(token.value))
         elif token.kind == "ESC":
             for b in bytes(token.value):
-                ids.append(patch_size + macro_size + b)
+                ids.append(patch_size + macro_size + sub_size + b)
     return ids, stream.total_len
 
 
 def decode_from_ids(ids: List[int], model: VortexTokModel, total_len: Optional[int] = None) -> str:
     patch_size = model.patch_codebook.size
     macro_size = model.macro_codebook.size
+    sub_size = model.sub_codebook.size if model.sub_codebook else 0
     out = bytearray()
     for token_id in ids:
         if token_id < patch_size:
@@ -173,8 +209,12 @@ def decode_from_ids(ids: List[int], model: VortexTokModel, total_len: Optional[i
             seq = model.macro_codebook.lookup(token_id - patch_size)
             for pid in seq:
                 out.extend(model.patch_codebook.lookup(pid))
+        elif token_id < patch_size + macro_size + sub_size:
+            if model.sub_codebook is None:
+                raise ValueError("SUBPATCH id without sub_codebook")
+            out.extend(model.sub_codebook.lookup(token_id - patch_size - macro_size))
         else:
-            out.append(token_id - patch_size - macro_size)
+            out.append(token_id - patch_size - macro_size - sub_size)
     if total_len is not None:
         out = out[:total_len]
     else:
@@ -187,4 +227,4 @@ def load_or_create(model_path: Path, block_size: int) -> VortexTokModel:
         return VortexTokModel.load(model_path)
     rnt2 = RNT2Model(codebook=RNT2Codebook.from_builtin(block_size=block_size))
     macro = VortexMacroCodebook(sequences=[])
-    return VortexTokModel(patch_codebook=rnt2.codebook, macro_codebook=macro)
+    return VortexTokModel(patch_codebook=rnt2.codebook, macro_codebook=macro, sub_codebook=None)

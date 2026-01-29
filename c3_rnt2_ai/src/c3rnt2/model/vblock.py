@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from .local_mixer import LocalMixer
-from .ssm_track import SSMTrack
+from .local_mixer import LocalMixer, LocalMixerState
+from .ssm_track import SSMTrack, SSMState
 from .lava_memory import LAVAMemory
 
 
@@ -22,6 +22,12 @@ class VBlockConfig:
     dtype: str | None = None
 
 
+@dataclass
+class VBlockState:
+    local: LocalMixerState
+    ssm: SSMState
+
+
 class GatedMLP(nn.Module):
     def __init__(self, hidden_size: int, ratio: int):
         super().__init__()
@@ -32,7 +38,7 @@ class GatedMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = torch.sigmoid(self.gate(x))
-        ff = torch.gelu(self.fc1(x))
+        ff = torch.nn.functional.gelu(self.fc1(x))
         return self.fc2(ff * gate)
 
 
@@ -41,6 +47,7 @@ class VBlock(nn.Module):
 
     def __init__(self, config: VBlockConfig):
         super().__init__()
+        self.hidden_size = config.hidden_size
         self.norm1 = nn.LayerNorm(config.hidden_size)
         self.norm2 = nn.LayerNorm(config.hidden_size)
         self.norm3 = nn.LayerNorm(config.hidden_size)
@@ -64,3 +71,22 @@ class VBlock(nn.Module):
         self.lava.write(x)
         x = x + self.mlp(self.norm4(x))
         return x
+
+    def init_state(self, batch: int, device: torch.device, dtype: torch.dtype) -> VBlockState:
+        return VBlockState(
+            local=self.local.init_state(batch, device, dtype),
+            ssm=self.ssm.init_state(batch, device, dtype),
+        )
+
+    def step(self, x: torch.Tensor, state: VBlockState, write_memory: bool = True) -> tuple[torch.Tensor, VBlockState]:
+        # x: [B, H]
+        local_out, local_state = self.local.step(self.norm1(x), state.local)
+        x = x + local_out
+        ssm_out, ssm_state = self.ssm.step(self.norm2(x), state.ssm)
+        x = x + ssm_out
+        mem = self.lava.read_step(self.norm3(x))
+        x = x + mem
+        if write_memory:
+            self.lava.write_step(x)
+        x = x + self.mlp(self.norm4(x))
+        return x, VBlockState(local=local_state, ssm=ssm_state)

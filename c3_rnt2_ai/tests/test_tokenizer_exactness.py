@@ -3,7 +3,14 @@ from __future__ import annotations
 from c3rnt2.tokenizer.rnt2_model import RNT2Codebook, RNT2Model
 from c3rnt2.tokenizer.rnt2_encode import encode_text
 from c3rnt2.tokenizer.rnt2_decode import decode_stream
-from c3rnt2.tokenizer.vortex_tok import VortexTokModel, VortexMacroCodebook, encode as vortex_encode, decode as vortex_decode
+from c3rnt2.tokenizer.vortex_tok import (
+    VortexTokModel,
+    VortexMacroCodebook,
+    encode as vortex_encode,
+    decode as vortex_decode,
+    encode_to_ids,
+    decode_from_ids,
+)
 
 
 def test_rnt2_exactness():
@@ -51,3 +58,13 @@ def test_vortex_exactness_large(tmp_path):
     file_path.write_text(file_content, encoding="utf-8")
     stream = vortex_encode(file_path.read_text(encoding="utf-8"), model)
     assert vortex_decode(stream, model) == file_content
+
+
+def test_tokenizer_roundtrip_ids():
+    patch = RNT2Codebook.from_builtin(block_size=64)
+    macro = VortexMacroCodebook(sequences=[])
+    model = VortexTokModel(patch_codebook=patch, macro_codebook=macro)
+    text = "roundtrip: {\"a\": 1, \"b\": [2,3]}"
+    ids, total_len = encode_to_ids(text, model)
+    out = decode_from_ids(ids, model, total_len=total_len)
+    assert out == text

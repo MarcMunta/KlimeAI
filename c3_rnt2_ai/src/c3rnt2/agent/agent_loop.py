@@ -30,7 +30,8 @@ def run_demo_agent(settings: dict) -> Dict[str, str]:
     agent_cfg = settings.get("agent", {})
     allowlist = agent_cfg.get("web_allowlist", ["docs.python.org"])
     sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
-    tools = AgentTools(allowlist=allowlist, sandbox_root=sandbox_root)
+    rate_limit = int(agent_cfg.get("rate_limit_per_min", 30))
+    tools = AgentTools(allowlist=allowlist, sandbox_root=sandbox_root, rate_limit_per_min=rate_limit)
     repo = _setup_demo_repo(sandbox_root)
 
     memory = MemoryStore(Path("data") / "memory" / "agent_memory.sqlite")

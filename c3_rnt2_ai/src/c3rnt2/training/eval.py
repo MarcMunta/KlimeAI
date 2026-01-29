@@ -4,6 +4,8 @@ import argparse
 import time
 from pathlib import Path
 
+import torch
+
 from ..tokenizer.rnt2_model import RNT2Model, RNT2Codebook
 from ..tokenizer.rnt2_encode import encode_text
 from ..tokenizer.vortex_tok import VortexTokModel, VortexMacroCodebook, encode as vortex_encode, metrics as vortex_metrics
@@ -39,8 +41,19 @@ def main():
     # Core throughput (approx)
     core = CoreTransformer.from_settings({"core": {"hidden_size": 128, "layers": 2, "heads": 2, "vocab_size": 256}})
     start = time.time()
-    _ = core.generate("def f(x):", max_new_tokens=16)
-    tps = 16 / max(1e-6, time.time() - start)
+    _ = core.generate("def f(x):", max_new_tokens=32)
+    tps_stateful = 32 / max(1e-6, time.time() - start)
+
+    # Naive baseline: recompute full forward each step
+    prompt_ids, _ = core.encode_prompt("def f(x):")
+    generated = list(prompt_ids)
+    start = time.time()
+    for _ in range(16):
+        input_ids = torch.tensor([generated], dtype=torch.long, device=core.device)
+        logits = core.forward(input_ids)[:, -1, :]
+        next_id = int(torch.argmax(logits, dim=-1).item())
+        generated.append(next_id)
+    tps_naive = 16 / max(1e-6, time.time() - start)
 
     device = detect_device()
     vram = device.vram_gb if device.cuda_available else 0.0
@@ -50,7 +63,8 @@ def main():
         "rnt2_ratio": round(ratio, 4),
         "vortex_bytes_per_token": v_metrics["bytes_per_token"],
         "vortex_escapes_pct": v_metrics["escapes_pct"],
-        "tokens_per_second": round(tps, 3),
+        "tokens_per_second_stateful": round(tps_stateful, 3),
+        "tokens_per_second_naive": round(tps_naive, 3),
         "vram_gb": vram,
     })
 
