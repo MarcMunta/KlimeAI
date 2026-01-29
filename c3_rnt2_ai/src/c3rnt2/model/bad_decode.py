@@ -200,6 +200,60 @@ def _sample_logits(
     return sample_idx.squeeze(1)
 
 
+def _sample_logits_topk(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    rep_tracker: _RepetitionTracker,
+    ngram_tracker,
+    top_p_min_k: int = 128,
+    top_p_max_k: int = 512,
+) -> torch.Tensor:
+    if temperature <= 0:
+        return indices.gather(1, torch.argmax(values, dim=-1, keepdim=True)).squeeze(1)
+    work = values.float() / max(1e-6, temperature)
+    # apply repetition penalty on available indices
+    if repetition_penalty > 1.0:
+        rep_ids = set(rep_tracker.ids())
+        if rep_ids:
+            mask = torch.zeros_like(work, dtype=torch.bool)
+            for tok in rep_ids:
+                mask |= (indices == tok)
+            if mask.any():
+                vals = work[mask]
+                adjusted = torch.where(vals > 0, vals / repetition_penalty, vals * repetition_penalty)
+                work = work.clone()
+                work[mask] = adjusted
+    banned = ngram_tracker.banned() if ngram_tracker is not None else set()
+    if banned:
+        mask = torch.zeros_like(work, dtype=torch.bool)
+        for tok in banned:
+            mask |= (indices == tok)
+        if mask.any():
+            work = work.clone()
+            work[mask] = -float("inf")
+    work = torch.nan_to_num(work, neginf=-1e9, posinf=1e9)
+    if top_p < 1.0:
+        k = min(max(8, top_p_min_k), work.size(-1))
+        k = min(k, max(8, top_p_max_k))
+        values_k, idx_k = torch.topk(work, k=k, dim=-1)
+        probs = torch.softmax(values_k, dim=-1)
+        cum = torch.cumsum(probs, dim=-1)
+        cutoff = torch.searchsorted(cum[0], torch.tensor(top_p, device=cum.device, dtype=cum.dtype))
+        cutoff = torch.clamp(cutoff, max=k - 1)
+        mask = torch.arange(k, device=values_k.device).unsqueeze(0) > cutoff
+        values_k = values_k.masked_fill(mask, -float("inf"))
+        probs = torch.softmax(values_k, dim=-1)
+        sample_idx = torch.multinomial(probs, num_samples=1)
+        picked = idx_k.gather(1, sample_idx)
+        return indices.gather(1, picked).squeeze(1)
+    probs = torch.softmax(work, dim=-1)
+    sample_idx = torch.multinomial(probs, num_samples=1)
+    return indices.gather(1, sample_idx).squeeze(1)
+
+
 def _should_restrict_escape(escape_restrict: bool, exact_copy_mode: bool, escape_mode: str) -> bool:
     if exact_copy_mode:
         return True
@@ -239,6 +293,9 @@ def bad_decode(
     use_mtp = bool(use_mtp) and getattr(model, "mtp_k", 0) > 0
     escape_mode = getattr(model, "escape_mode", "")
     restrict_escape = _should_restrict_escape(escape_restrict, exact_copy_mode, escape_mode)
+    stream_topk = bool(getattr(model, "runtime_cfg", {}).get("paged_lm_head_stream_topk", False))
+    if stream_topk:
+        adaptive_granularity = False
 
     with torch.inference_mode():
         with autocast_context(enabled=model.device.type == "cuda", dtype=model.config.dtype):
@@ -321,7 +378,13 @@ def bad_decode(
                 rejected = False
                 if hasattr(model, "step_block") and draft_tokens:
                     token_tensor = torch.tensor([draft_tokens], dtype=torch.long, device=model.device)
-                    if graph_runner is not None and draft_block == block_size:
+                    if stream_topk and hasattr(model, "step_block_topk"):
+                        cfg = getattr(model, "runtime_cfg", {}).get("paged_lm_head_stream_topk", 64)
+                        top_k = int(cfg) if isinstance(cfg, int) else 64
+                        values_seq, indices_seq, state_full = model.step_block_topk(token_tensor, state_full, top_k=top_k, write_memory=True)
+                        logits_seq = None
+                        mtp_seq = None
+                    elif graph_runner is not None and draft_block == block_size:
                         if use_mtp:
                             logits_seq, state_full, mtp_seq = graph_runner(token_tensor, state_full)
                         else:
@@ -336,23 +399,39 @@ def bad_decode(
                             logits_seq, state_full = model.step_block(token_tensor, state_full, write_memory=True)
                             mtp_seq = None
                     ent_mask = None
-                    if adaptive_granularity and restrict_escape:
+                    if adaptive_granularity and restrict_escape and logits_seq is not None:
                         ent_mask = _approx_entropy_seq(logits_seq, top_k=entropy_top_k) > entropy_threshold
                         stats.entropy_high += int(ent_mask.sum().item())
                     for i, tok in enumerate(draft_tokens):
-                        logits_i = logits_seq[:, i, :]
-                        start = getattr(model, "byte_token_start", 0)
-                        tok_full = _sample_logits(
-                            logits_i,
-                            temperature,
-                            top_p,
-                            repetition_penalty,
-                            rep_tracker,
-                            ngram_tracker,
-                            top_p_min_k=top_p_min_k,
-                            top_p_max_k=top_p_max_k,
-                        )
-                        if adaptive_granularity and restrict_escape and ent_mask is not None:
+                        if stream_topk and logits_seq is None:
+                            values_i = values_seq[:, i, :]
+                            indices_i = indices_seq[:, i, :]
+                            tok_full = _sample_logits_topk(
+                                values_i,
+                                indices_i,
+                                temperature,
+                                top_p,
+                                repetition_penalty,
+                                rep_tracker,
+                                ngram_tracker,
+                                top_p_min_k=top_p_min_k,
+                                top_p_max_k=top_p_max_k,
+                            )
+                            start = getattr(model, "byte_token_start", 0)
+                        else:
+                            logits_i = logits_seq[:, i, :]
+                            start = getattr(model, "byte_token_start", 0)
+                            tok_full = _sample_logits(
+                                logits_i,
+                                temperature,
+                                top_p,
+                                repetition_penalty,
+                                rep_tracker,
+                                ngram_tracker,
+                                top_p_min_k=top_p_min_k,
+                                top_p_max_k=top_p_max_k,
+                            )
+                        if adaptive_granularity and restrict_escape and ent_mask is not None and logits_seq is not None:
                             byte_slice = logits_i[:, start : start + 256]
                             tok_byte = _sample_logits(
                                 byte_slice,
@@ -375,7 +454,8 @@ def bad_decode(
                             stats.accepted += 1
                             rep_tracker.add(tok)
                             ngram_tracker.add(tok)
-                            last_logits_full = logits_i
+                            if logits_seq is not None:
+                                last_logits_full = logits_i
                             if use_mtp and mtp_seq is not None:
                                 last_mtp_logits = mtp_seq[:, i, :, :]
                         else:
@@ -384,21 +464,26 @@ def bad_decode(
                             rejected = True
                             rep_tracker.add(next_tok)
                             ngram_tracker.add(next_tok)
-                            last_logits_full = logits_i
+                            if logits_seq is not None:
+                                last_logits_full = logits_i
                             if use_mtp and mtp_seq is not None:
                                 last_mtp_logits = mtp_seq[:, i, :, :]
                             break
                 else:
                     for tok in draft_tokens:
                         if last_logits_full is None:
-                            if use_mtp:
+                            if stream_topk and hasattr(model, "step_topk"):
+                                cfg = getattr(model, "runtime_cfg", {}).get("paged_lm_head_stream_topk", 64)
+                                top_k = int(cfg) if isinstance(cfg, int) else 64
+                                values_full, indices_full, state_full = model.step_topk(generated[-1], state_full, top_k=top_k, write_memory=True)
+                                last_logits_full = None
+                            elif use_mtp:
                                 last_logits_full, state_full, last_mtp_logits = model.step(
                                     generated[-1], state_full, write_memory=True, return_mtp=True
                                 )
                             else:
                                 last_logits_full, state_full = model.step(generated[-1], state_full, write_memory=True)
-                        ent_high = None
-                        if adaptive_granularity and restrict_escape:
+                        if adaptive_granularity and restrict_escape and last_logits_full is not None:
                             ent_high = _approx_entropy(last_logits_full, top_k=entropy_top_k) > entropy_threshold
                             stats.entropy_high += int(ent_high.item())
                         if adaptive_granularity and restrict_escape and ent_high is not None:
@@ -426,16 +511,29 @@ def bad_decode(
                                 top_p_max_k=top_p_max_k,
                             ))
                         else:
-                            tok_choice = _sample_logits(
-                                last_logits_full,
-                                temperature,
-                                top_p,
-                                repetition_penalty,
-                                rep_tracker,
-                                ngram_tracker,
-                                top_p_min_k=top_p_min_k,
-                                top_p_max_k=top_p_max_k,
-                            )
+                            if stream_topk and last_logits_full is None:
+                                tok_choice = _sample_logits_topk(
+                                    values_full,
+                                    indices_full,
+                                    temperature,
+                                    top_p,
+                                    repetition_penalty,
+                                    rep_tracker,
+                                    ngram_tracker,
+                                    top_p_min_k=top_p_min_k,
+                                    top_p_max_k=top_p_max_k,
+                                )
+                            else:
+                                tok_choice = _sample_logits(
+                                    last_logits_full,
+                                    temperature,
+                                    top_p,
+                                    repetition_penalty,
+                                    rep_tracker,
+                                    ngram_tracker,
+                                    top_p_min_k=top_p_min_k,
+                                    top_p_max_k=top_p_max_k,
+                                )
                         next_tok = int(tok_choice.item())
                         if next_tok == tok:
                             generated.append(tok)

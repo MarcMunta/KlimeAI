@@ -7,4 +7,4 @@ from dataclasses import dataclass
 class Sample:
     prompt: str
     response: str
-
+    source_kind: str = "unknown"

@@ -9,6 +9,19 @@ from .patch_ops import PatchResult, apply_patch, propose_patch, validate_patch
 from .safety_kernel import SafetyPolicy
 
 
+def _extract_failures(output: str) -> list[dict]:
+    tasks = []
+    for line in output.splitlines():
+        if line.startswith("FAILED") or line.startswith("ERROR"):
+            tasks.append({"issue": line.strip()})
+    if not tasks:
+        # fallback: include tail of output
+        tail = "
+".join(output.splitlines()[-5:])
+        if tail:
+            tasks.append({"issue": tail})
+    return tasks
+
 def run_improve_loop(repo_root: Path) -> dict:
     run_id = time.strftime("%Y%m%d_%H%M%S")
     run_dir = repo_root / "data" / "selfimprove" / "runs" / run_id
@@ -24,8 +37,10 @@ def run_improve_loop(repo_root: Path) -> dict:
             report["tests_output"] = result.stdout[:500]
         else:
             report["status"] = "tests_failed"
-            report["tests_output"] = (result.stdout + result.stderr)[:500]
-            # No automatic code edits; create empty diff placeholder
+            output = (result.stdout + result.stderr)
+            report["tests_output"] = output[:500]
+            repair_tasks = _extract_failures(output)
+            (run_dir / "repair_tasks.json").write_text(json.dumps(repair_tasks), encoding="utf-8")
             diff = propose_patch(repo_root, {})
             (run_dir / "proposed.diff").write_text(diff, encoding="utf-8")
             validation = validate_patch(repo_root, diff, policy)

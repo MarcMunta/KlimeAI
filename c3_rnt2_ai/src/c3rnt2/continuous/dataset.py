@@ -176,7 +176,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict) -> Col
         prompt = f"Fix the bug: {task}".strip()
         if context:
             prompt = f"{prompt}\nContext:\n{context}"
-        sample = Sample(prompt=prompt, response=diff)
+        sample = Sample(prompt=prompt, response=diff, source_kind="episode")
         gold_samples.append(sample)
         quality = _quality_score(diff, "episode", max_repeat_ratio)
         novelty = _novelty_score(diff, recent_vecs)
@@ -195,6 +195,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict) -> Col
             )
             if inserted:
                 novelty_scores.append(novelty)
+            replay.update_success(replay.hash_sample(sample.prompt, sample.response), delta=1)
         else:
             filtered += 1
 
@@ -208,7 +209,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict) -> Col
             prompt = "Read docs"
         elif chunk.source_kind == "episode":
             prompt = "Review"
-        sample = Sample(prompt=prompt, response=chunk.text)
+        sample = Sample(prompt=prompt, response=chunk.text, source_kind=chunk.source_kind)
         quality = _quality_score(chunk.text, chunk.source_kind, max_repeat_ratio)
         novelty = _novelty_score(chunk.text, recent_vecs)
         total_candidates += 1
@@ -225,6 +226,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict) -> Col
             )
             if inserted:
                 novelty_scores.append(novelty)
+            replay.update_success(replay.hash_sample(sample.prompt, sample.response), delta=1)
         else:
             filtered += 1
 

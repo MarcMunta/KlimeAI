@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .config import load_settings
-from .model.core_transformer import CoreTransformer
+from .model.core_transformer import CoreTransformer, save_checkpoint
 from .training import eval as eval_mod
 from .tokenizer import rnt2_train
 from .agent.agent_loop import run_demo_agent
@@ -124,6 +124,13 @@ def cmd_apply_patch(args: argparse.Namespace) -> None:
     print({"ok": result.ok, "message": result.message})
 
 
+def cmd_save_checkpoint(args: argparse.Namespace) -> None:
+    settings = load_settings(args.profile)
+    model = CoreTransformer.from_settings(settings)
+    save_checkpoint(model, Path(args.out), settings)
+    print({"ok": True, "path": args.out})
+
+
 def cmd_ingest(args: argparse.Namespace) -> None:
     settings = load_settings(args.profile)
     allowlist = settings.get("agent", {}).get("web_allowlist", [])
@@ -186,6 +193,11 @@ def main() -> None:
     ap.add_argument("--diff", required=True)
     ap.add_argument("--approve", action="store_true")
     ap.set_defaults(func=cmd_apply_patch)
+
+    sc = sub.add_parser("save-checkpoint")
+    sc.add_argument("--out", required=True)
+    sc.add_argument("--profile", default=None)
+    sc.set_defaults(func=cmd_save_checkpoint)
 
     ing = sub.add_parser("ingest")
     ing.add_argument("--profile", default=None)

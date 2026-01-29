@@ -39,6 +39,11 @@ class ContinualTrainer:
 
     def run_tick(self) -> TrainResult:
         run_id, _run_path = begin_run(self.base_dir)
+        seed = self.settings.get("continuous", {}).get("seed")
+        if seed is not None:
+            random.seed(int(seed))
+            torch.manual_seed(int(seed))
+
         try:
             allowlist = self.settings.get("agent", {}).get("web_allowlist", ["docs.python.org"])
             collected = collect_samples(self.base_dir, allowlist, self.settings)
@@ -105,17 +110,25 @@ class ContinualTrainer:
             optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=float(self.settings.get("continuous", {}).get("lr", 1e-4)))
             max_steps = int(self.settings.get("continuous", {}).get("max_steps_per_tick", self.settings.get("continuous", {}).get("max_steps", 50)))
             batch_tokens = int(self.settings.get("continuous", {}).get("batch_tokens", 2048))
+            grad_accum_steps = int(self.settings.get("continuous", {}).get("grad_accum_steps", 1))
 
             model.train()
+            source_weights = self.settings.get("continuous", {}).get("source_weights", {}) or {}
+            sample_weights = [float(source_weights.get(getattr(s, "source_kind", "unknown"), 1.0)) for s in train_samples]
             use_scaler = model.device.type == "cuda" and model.dtype == torch.float16
             scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
             loss_val = 0.0
+            tokens_seen = 0
+            seq_lens = []
+            start_time = time.time()
+            step_idx = 0
+            optimizer.zero_grad(set_to_none=True)
             for _ in range(max_steps):
                 sequences = []
                 token_count = 0
                 attempts = 0
                 while token_count < batch_tokens and attempts < max(4, len(train_samples)):
-                    sample = random.choice(train_samples)
+                    sample = random.choices(train_samples, weights=sample_weights, k=1)[0]
                     text = format_chat_sample(sample)
                     ids, _ = model.encode_prompt(text)
                     attempts += 1
@@ -127,12 +140,13 @@ class ContinualTrainer:
                 if not sequences:
                     continue
                 inputs = [seq[:-1] for seq in sequences]
+                seq_lens.extend([len(seq) for seq in sequences])
+                tokens_seen += sum(len(seq) for seq in sequences)
                 targets = [seq[1:] for seq in sequences]
                 input_ids = pad_sequence(inputs, batch_first=True, padding_value=0).to(model.device)
                 target_ids = pad_sequence(targets, batch_first=True, padding_value=-100).to(model.device)
                 for block in model.blocks:
                     block.lava.reset_stats()
-                optimizer.zero_grad(set_to_none=True)
                 mtp_weight = float(self.settings.get("continuous", {}).get("mtp_loss_weight", 0.1))
                 with autocast_context(enabled=model.device.type == "cuda", dtype=model.config.dtype):
                     logits, _mtp_logits, aux_loss = model.forward_with_aux(
@@ -141,18 +155,31 @@ class ContinualTrainer:
                         return_aux=True,
                     )
                     loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), ignore_index=-100)
+                    loss = loss / max(1, grad_accum_steps)
                     if aux_loss is not None:
                         loss = loss + mtp_weight * aux_loss
                     mem_cost = sum(block.lava.stats.reads + block.lava.stats.writes for block in model.blocks)
                     loss = loss + 1e-6 * mem_cost
                 if use_scaler:
                     scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                step_idx += 1
+                if step_idx % grad_accum_steps == 0:
+                    if use_scaler:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                loss_val = float(loss.item())
+            if step_idx % grad_accum_steps != 0:
+                if use_scaler:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    loss.backward()
                     optimizer.step()
-                loss_val = float(loss.item())
+                optimizer.zero_grad(set_to_none=True)
 
             new_loss = self._eval_loss(model, holdout)
             anchor_new_loss = self._eval_loss(model, anchors) if anchors else None
@@ -181,6 +208,21 @@ class ContinualTrainer:
 
             # Save adapter for this run
             save_lora_state(model, self._adapter_path(run_id))
+            elapsed = max(1e-6, time.time() - start_time)
+            avg_seq_len = sum(seq_lens) / max(1, len(seq_lens))
+            tokens_per_sec = tokens_seen / elapsed
+            gpu_mem = None
+            if model.device.type == "cuda":
+                try:
+                    gpu_mem = float(torch.cuda.max_memory_allocated() / (1024**2))
+                except Exception:
+                    gpu_mem = None
+            lm_stats = {}
+            if hasattr(model.lm_head, "stats"):
+                try:
+                    lm_stats = model.lm_head.stats()
+                except Exception:
+                    lm_stats = {}
             finalize_run(
                 self.base_dir,
                 run_id,
@@ -197,6 +239,11 @@ class ContinualTrainer:
                     "samples": len(samples),
                     "stats": stats.__dict__,
                     "ts": time.time(),
+                    "seed": self.settings.get("continuous", {}).get("seed"),
+                    "tokens_per_sec": tokens_per_sec,
+                    "avg_seq_len": avg_seq_len,
+                    "gpu_mem_mb": gpu_mem,
+                    "lm_head_stats": lm_stats,
                 },
             )
 

@@ -85,6 +85,64 @@ class PagedLinear(nn.Module):
             accum_fp32=accum_fp32,
         )
 
+    def forward_topk(self, x: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if k <= 0:
+            raise ValueError("k must be > 0")
+        orig_shape = x.shape
+        if x.dim() == 3:
+            x_flat = x.reshape(-1, orig_shape[-1])
+        else:
+            x_flat = x
+        if x_flat.size(-1) != self.in_features:
+            raise ValueError("PagedLinear input feature mismatch")
+        if k >= self.out_features:
+            logits = self.forward(x)
+            values, indices = torch.topk(logits, k=min(k, logits.size(-1)), dim=-1)
+            return values, indices
+
+        compute_dtype = torch.float32 if self.accum_fp32 else x_flat.dtype
+        x_compute = x_flat if x_flat.dtype == compute_dtype else x_flat.to(dtype=compute_dtype)
+        out_tiles = self.store.out_tiles
+        in_tiles = self.store.in_tiles
+        top_vals = None
+        top_idx = None
+        for out_idx in range(out_tiles):
+            tile_ids = self.store.tile_ids_for_out(out_idx)
+            if self.paged.prefetcher is not None:
+                next_out = out_idx + 1
+                if next_out < out_tiles:
+                    self.paged.prefetch(self.store.tile_ids_for_out(next_out))
+            tiles = self.paged.request_tiles(tile_ids)
+            out_start = out_idx * self.tile_out
+            out_end = min(self.out_features, out_start + self.tile_out)
+            if self.tile_in >= self.in_features or in_tiles == 1:
+                weight = tiles[0]
+                if weight.dtype != compute_dtype:
+                    weight = weight.to(dtype=compute_dtype)
+                out_chunk = torch.matmul(x_compute, weight.transpose(0, 1))
+            else:
+                weights = tiles
+                if any(tile.dtype != compute_dtype for tile in tiles):
+                    weights = [tile if tile.dtype == compute_dtype else tile.to(dtype=compute_dtype) for tile in tiles]
+                weight_full = torch.cat(weights, dim=1)
+                out_chunk = torch.matmul(x_compute, weight_full.transpose(0, 1))
+            if self.bias is not None:
+                bias = self.bias if self.bias.dtype == compute_dtype else self.bias.to(dtype=compute_dtype)
+                out_chunk = out_chunk + bias[out_start:out_end]
+            vals, idx = torch.topk(out_chunk, k=min(k, out_chunk.size(-1)), dim=-1)
+            idx = idx + out_start
+            if top_vals is None:
+                top_vals = vals
+                top_idx = idx
+            else:
+                cat_vals = torch.cat([top_vals, vals], dim=-1)
+                cat_idx = torch.cat([top_idx, idx], dim=-1)
+                top_vals, top_pos = torch.topk(cat_vals, k=k, dim=-1)
+                top_idx = cat_idx.gather(1, top_pos)
+        if top_vals is None or top_idx is None:
+            raise RuntimeError("topk computation failed")
+        return top_vals, top_idx
+
     def stats(self) -> Dict[str, float]:
         return {
             "page_faults": float(self.paged.stats.page_faults),

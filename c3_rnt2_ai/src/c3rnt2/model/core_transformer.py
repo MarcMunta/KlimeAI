@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Iterable, List, Tuple, overload, Literal
 
@@ -114,6 +115,43 @@ class VortexXConfig:
     device: str | None = None
 
 
+def _settings_hash(settings: dict) -> str:
+    try:
+        payload = json.dumps(settings, sort_keys=True, default=str)
+    except Exception:
+        payload = str(settings)
+    return str(abs(hash(payload)))
+
+
+def save_checkpoint(model: "CoreTransformer", path: str | Path, settings: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tok_cfg = settings.get("tokenizer", {})
+    payload = {
+        "model_state": model.state_dict(),
+        "settings_hash": _settings_hash(settings),
+        "tokenizer_paths": {
+            "vortex_tok_path": tok_cfg.get("vortex_tok_path", tok_cfg.get("vortex_model_path")),
+            "rnt2_model_path": tok_cfg.get("rnt2_model_path"),
+        },
+    }
+    torch.save(payload, path)
+
+
+def _load_checkpoint(model: "CoreTransformer", path: str | Path) -> None:
+    path = Path(path)
+    if not path.exists():
+        return
+    payload = torch.load(path, map_location="cpu")
+    state = payload.get("model_state", payload)
+    model.load_state_dict(state, strict=False)
+    model.checkpoint_meta = {
+        "settings_hash": payload.get("settings_hash"),
+        "tokenizer_paths": payload.get("tokenizer_paths", {}),
+    }
+
+
+
 class CoreTransformer(nn.Module):
     """VORTEX-X core using V-Blocks and LAVA memory."""
 
@@ -172,6 +210,8 @@ class CoreTransformer(nn.Module):
         self._depth_tokens = 0
         self._depth_total = 0
         self.draft_model: DraftModel | None = None
+        self.runtime_cfg: dict[str, Any] = {}
+        self.checkpoint_meta: dict[str, Any] = {}
 
     @staticmethod
     def from_settings(settings: dict) -> "CoreTransformer":
@@ -244,6 +284,10 @@ class CoreTransformer(nn.Module):
         model.bad_entropy = float(bad_cfg.get("entropy_threshold", decode_cfg.get("entropy_threshold", 3.5)))
         model.decode_cfg = decode_cfg
         model.depth_gating = settings.get("depth_gating", {}) or {}
+        model.runtime_cfg = settings.get("runtime", {}) or {}
+        ckpt = core.get("checkpoint_path")
+        if ckpt:
+            _load_checkpoint(model, ckpt)
         model.to(device_info.device, dtype=model.dtype if device_info.device.startswith("cuda") else None)
         lava_state_path = vx_cfg.get("lava_state_path")
         if lava_state_path and bool(vx_cfg.get("lava_state_autoload", False)):
@@ -535,6 +579,49 @@ class CoreTransformer(nn.Module):
             return outputs[0], outputs[1]  # type: ignore[return-value]
         return tuple(outputs)
 
+    def step_topk(
+        self,
+        token_id: int,
+        state: List[VBlockState],
+        top_k: int,
+        num_layers: int | None = None,
+        write_memory: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, List[VBlockState]]:
+        input_ids = torch.tensor([[token_id]], dtype=torch.long, device=self.device)
+        with autocast_context(enabled=self.device.type == "cuda", dtype=self.config.dtype):
+            x = self.embed(input_ids).squeeze(1)
+            new_state: List[VBlockState] = []
+            depth_used = num_layers or self.config.layers
+            for idx, block in enumerate(self.blocks[:depth_used]):
+                x, layer_state = block.step(x, state[idx], write_memory=write_memory)
+                new_state.append(layer_state)
+            x = self.norm(x)
+            values, indices = self.lm_head_topk(x, top_k)
+        return values, indices, new_state + state[depth_used:]
+
+    def step_block_topk(
+        self,
+        token_ids: torch.Tensor,
+        state: List[VBlockState],
+        top_k: int,
+        num_layers: int | None = None,
+        write_memory: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, List[VBlockState]]:
+        if token_ids.dim() == 1:
+            token_ids = token_ids.unsqueeze(0)
+        if token_ids.device != self.device:
+            token_ids = token_ids.to(self.device)
+        with autocast_context(enabled=self.device.type == "cuda", dtype=self.config.dtype):
+            x = self.embed(token_ids)
+            new_state: List[VBlockState] = []
+            depth_used = num_layers or self.config.layers
+            for idx, block in enumerate(self.blocks[:depth_used]):
+                x, layer_state = block.step_block(x, state[idx], write_memory=write_memory)
+                new_state.append(layer_state)
+            x = self.norm(x)
+            values, indices = self.lm_head_topk(x, top_k)
+        return values, indices, new_state + state[depth_used:]
+
     def step_block(
         self,
         token_ids: torch.Tensor,
@@ -590,6 +677,13 @@ class CoreTransformer(nn.Module):
     def depth_stats(self) -> dict:
         avg_depth = (self._depth_total / self._depth_tokens) if self._depth_tokens else 0.0
         return {"avg_depth_used": avg_depth, "tokens": self._depth_tokens}
+
+    def lm_head_topk(self, x: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if hasattr(self.lm_head, "forward_topk"):
+            return self.lm_head.forward_topk(x, k)
+        logits = self.lm_head(x)
+        values, indices = torch.topk(logits, k=min(k, logits.size(-1)), dim=-1)
+        return values, indices
 
     def generate(self, prompt: str, max_new_tokens: int = 32, **kwargs) -> str:
         bad_cfg = {

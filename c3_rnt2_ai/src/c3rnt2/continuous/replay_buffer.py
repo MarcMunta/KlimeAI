@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -25,9 +26,15 @@ class ReplayItem:
 
 
 class ReplayBuffer:
-    def __init__(self, db_path: Path):
+    @staticmethod
+    def hash_sample(prompt: str, response: str) -> str:
+        return _hash_sample(prompt, response)
+
+
+    def __init__(self, db_path: Path, age_weight: float = 0.01):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.age_weight = float(age_weight)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -50,6 +57,7 @@ class ReplayBuffer:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_quality ON replay(quality_score)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_novelty ON replay(novelty_score)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_created ON replay(created_ts)")
             conn.commit()
 
     def add(self, item: ReplayItem, max_items: Optional[int] = None) -> bool:
@@ -81,6 +89,14 @@ class ReplayBuffer:
             self._enforce_max_items(max_items)
         return inserted
 
+    def update_success(self, digest: str, delta: int = 1) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE replay SET success_count = success_count + ? WHERE hash = ?",
+                (int(delta), digest),
+            )
+            conn.commit()
+
     def _enforce_max_items(self, max_items: int) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute("SELECT COUNT(*) FROM replay")
@@ -93,11 +109,12 @@ class ReplayBuffer:
                 DELETE FROM replay
                 WHERE hash IN (
                     SELECT hash FROM replay
-                    ORDER BY (quality_score + novelty_score + success_count) ASC, created_ts ASC
+                    ORDER BY (quality_score + novelty_score + success_count - (? * ((strftime('%s','now') - created_ts) / 86400.0))) ASC,
+                             created_ts ASC
                     LIMIT ?
                 )
                 """,
-                (overflow,),
+                (self.age_weight, overflow),
             )
             conn.commit()
 
@@ -113,6 +130,33 @@ class ReplayBuffer:
             )
             return [f"{row[0]}\n{row[1]}".strip() for row in cur.fetchall()]
 
+    def _sample_random_rows(self, conn: sqlite3.Connection, count: int) -> List[Sample]:
+        if count <= 0:
+            return []
+        cur = conn.execute("SELECT MIN(rowid), MAX(rowid) FROM replay")
+        row = cur.fetchone()
+        if not row or row[0] is None or row[1] is None:
+            return []
+        min_id, max_id = int(row[0]), int(row[1])
+        samples: List[Sample] = []
+        seen: set[int] = set()
+        tries = 0
+        while len(samples) < count and tries < count * 5:
+            tries += 1
+            rid = random.randint(min_id, max_id)
+            if rid in seen:
+                continue
+            cur = conn.execute("SELECT rowid, prompt, response FROM replay WHERE rowid >= ? LIMIT 1", (rid,))
+            found = cur.fetchone()
+            if not found:
+                continue
+            rowid, prompt, response = found
+            if rowid in seen:
+                continue
+            seen.add(int(rowid))
+            samples.append(Sample(prompt=prompt, response=response))
+        return samples
+
     def sample(self, batch_size: int, top_frac: float = 0.7, random_frac: float = 0.3) -> List[Sample]:
         if batch_size <= 0:
             return []
@@ -124,30 +168,20 @@ class ReplayBuffer:
             top_n = min(1, batch_size)
         samples: List[Sample] = []
         with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """
-                SELECT hash, prompt, response FROM replay
-                ORDER BY (quality_score + novelty_score + success_count) DESC
-                LIMIT ?
-                """,
-                (top_n,),
-            )
-            top_rows = cur.fetchall()
-            remaining = batch_size - len(top_rows)
-            rand_n = max(rand_n, remaining)
-            for _hash, prompt, response in top_rows:
-                samples.append(Sample(prompt=prompt, response=response))
-            if rand_n > 0:
+            if top_n > 0:
                 cur = conn.execute(
                     """
                     SELECT hash, prompt, response FROM replay
-                    ORDER BY RANDOM()
+                    ORDER BY (quality_score + novelty_score + success_count) DESC
                     LIMIT ?
                     """,
-                    (rand_n,),
+                    (top_n,),
                 )
-                for _hash, prompt, response in cur.fetchall():
+                top_rows = cur.fetchall()
+                for _hash, prompt, response in top_rows:
                     samples.append(Sample(prompt=prompt, response=response))
+            if rand_n > 0:
+                samples.extend(self._sample_random_rows(conn, rand_n))
         unique: dict[str, Sample] = {}
         for sample in samples:
             digest = _hash_sample(sample.prompt, sample.response)

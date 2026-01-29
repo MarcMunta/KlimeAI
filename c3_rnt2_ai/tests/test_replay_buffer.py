@@ -22,3 +22,14 @@ def test_replay_dedup_priority(tmp_path) -> None:
     samples = buffer.sample(batch_size=1, top_frac=1.0, random_frac=0.0)
     assert len(samples) == 1
     assert samples[0].response == "r1"
+
+
+def test_replay_eviction_respects_max(tmp_path) -> None:
+    path = tmp_path / "replay.sqlite"
+    buffer = ReplayBuffer(path)
+    for i in range(5):
+        item = ReplayItem(sample=Sample(prompt=f"p{i}", response=f"r{i}"), source_kind="logs", quality_score=0.1, novelty_score=0.1, success_count=0)
+        buffer.add(item, max_items=3)
+    with sqlite3.connect(path) as conn:
+        cur = conn.execute("SELECT COUNT(*) FROM replay")
+        assert int(cur.fetchone()[0]) == 3

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -58,6 +59,15 @@ def doctor():
         except Exception as exc:
             status[name] = f"missing ({exc.__class__.__name__})"
     rprint({"deps": status})
+
+    tracked_env = []
+    try:
+        result = subprocess.run(["git", "ls-files", ".env", ".mypy_cache"], capture_output=True, text=True)
+        tracked_env = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except Exception:
+        tracked_env = []
+    if tracked_env:
+        rprint({"warning": "tracked_sensitive_files", "files": tracked_env})
 
 
 @app.command()
@@ -123,4 +133,5 @@ def demo_agent(profile: Optional[str] = None):
 
 
 if __name__ == "__main__":
-    app()
+    app()
+

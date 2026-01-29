@@ -5,6 +5,7 @@ import math
 import sqlite3
 import time
 import hashlib
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -42,6 +43,16 @@ def _dot(a: List[float], b: List[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def _vec_to_blob(vec: List[float]) -> bytes:
+    return array("f", vec).tobytes()
+
+
+def _blob_to_vec(blob: bytes) -> List[float]:
+    arr = array("f")
+    arr.frombytes(blob)
+    return list(arr)
+
+
 @dataclass
 class KnowledgeChunk:
     text: str
@@ -58,8 +69,17 @@ class KnowledgeStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS docs (
@@ -69,6 +89,7 @@ class KnowledgeStore:
                     text TEXT,
                     hash TEXT UNIQUE,
                     ts REAL,
+                    vec_blob BLOB,
                     vec_json TEXT,
                     quality REAL,
                     tokens_est INTEGER,
@@ -78,7 +99,36 @@ class KnowledgeStore:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_hash ON docs(hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_tokens ON docs(tokens_est)")
+            # Ensure vec_blob column exists for older DBs
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(docs)").fetchall()]
+            if "vec_blob" not in cols:
+                conn.execute("ALTER TABLE docs ADD COLUMN vec_blob BLOB")
+            try:
+                conn.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
+                    USING fts5(text, source_kind, source_ref, content='docs', content_rowid='id')
+                    """
+                )
+                conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+            except Exception:
+                pass
             conn.commit()
+            self._migrate_vec_json(conn)
+
+    def _migrate_vec_json(self, conn: sqlite3.Connection) -> None:
+        try:
+            rows = conn.execute("SELECT id, vec_json FROM docs WHERE vec_blob IS NULL AND vec_json IS NOT NULL").fetchall()
+        except Exception:
+            return
+        for row_id, vec_json in rows:
+            try:
+                vec = json.loads(vec_json)
+                blob = _vec_to_blob(vec)
+            except Exception:
+                continue
+            conn.execute("UPDATE docs SET vec_blob = ? WHERE id = ?", (blob, row_id))
+        conn.commit()
 
     def _chunk_text(self, text: str, min_chars: int = 800, max_chars: int = 1500, overlap: int = 200) -> List[str]:
         cleaned = _normalize_text(text)
@@ -108,52 +158,78 @@ class KnowledgeStore:
     ) -> int:
         ts_val = ts if ts is not None else time.time()
         added = 0
-        for chunk in self._chunk_text(text):
-            normalized = _normalize_text(chunk)
-            if not normalized:
-                continue
-            digest = _hash_text(normalized)
-            vec = _normalize_vec(embed_text(normalized, dim=self.dim))
-            tokens_est = max(1, len(_tokenize(normalized)))
-            with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            for chunk in self._chunk_text(text):
+                normalized = _normalize_text(chunk)
+                if not normalized:
+                    continue
+                digest = _hash_text(normalized)
+                vec = _normalize_vec(embed_text(normalized, dim=self.dim))
+                tokens_est = max(1, len(_tokenize(normalized)))
+                blob = _vec_to_blob(vec)
                 cur = conn.execute(
                     """
-                    INSERT OR IGNORE INTO docs (source_kind, source_ref, text, hash, ts, vec_json, quality, tokens_est)
+                    INSERT OR IGNORE INTO docs (source_kind, source_ref, text, hash, ts, vec_blob, quality, tokens_est)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (source_kind, source_ref, normalized, digest, ts_val, json.dumps(vec), quality, tokens_est),
+                    (source_kind, source_ref, normalized, digest, ts_val, blob, quality, tokens_est),
                 )
                 if cur.rowcount:
                     added += 1
-                conn.commit()
+                    try:
+                        row_id = cur.lastrowid
+                        conn.execute(
+                            "INSERT INTO docs_fts(rowid, text, source_kind, source_ref) VALUES (?, ?, ?, ?)",
+                            (row_id, normalized, source_kind, source_ref),
+                        )
+                    except Exception:
+                        pass
+            conn.commit()
         return added
 
     def count_new_since(self, since_ts: float) -> int:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cur = conn.execute("SELECT COUNT(*) FROM docs WHERE ts > ?", (since_ts,))
             row = cur.fetchone()
             return int(row[0]) if row else 0
+
+    def _fts_prefilter(self, conn: sqlite3.Connection, query: str, limit: int) -> List[int]:
+        try:
+            cur = conn.execute("SELECT rowid FROM docs_fts WHERE docs_fts MATCH ? LIMIT ?", (query, limit))
+            return [int(row[0]) for row in cur.fetchall()]
+        except Exception:
+            return []
 
     def retrieve(self, query: str, top_k: int = 5, min_quality: float = 0.0) -> List[KnowledgeChunk]:
         qvec = _normalize_vec(embed_text(query, dim=self.dim))
         qtokens = max(1, len(_tokenize(query)))
         min_tokens = max(1, int(qtokens * 0.3))
         max_tokens = max(50, int(qtokens * 8.0))
-        candidates: List[Tuple[str, str, str, str]] = []
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """
-                SELECT text, vec_json, source_kind, source_ref
-                FROM docs
-                WHERE tokens_est BETWEEN ? AND ? AND quality >= ?
-                """,
-                (min_tokens, max_tokens, min_quality),
-            )
-            candidates = cur.fetchall()
+        candidates: List[Tuple[str, bytes, str, str]] = []
+        with self._connect() as conn:
+            ids = self._fts_prefilter(conn, query, limit=max(20, top_k * 6))
+            if ids:
+                placeholders = ",".join(["?"] * len(ids))
+                cur = conn.execute(
+                    f"SELECT text, vec_blob, source_kind, source_ref FROM docs WHERE id IN ({placeholders}) AND quality >= ?",
+                    (*ids, min_quality),
+                )
+                candidates = cur.fetchall()
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT text, vec_blob, source_kind, source_ref
+                    FROM docs
+                    WHERE tokens_est BETWEEN ? AND ? AND quality >= ?
+                    """,
+                    (min_tokens, max_tokens, min_quality),
+                )
+                candidates = cur.fetchall()
         scored: List[KnowledgeChunk] = []
-        for text, vec_json, source_kind, source_ref in candidates:
+        for text, vec_blob, source_kind, source_ref in candidates:
             try:
-                vec = json.loads(vec_json)
+                vec = _blob_to_vec(vec_blob) if vec_blob is not None else []
             except Exception:
                 continue
             score = _dot(qvec, vec)
@@ -167,14 +243,14 @@ class KnowledgeStore:
         if not chunks:
             return
         hashes = [_hash_text(chunk.text) for chunk in chunks]
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             for digest in hashes:
                 conn.execute("UPDATE docs SET use_count = use_count + 1 WHERE hash = ?", (digest,))
             conn.commit()
 
     def sample_chunks(self, limit: int = 50, min_quality: float = 0.0) -> List[KnowledgeChunk]:
         chunks: List[KnowledgeChunk] = []
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cur = conn.execute(
                 """
                 SELECT text, source_kind, source_ref, quality

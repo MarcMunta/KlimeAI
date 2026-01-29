@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+Thumbs.db
+
+# data artifacts
+/data/*
+!/data/examples/**
+!/data/bench/**

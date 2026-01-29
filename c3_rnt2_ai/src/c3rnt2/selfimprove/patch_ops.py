@@ -8,8 +8,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+import json
 
 from .safety_kernel import SafetyPolicy, is_forbidden, normalize_path
+def _log_episode(repo_root: Path, payload: dict) -> None:
+    path = repo_root / "data" / "episodes" / "agent.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
 
 
 @dataclass
@@ -90,6 +97,20 @@ def apply_patch(repo_root: Path, diff_text: str, approve: bool = False) -> Patch
     diff_file.write_text(diff_text, encoding="utf-8")
     try:
         subprocess.run(["git", "apply", str(diff_file)], cwd=str(repo_root), check=True)
+        tests_ok = None
+        tests_output = ""
+        if approve:
+            result = subprocess.run(["pytest", "-q"], cwd=str(repo_root), capture_output=True, text=True)
+            tests_ok = result.returncode == 0
+            tests_output = (result.stdout + result.stderr)[:500]
+            _log_episode(repo_root, {
+                "task": "self-improve apply_patch",
+                "prompt": "pytest -q",
+                "patch": diff_text,
+                "tests_ok": tests_ok,
+                "tests_output_excerpt": tests_output,
+                "timestamp": time.time(),
+            })
     except Exception as exc:
         return PatchResult(ok=False, message=f"apply failed: {exc}")
     finally:

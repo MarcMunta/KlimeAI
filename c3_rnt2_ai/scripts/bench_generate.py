@@ -53,6 +53,10 @@ def main() -> None:
     _ids, _total = core.encode_prompt(args.prompt)
     time_tokenizer_ms = (time.time() - tok_start) * 1000.0
 
+    stream_topk = bool(settings.get("runtime", {}).get("paged_lm_head_stream_topk", False))
+    if stream_topk:
+        core.runtime_cfg["paged_lm_head_stream_topk"] = False
+
     start = time.time()
     _text, stats = bad_decode(
         core,
@@ -76,11 +80,39 @@ def main() -> None:
     elapsed = max(1e-6, time.time() - start)
     tokens_per_sec = args.max_new_tokens / elapsed
 
+    stream_tps = None
+    if stream_topk:
+        core.runtime_cfg["paged_lm_head_stream_topk"] = settings.get("runtime", {}).get("paged_lm_head_stream_topk")
+        start = time.time()
+        _text_s, _stats_s = bad_decode(
+            core,
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+            block_size=block_size,
+            entropy_threshold=entropy_threshold,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram=no_repeat_ngram,
+            adaptive_granularity=adaptive_granularity,
+            entropy_top_k=entropy_top_k,
+            penalty_window=penalty_window,
+            top_p_min_k=top_p_min_k,
+            top_p_max_k=top_p_max_k,
+            exact_copy_mode=exact_copy_mode,
+            escape_restrict=escape_restrict,
+            use_mtp=use_mtp,
+        )
+        elapsed_s = max(1e-6, time.time() - start)
+        stream_tps = args.max_new_tokens / elapsed_s
+        core.runtime_cfg["paged_lm_head_stream_topk"] = False
+
     depth_stats = core.depth_stats()
     lava_reads = sum(block.lava.stats.reads for block in core.blocks)
     lava_writes = sum(block.lava.stats.writes for block in core.blocks)
     result = {
         "tokens_per_second": round(tokens_per_sec, 3),
+        "tokens_per_second_stream_topk": round(stream_tps, 3) if stream_tps else None,
         "time_tokenizer_ms": round(time_tokenizer_ms, 3),
         "proposed": stats.proposed,
         "accepted": stats.accepted,
