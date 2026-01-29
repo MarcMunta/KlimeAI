@@ -30,6 +30,7 @@ class PagedLinear(nn.Module):
         device: str = "cpu",
         prefetch_depth: int = 2,
         pin_memory: bool = True,
+        accum_fp32: bool = False,
     ) -> None:
         super().__init__()
         self.store = store
@@ -38,6 +39,7 @@ class PagedLinear(nn.Module):
         self.tile_out = store.tile_out
         self.tile_in = store.tile_in
         self.device = device
+        self.accum_fp32 = accum_fp32
         self.cache = CacheManager(capacity_bytes=int(cache_budget_bytes))
         self.paged = PagedWeights(
             tile_store=store.tiles,
@@ -62,6 +64,7 @@ class PagedLinear(nn.Module):
         device: str = "cpu",
         prefetch_depth: int = 2,
         pin_memory: bool = True,
+        accum_fp32: bool = False,
     ) -> "PagedLinear":
         if not isinstance(linear, nn.Linear):
             raise TypeError("from_linear expects nn.Linear")
@@ -79,6 +82,7 @@ class PagedLinear(nn.Module):
             device=device,
             prefetch_depth=prefetch_depth,
             pin_memory=pin_memory,
+            accum_fp32=accum_fp32,
         )
 
     def stats(self) -> Dict[str, float]:
@@ -98,12 +102,14 @@ class PagedLinear(nn.Module):
         if x_flat.size(-1) != self.in_features:
             raise ValueError("PagedLinear input feature mismatch")
 
-        out = x_flat.new_zeros(x_flat.size(0), self.out_features)
+        compute_dtype = torch.float32 if self.accum_fp32 else x_flat.dtype
+        x_compute = x_flat if x_flat.dtype == compute_dtype else x_flat.to(dtype=compute_dtype)
         out_tiles = self.store.out_tiles
         in_tiles = self.store.in_tiles
         bias = self.bias
-        if bias is not None and bias.dtype != x_flat.dtype:
-            bias = bias.to(dtype=x_flat.dtype)
+        if bias is not None and bias.dtype != compute_dtype:
+            bias = bias.to(dtype=compute_dtype)
+        out_chunks = []
         for out_idx in range(out_tiles):
             tile_ids = self.store.tile_ids_for_out(out_idx)
             if self.paged.prefetcher is not None:
@@ -113,18 +119,23 @@ class PagedLinear(nn.Module):
             tiles = self.paged.request_tiles(tile_ids)
             out_start = out_idx * self.tile_out
             out_end = min(self.out_features, out_start + self.tile_out)
-            out_chunk = None
-            for in_idx, tile in enumerate(tiles):
-                in_start = in_idx * self.tile_in
-                in_end = min(self.in_features, in_start + self.tile_in)
-                x_slice = x_flat[:, in_start:in_end]
-                if tile.dtype != x_flat.dtype:
-                    tile = tile.to(dtype=x_flat.dtype)
-                chunk = x_slice @ tile.transpose(0, 1)
-                out_chunk = chunk if out_chunk is None else (out_chunk + chunk)
+            if self.tile_in >= self.in_features or in_tiles == 1:
+                weight = tiles[0]
+                if weight.dtype != compute_dtype:
+                    weight = weight.to(dtype=compute_dtype)
+                out_chunk = torch.matmul(x_compute, weight.transpose(0, 1))
+            else:
+                weights = tiles
+                if any(tile.dtype != compute_dtype for tile in tiles):
+                    weights = [tile if tile.dtype == compute_dtype else tile.to(dtype=compute_dtype) for tile in tiles]
+                weight_full = torch.cat(weights, dim=1)
+                out_chunk = torch.matmul(x_compute, weight_full.transpose(0, 1))
             if bias is not None:
                 out_chunk = out_chunk + bias[out_start:out_end]
-            out[:, out_start:out_end] = out_chunk
+            out_chunks.append(out_chunk)
+        out = torch.cat(out_chunks, dim=1)
+        if out.dtype != x_flat.dtype:
+            out = out.to(dtype=x_flat.dtype)
         if x.dim() == 3:
             return out.view(orig_shape[0], orig_shape[1], self.out_features)
         return out

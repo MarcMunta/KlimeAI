@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple, Any
+from typing import Dict, Iterable, List, Any
 
 import numpy as np
+
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
 
 from .cache_manager import CacheManager
 from .gpu_decompress import decompress_to_tensor
@@ -38,6 +43,7 @@ class PagedWeights:
         self.non_blocking = device.startswith("cuda")
         self.stats = PagedWeightsStats()
         self._prefetched: set[int] = set()
+        self._prefetch_events: Dict[int, object] = {}
         self.prefetcher = Prefetcher(
             self._load_tile_payload,
             depth=prefetch_depth,
@@ -50,12 +56,16 @@ class PagedWeights:
         tile = self.tile_store[tile_id]
         codec = None
         shape = None
-        size_bytes = 0
+        compressed_bytes = 0
+        tensor = None
         if isinstance(tile, dict):
             payload = tile.get("payload")
             codec = tile.get("codec")
             shape = tuple(tile.get("shape")) if tile.get("shape") else None
-            size_bytes = int(tile.get("nbytes") or (len(payload) if payload is not None else 0))
+            if codec and payload is not None:
+                compressed_bytes = int(len(payload)) if isinstance(payload, (bytes, bytearray)) else int(tile.get("nbytes") or 0)
+            else:
+                compressed_bytes = int(tile.get("nbytes") or (len(payload) if payload is not None else 0))
             tensor = decompress_to_tensor(
                 payload,
                 device="cpu" if self.device.startswith("cuda") else self.device,
@@ -65,18 +75,19 @@ class PagedWeights:
                 non_blocking=self.non_blocking,
             )
         else:
-            size_bytes = int(tile.nbytes)
+            compressed_bytes = int(tile.nbytes)
             tensor = decompress_to_tensor(
                 tile,
                 device="cpu" if self.device.startswith("cuda") else self.device,
                 pin_memory=self.pin_memory,
                 non_blocking=self.non_blocking,
             )
+        size_bytes = int(tensor.numel() * tensor.element_size()) if hasattr(tensor, "numel") else int(compressed_bytes)
         return {
             "tile_id": tile_id,
             "tensor": tensor,
             "size_bytes": size_bytes,
-            "compressed_bytes": size_bytes,
+            "compressed_bytes": compressed_bytes,
         }
 
     def _cache_payload(self, payload: dict) -> object:
@@ -84,12 +95,12 @@ class PagedWeights:
         tensor = payload["tensor"]
         size_bytes = int(payload["size_bytes"])
         compressed_bytes = int(payload["compressed_bytes"])
-        self.stats.bytes_transferred += size_bytes
+        self.stats.bytes_transferred += compressed_bytes
         self.stats.compressed_bytes += compressed_bytes
         if hasattr(tensor, "numel"):
             decompressed = int(tensor.numel() * tensor.element_size())
             self.stats.decompressed_bytes += decompressed
-            if tensor.device.type == "cuda":
+            if hasattr(tensor, "device") and tensor.device.type == "cuda":
                 self.stats.bytes_h2d += decompressed
                 self.cache.record_transfer(compressed_bytes, decompressed)
         self.cache.put((tile_id,), tensor, size_bytes)
@@ -102,6 +113,12 @@ class PagedWeights:
             if cached is not None:
                 if tile_id in self._prefetched:
                     self.stats.prefetch_hits += 1
+                    event = self._prefetch_events.pop(tile_id, None)
+                    if event is not None and torch is not None and torch.cuda.is_available():
+                        try:
+                            event.wait(torch.cuda.current_stream())
+                        except Exception:
+                            pass
                     self._prefetched.discard(tile_id)
                 result.append(cached)
             else:
@@ -119,6 +136,12 @@ class PagedWeights:
         loaded = self.prefetcher.run()
         for payload in loaded:
             if isinstance(payload, dict) and "tile_id" in payload:
-                if self.cache.get((payload["tile_id"],)) is None:
+                tile_id = int(payload["tile_id"])
+                if self.cache.get((tile_id,)) is None:
                     self._cache_payload(payload)
-                    self._prefetched.add(int(payload["tile_id"]))
+                    self._prefetched.add(tile_id)
+                    event = payload.get("event") if isinstance(payload, dict) else None
+                    if event is None:
+                        event = self.prefetcher.pop_event(tile_id)
+                    if event is not None:
+                        self._prefetch_events[tile_id] = event

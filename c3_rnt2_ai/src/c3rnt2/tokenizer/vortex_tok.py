@@ -79,6 +79,9 @@ class VortexTokModel:
     macro_codebook: VortexMacroCodebook
     sub_codebook: Optional[RNT2Codebook] = None
     sub_codebooks: Optional[List[RNT2Codebook]] = None
+    block_cache: Dict[bytes, int] = field(default_factory=dict, repr=False)
+    block_cache_max: int = 4096
+    block_cache_enabled: bool = False
 
     @property
     def sub_codebooks_list(self) -> List[RNT2Codebook]:
@@ -141,6 +144,20 @@ class VortexTokModel:
 
 def _split_blocks(data: bytes, block_size: int) -> List[bytes]:
     return [data[i : i + block_size] for i in range(0, len(data), block_size)] or [b""]
+
+def _cache_lookup(model: VortexTokModel, block: bytes) -> Optional[int]:
+    if not getattr(model, "block_cache_enabled", False):
+        return None
+    return model.block_cache.get(block)
+
+
+def _cache_store(model: VortexTokModel, block: bytes, code: int) -> None:
+    if not getattr(model, "block_cache_enabled", False):
+        return
+    cache = model.block_cache
+    cache[block] = code
+    if len(cache) > int(getattr(model, "block_cache_max", 4096)):
+        cache.pop(next(iter(cache)))
 
 
 def encode(text: str, model: VortexTokModel) -> VortexStream:
@@ -291,8 +308,8 @@ def decode_from_ids(ids: List[int], model: VortexTokModel, total_len: Optional[i
             out.append(token_id - patch_size - macro_size - sub_size)
     if total_len is not None:
         out = out[:total_len]
-    else:
-        out = out.rstrip(b"\x00")
+        return bytes(out).decode("utf-8", errors="strict")
+    out = out.rstrip(b"\x00")
     return bytes(out).decode("utf-8", errors="replace")
 
 

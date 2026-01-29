@@ -31,6 +31,7 @@ class Prefetcher:
         self.async_mode = async_mode if async_mode is not None else device.startswith("cuda")
         self.stream: object | None = None
         self._events: Deque[object] = deque()
+        self._event_map: dict[int, object] = {}
         self._executor: ThreadPoolExecutor | None = None
         if torch is not None and device.startswith("cuda"):
             if self.async_mode:
@@ -61,20 +62,22 @@ class Prefetcher:
         loaded = []
         if self._executor is not None:
             futures = [self._executor.submit(self.loader, tile_id) for tile_id in list(self.queue)]
+            tile_list = list(self.queue)
             self.queue.clear()
-            for fut in futures:
+            for tile_id, fut in zip(tile_list, futures):
                 obj = fut.result()
                 stream = self.stream
                 if stream is not None:
                     with torch.cuda.stream(stream):
                         obj = self._maybe_to_device(obj)
-                        loaded.append(obj)
-                        if torch is not None:
-                            event = torch.cuda.Event()
-                            event.record(stream)
-                            self._events.append(event)
-                else:
-                    loaded.append(obj)
+                        event = torch.cuda.Event()
+                        event.record(stream)
+                        self._events.append(event)
+                        self._event_map[int(tile_id)] = event
+                        if isinstance(obj, dict):
+                            obj.setdefault("tile_id", tile_id)
+                            obj["event"] = event
+                loaded.append(obj)
             return loaded
         while self.queue:
             tile_id = self.queue.popleft()
@@ -83,14 +86,20 @@ class Prefetcher:
                 with torch.cuda.stream(stream):
                     obj = self.loader(tile_id)
                     obj = self._maybe_to_device(obj)
+                    event = torch.cuda.Event()
+                    event.record(stream)
+                    self._events.append(event)
+                    self._event_map[int(tile_id)] = event
+                    if isinstance(obj, dict):
+                        obj.setdefault("tile_id", tile_id)
+                        obj["event"] = event
                     loaded.append(obj)
-                    if torch is not None:
-                        event = torch.cuda.Event()
-                        event.record(stream)
-                        self._events.append(event)
             else:
                 loaded.append(self.loader(tile_id))
         return loaded
+
+    def pop_event(self, tile_id: int) -> object | None:
+        return self._event_map.pop(int(tile_id), None)
 
     def synchronize(self) -> None:
         if self.stream is None or not self._events:
@@ -100,3 +109,4 @@ class Prefetcher:
             last.synchronize()
         finally:
             self._events.clear()
+            self._event_map.clear()

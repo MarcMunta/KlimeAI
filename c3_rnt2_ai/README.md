@@ -72,3 +72,20 @@ Flags ?tiles:
 ## Notas
 - Este MVP prioriza arquitectura, métricas y exactitud. Rendimiento se optimiza en fases siguientes.
 - El repo está diseñado para enchufar un backend HF más grande en el futuro.
+
+
+## Benchmarks RTX 4080
+Generaci?n (BAD decode + cache/prefetch stats):
+```bash
+python scripts/bench_generate.py --profile rtx4080_16gb_vortexx_next --max-new-tokens 512
+```
+Microbench de PagedLinear:
+```bash
+python scripts/bench_paged_linear.py --dtype bf16 --accum-fp32
+```
+
+M?tricas clave:
+- `page_faults`: fallos de cach? de tiles (menos es mejor).
+- `prefetch_hits`: tiles consumidos desde prefetch sin bloqueo.
+- `bytes_h2d`: bytes reales transferidos H2D.
+- `bytes_compressed_read`: bytes le?dos desde payload comprimido.
