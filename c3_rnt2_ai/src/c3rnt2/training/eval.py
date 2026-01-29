@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..tokenizer.rnt2_model import RNT2Model, RNT2Codebook
 from ..tokenizer.rnt2_encode import encode_text
+from ..tokenizer.vortex_tok import VortexTokModel, VortexMacroCodebook, encode as vortex_encode, metrics as vortex_metrics
 from ..model.core_transformer import CoreTransformer
 from ..device import detect_device
 
@@ -26,6 +27,15 @@ def main():
     exact_copy_ok = True
     ratio = len(stream.codes) / max(1, len(sample.encode("utf-8")))
 
+    # VortexTok metrics
+    vortex_path = Path("data/runs/vortex_tok.pt")
+    if vortex_path.exists():
+        vortex = VortexTokModel.load(vortex_path)
+    else:
+        vortex = VortexTokModel(patch_codebook=rnt2.codebook, macro_codebook=VortexMacroCodebook(sequences=[]))
+    v_stream = vortex_encode(sample, vortex)
+    v_metrics = vortex_metrics(v_stream)
+
     # Core throughput (approx)
     core = CoreTransformer.from_settings({"core": {"hidden_size": 128, "layers": 2, "heads": 2, "vocab_size": 256}})
     start = time.time()
@@ -38,6 +48,8 @@ def main():
     print({
         "exact_copy_ok": exact_copy_ok,
         "rnt2_ratio": round(ratio, 4),
+        "vortex_bytes_per_token": v_metrics["bytes_per_token"],
+        "vortex_escapes_pct": v_metrics["escapes_pct"],
         "tokens_per_second": round(tps, 3),
         "vram_gb": vram,
     })

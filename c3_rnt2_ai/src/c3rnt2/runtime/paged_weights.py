@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Any
 
 import numpy as np
 
@@ -19,18 +19,30 @@ class PagedWeightsStats:
 class PagedWeights:
     """Tile-based weight manager with CPU storage and GPU cache (MVP)."""
 
-    def __init__(self, tile_store: Dict[int, np.ndarray], cache: CacheManager, device: str = "cpu"):
+    def __init__(self, tile_store: Dict[int, Any], cache: CacheManager, device: str = "cpu"):
         self.tile_store = tile_store
         self.cache = cache
         self.device = device
         self.stats = PagedWeightsStats()
-        self.prefetcher = Prefetcher(self._load_tile, depth=2)
+        self.prefetcher = Prefetcher(self._load_tile, depth=2, device=device)
 
     def _load_tile(self, tile_id: int):
         tile = self.tile_store[tile_id]
-        self.stats.bytes_transferred += tile.nbytes
-        tensor = decompress_to_tensor(tile, device=self.device)
-        self.cache.put((tile_id,), tensor, tile.nbytes)
+        codec = None
+        shape = None
+        size_bytes = 0
+        if isinstance(tile, dict):
+            payload = tile.get("payload")
+            codec = tile.get("codec")
+            shape = tuple(tile.get("shape")) if tile.get("shape") else None
+            size_bytes = int(tile.get("nbytes") or (len(payload) if payload is not None else 0))
+            self.stats.bytes_transferred += size_bytes
+            tensor = decompress_to_tensor(payload, device=self.device, codec=codec, shape=shape)
+        else:
+            size_bytes = int(tile.nbytes)
+            self.stats.bytes_transferred += size_bytes
+            tensor = decompress_to_tensor(tile, device=self.device)
+        self.cache.put((tile_id,), tensor, size_bytes)
         return tensor
 
     def request_tiles(self, tile_ids: Iterable[int]) -> List[object]:

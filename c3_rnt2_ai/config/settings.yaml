@@ -2,13 +2,26 @@ profiles:
   dev_small:
     tokenizer:
       rnt2_model_path: data/runs/rnt2_dev.pt
+      vortex_model_path: data/runs/vortex_tok.pt
       block_size: 64
       escape_mode: exact
+      macro_codebook_size: 256
+      macro_min_len: 2
     core:
       hidden_size: 256
       layers: 4
       heads: 4
       vocab_size: 1024
+    vortex_model:
+      window_size: 128
+      latent_slots: 64
+      lava_top_k: 4
+      local_mixer_kernel: 5
+      ssm_state_size: 128
+      gated_mlp_ratio: 4
+    bad:
+      block_size: 8
+      entropy_threshold: 3.5
     kv:
       window_size: 128
       kv_quant_bits: 8
@@ -25,16 +38,36 @@ profiles:
     agent:
       web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
       tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
+    continuous:
+      run_interval_minutes: 30
+      adapter_rank: 4
+      max_steps: 50
+    selfimprove:
+      max_patch_kb: 64
+      sandbox_root: data/workspaces
   core_only:
     tokenizer:
       rnt2_model_path: data/runs/rnt2_dev.pt
+      vortex_model_path: data/runs/vortex_tok.pt
       block_size: 64
       escape_mode: exact
+      macro_codebook_size: 256
+      macro_min_len: 2
     core:
       hidden_size: 512
       layers: 6
       heads: 8
       vocab_size: 2048
+    vortex_model:
+      window_size: 256
+      latent_slots: 128
+      lava_top_k: 4
+      local_mixer_kernel: 7
+      ssm_state_size: 256
+      gated_mlp_ratio: 4
+    bad:
+      block_size: 8
+      entropy_threshold: 3.5
     kv:
       window_size: 256
       kv_quant_bits: 8
@@ -42,13 +75,26 @@ profiles:
   c3_paged:
     tokenizer:
       rnt2_model_path: data/runs/rnt2_dev.pt
+      vortex_model_path: data/runs/vortex_tok.pt
       block_size: 64
       escape_mode: exact
+      macro_codebook_size: 256
+      macro_min_len: 2
     core:
       hidden_size: 512
       layers: 6
       heads: 8
       vocab_size: 2048
+    vortex_model:
+      window_size: 256
+      latent_slots: 128
+      lava_top_k: 4
+      local_mixer_kernel: 7
+      ssm_state_size: 256
+      gated_mlp_ratio: 4
+    bad:
+      block_size: 8
+      entropy_threshold: 3.5
     kv:
       window_size: 256
       kv_quant_bits: 8
@@ -62,16 +108,36 @@ profiles:
       top_k: 4
       stability_threshold: 0.15
       mem_cost_weight: 0.02
+    continuous:
+      run_interval_minutes: 30
+      adapter_rank: 4
+      max_steps: 50
+    selfimprove:
+      max_patch_kb: 64
+      sandbox_root: data/workspaces
   agent:
     tokenizer:
       rnt2_model_path: data/runs/rnt2_dev.pt
+      vortex_model_path: data/runs/vortex_tok.pt
       block_size: 64
       escape_mode: exact
+      macro_codebook_size: 256
+      macro_min_len: 2
     core:
       hidden_size: 256
       layers: 4
       heads: 4
       vocab_size: 1024
+    vortex_model:
+      window_size: 128
+      latent_slots: 64
+      lava_top_k: 4
+      local_mixer_kernel: 5
+      ssm_state_size: 128
+      gated_mlp_ratio: 4
+    bad:
+      block_size: 8
+      entropy_threshold: 3.5
     kv:
       window_size: 128
       kv_quant_bits: 8
@@ -79,3 +145,10 @@ profiles:
     agent:
       web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
       tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
+    continuous:
+      run_interval_minutes: 30
+      adapter_rank: 4
+      max_steps: 50
+    selfimprove:
+      max_patch_kb: 64
+      sandbox_root: data/workspaces

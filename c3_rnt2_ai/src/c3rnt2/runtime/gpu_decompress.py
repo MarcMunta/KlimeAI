@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Any, Tuple
 
 import numpy as np
+
+from ..compression.entropy_coder import decompress
 
 try:
     import torch
@@ -10,8 +12,21 @@ except Exception:  # pragma: no cover
     torch = None
 
 
-def decompress_to_tensor(tile: np.ndarray, device: str = "cpu"):
+def _to_tensor(tile: np.ndarray, device: str = "cpu"):
     if torch is None:
         raise RuntimeError("PyTorch not available")
     tensor = torch.from_numpy(tile.copy())
     return tensor.to(device)
+
+
+def decompress_to_tensor(tile: Any, device: str = "cpu", codec: str | None = None, shape: Tuple[int, int] | None = None):
+    \"\"\"Decompress tile payload if needed and move to device.\"\"\"
+    if isinstance(tile, np.ndarray):
+        return _to_tensor(tile, device=device)
+    if isinstance(tile, (bytes, bytearray)):
+        if codec is None or shape is None:
+            raise ValueError("codec and shape required for compressed tiles")
+        raw = decompress(bytes(tile), codec=codec)
+        arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
+        return _to_tensor(arr, device=device)
+    raise TypeError("Unsupported tile type")

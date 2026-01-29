@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import subprocess
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import requests
 
@@ -17,8 +20,37 @@ class ToolResult:
 
 
 class AgentTools:
-    def __init__(self, allowlist: List[str]):
+    def __init__(self, allowlist: List[str], sandbox_root: Path | None = None, cache_root: Path | None = None):
         self.policy = WebPolicy(allowlist=allowlist)
+        self.sandbox_root = sandbox_root or Path("data") / "workspaces"
+        self.cache_root = cache_root or Path("data") / "web_cache"
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+
+    def _sanitize_text(self, text: str) -> str:
+        text = re.sub(r"<script.*?>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style.*?>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\\s+", " ", text)
+        return text.strip()
+
+    def _cache_path(self, key: str) -> Path:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self.cache_root / f"{digest}.json"
+
+    def _cache_get(self, key: str) -> Optional[str]:
+        path = self._cache_path(key)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload.get("text")
+        except Exception:
+            return None
+
+    def _cache_set(self, key: str, text: str) -> None:
+        path = self._cache_path(key)
+        payload = {"text": text}
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     def run_tests(self, repo_path: Path) -> ToolResult:
         try:
@@ -41,9 +73,16 @@ class AgentTools:
         url = f"https://duckduckgo.com/html/?q={query}"
         if not self.policy.allow_url(url):
             return ToolResult(ok=False, output="domain not in allowlist")
+        cached = self._cache_get(url)
+        if cached is not None:
+            return ToolResult(ok=True, output=cached)
         try:
             resp = requests.get(url, timeout=10)
-            return ToolResult(ok=resp.ok, output=resp.text[:1000])
+            if not resp.ok:
+                return ToolResult(ok=False, output=f"http {resp.status_code}")
+            text = self._sanitize_text(resp.text)[:1000]
+            self._cache_set(url, text)
+            return ToolResult(ok=True, output=text)
         except Exception as exc:
             return ToolResult(ok=False, output=f"web error: {exc}")
 
@@ -52,14 +91,25 @@ class AgentTools:
             return ToolResult(ok=False, output="rate limit exceeded")
         if not self.policy.allow_url(url):
             return ToolResult(ok=False, output="domain not in allowlist")
+        cached = self._cache_get(url)
+        if cached is not None:
+            return ToolResult(ok=True, output=cached)
         try:
             resp = requests.get(url, timeout=10)
-            return ToolResult(ok=resp.ok, output=resp.text[:1200])
+            if not resp.ok:
+                return ToolResult(ok=False, output=f"http {resp.status_code}")
+            text = self._sanitize_text(resp.text)[:1200]
+            self._cache_set(url, text)
+            return ToolResult(ok=True, output=text)
         except Exception as exc:
             return ToolResult(ok=False, output=f"web error: {exc}")
 
     def edit_repo(self, file_path: Path, new_text: str) -> ToolResult:
         try:
+            self.sandbox_root.mkdir(parents=True, exist_ok=True)
+            # Ensure edits only happen in sandbox workspace
+            if not str(file_path).startswith(str(self.sandbox_root)):
+                file_path = self.sandbox_root / file_path.name
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(new_text, encoding="utf-8")
             return ToolResult(ok=True, output=str(file_path))

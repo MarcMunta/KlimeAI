@@ -1,10 +1,11 @@
-# C3 + RNT-2 Local Stack
+# VORTEX-X (C3 + RNT-2 + LAVA + BAD)
 
 Este repo implementa un prototipo modular para una “IA 120B-like” local combinando:
 - **C3**: pesos paginados y comprimidos con caché coherente.
-- **RNT-2**: tokenización neuronal reversible con canal de escape exacto.
-- **KV híbrido**: ventana exacta + KV cuantizado + memoria latente.
-- **Agente**: herramientas, memoria persistente y aprendizaje continuo.
+- **VORTEX-Tok**: tokenización reversible de tasa variable (macro/patch/ESC).
+- **V-Blocks**: LocalMixer + SSM + LAVA Memory + GatedMLP.
+- **BAD**: Blockwise Adaptive Decoding (draft+verify).
+- **Agente**: herramientas, memoria persistente, auto-entrenamiento y auto-mejora segura.
 
 ## Instalación
 ```bash
@@ -13,39 +14,43 @@ python -m venv .venv
 pip install -e .
 ```
 
-## CLI (Fase 0)
+## CLI (VORTEX-X)
+Comandos principales via `python -m c3rnt2`:
 ```bash
-python -m c3rnt2.cli doctor
-python -m c3rnt2.cli demo_tokenizer
-python -m c3rnt2.cli demo_agent
-python -m c3rnt2.cli demo_core_generate
+python -m c3rnt2 tokenizer-train
+python -m c3rnt2 eval
+python -m c3rnt2 chat
+python -m c3rnt2 agent-demo
+python -m c3rnt2 self-train --once
+python -m c3rnt2 self-improve
+python -m c3rnt2 apply-patch --diff data/selfimprove/runs/<id>/proposed.diff --approve
 ```
 
-## Tokenizador RNT-2 (Fase 1)
-Entrenamiento MVP (codebook por frecuencia de bloques):
+## Tokenizador VORTEX-Tok
+Entrenamiento MVP (patch codebook + macro codebook opcional):
 ```bash
-python -m c3rnt2.tokenizer.rnt2_train --corpus data/corpora --output data/runs/rnt2_dev.pt
+python -m c3rnt2 tokenizer-train --corpus data/corpora
 ```
 
-## Core Transformer + KV híbrido (Fase 2)
-El core usa un transformer pequeño con tokens byte-level para el demo. El KV híbrido registra ventana exacta y memoria latente.
+## VORTEX-X Core
+Usa V-Blocks (LocalMixer + SSM + LAVA + GatedMLP). El contexto largo depende de LAVA + SSM, no de KV infinito.
 
-## C3 Runtime (Fase 3)
+## C3 Runtime
 El runtime usa tiles comprimidos y caché con LRU + estabilidad. En el MVP, la descompresión ocurre en CPU/torch.
 
-## Agente (Fase 5)
+## Agente y Auto-mejora
 El demo crea un repo mini, abre docs (best effort), edita un bug y ejecuta tests.
 ```bash
-python -m c3rnt2.cli demo_agent
+python -m c3rnt2 agent-demo
 ```
 
 ## Benchmarks
 ```bash
-python -m c3rnt2.training.eval
+python -m c3rnt2 eval
 ```
 
 ## Configuración
-`config/settings.yaml` define perfiles (`dev_small`, `core_only`, `c3_paged`, `agent`).
+`config/settings.yaml` define perfiles (`dev_small`, `core_only`, `c3_paged`, `agent`) con parámetros para VORTEX, BAD y self-train.
 
 ## Notas
 - Este MVP prioriza arquitectura, métricas y exactitud. Rendimiento se optimiza en fases siguientes.

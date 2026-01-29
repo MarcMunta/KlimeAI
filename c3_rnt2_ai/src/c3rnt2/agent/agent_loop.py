@@ -29,9 +29,9 @@ def _setup_demo_repo(base: Path) -> Path:
 def run_demo_agent(settings: dict) -> Dict[str, str]:
     agent_cfg = settings.get("agent", {})
     allowlist = agent_cfg.get("web_allowlist", ["docs.python.org"])
-    tools = AgentTools(allowlist=allowlist)
-    data_dir = Path("data") / "runs"
-    repo = _setup_demo_repo(data_dir)
+    sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
+    tools = AgentTools(allowlist=allowlist, sandbox_root=sandbox_root)
+    repo = _setup_demo_repo(sandbox_root)
 
     memory = MemoryStore(Path("data") / "memory" / "agent_memory.sqlite")
     memory.add("Bugfix add function to use addition, not subtraction")
