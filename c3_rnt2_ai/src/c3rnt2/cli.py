@@ -66,10 +66,13 @@ def doctor(deep: bool = False):
         validate_profile(settings, base_dir=base_dir)
         rprint({"settings_ok": True, "profile": resolve_profile(None)})
         if deep:
-            deep_result = run_deep_checks(settings, base_dir=base_dir)
-            rprint({"deep": deep_result})
+            try:
+                deep_result = run_deep_checks(settings, base_dir=base_dir)
+                rprint({"deep": deep_result})
+            except Exception as exc:
+                rprint({"deep": {"deep_ok": False, "error": str(exc)}})
     except Exception as exc:
-        rprint({"warning": "settings_invalid", "error": str(exc)})
+        rprint({"warning": "settings_invalid", "error": str(exc), "hint": "Update config/settings.yaml to include missing keys"})
         if deep:
             rprint({"deep": {"deep_ok": False}})
 
@@ -109,7 +112,6 @@ def doctor(deep: bool = False):
         rprint({"warning": "tracked_cache_files", "files": tracked_cache})
     if tracked_large:
         rprint({"warning": "tracked_large_files", "files": tracked_large})
-
 
 @app.command()
 def demo_tokenizer(text: Optional[str] = None, profile: Optional[str] = None):

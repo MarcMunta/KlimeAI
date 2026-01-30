@@ -33,6 +33,13 @@ def _parse_interval(interval: str) -> int:
     return int(interval)
 
 
+
+
+def _load_and_validate(profile: str | None) -> dict:
+    settings = load_settings(profile)
+    validate_profile(settings, base_dir=Path('.'))
+    return settings
+
 def _default_profile() -> str:
     for candidate in ("rtx4080_16gb_vortexx_next", "dev_small"):
         try:
@@ -66,7 +73,7 @@ def cmd_eval(_args: argparse.Namespace) -> None:
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     model = CoreTransformer.from_settings(settings)
     # Load current adapter if available
     state = load_registry(Path("."))
@@ -109,13 +116,13 @@ def cmd_chat(args: argparse.Namespace) -> None:
 
 
 def cmd_agent_demo(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     report = run_demo_agent(settings)
     print(report)
 
 
 def cmd_self_train(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     info = detect_device()
     print({"device": info.device, "vram_gb": info.vram_gb, "dtype": info.dtype})
     base_dir = Path(".")
@@ -173,19 +180,22 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print({"deps": check_deps(modules)})
     base_dir = Path(".")
     try:
-        settings = load_settings(args.profile)
-        validate_profile(settings, base_dir=base_dir)
-        print({"settings_ok": True, "profile": args.profile or resolve_profile(None)})
-        if args.deep:
+        settings = _load_and_validate(args.profile)
+    except Exception as exc:
+        print({"warning": "settings_invalid", "error": str(exc), "hint": "Update config/settings.yaml to include missing keys"})
+        return
+    print({"settings_ok": True, "profile": args.profile or resolve_profile(None)})
+    if args.deep:
+        try:
             deep_result = run_deep_checks(settings, base_dir=base_dir)
             print({"deep": deep_result})
-    except Exception as exc:
-        print({"warning": "settings_invalid", "error": str(exc)})
+        except Exception as exc:
+            print({"deep": {"deep_ok": False, "error": str(exc)}})
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
     profile = args.profile or _default_profile()
-    settings = load_settings(profile)
+    settings = _load_and_validate(profile)
     base_dir = Path(".")
     try:
         lock = acquire_exclusive_lock(base_dir, "serve")
@@ -206,7 +216,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 
 def cmd_load_checkpoint(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     core = settings.get("core", {})
     core["checkpoint_path"] = args.path
     settings["core"] = core
@@ -216,14 +226,14 @@ def cmd_load_checkpoint(args: argparse.Namespace) -> None:
 
 
 def cmd_save_checkpoint(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     model = CoreTransformer.from_settings(settings)
     save_checkpoint(model, Path(args.out), settings)
     print({"ok": True, "path": args.out})
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     base_dir = Path(".")
     result = run_bootstrap(
         settings=settings,
@@ -238,14 +248,14 @@ def cmd_bootstrap(args: argparse.Namespace) -> None:
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     allowlist = settings.get("agent", {}).get("web_allowlist", [])
     count = ingest_sources(Path("."), allowlist, settings)
     print({"ingested_docs": count})
 
 
 def cmd_ingest_once(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     settings = deepcopy(settings)
     cont = settings.get("continuous", {}) or {}
     replay = cont.get("replay", {}) or {}
@@ -258,7 +268,7 @@ def cmd_ingest_once(args: argparse.Namespace) -> None:
 
 
 def cmd_train_once(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     base_dir = Path(".")
     if not is_bootstrapped(base_dir, settings):
         print({"ok": False, "error": "model not bootstrapped"})
@@ -279,6 +289,7 @@ def cmd_train_once(args: argparse.Namespace) -> None:
 
 def cmd_bench(args: argparse.Namespace) -> None:
     profile = args.profile or _default_profile()
+    _ = _load_and_validate(profile)
     script = Path(__file__).resolve().parents[2] / "scripts" / "bench_generate.py"
     cmd = [sys.executable, str(script), "--profile", profile, "--max-new-tokens", str(args.max_new_tokens)]
     if args.bench_topk:
@@ -293,7 +304,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
 
 
 def cmd_anchors_init(args: argparse.Namespace) -> None:
-    settings = load_settings(args.profile)
+    settings = _load_and_validate(args.profile)
     anchors_path = Path(settings.get("continuous", {}).get("eval", {}).get("anchors_path", "data/continuous/anchors.jsonl"))
     write_default_anchors(anchors_path)
     print({"anchors_path": str(anchors_path)})

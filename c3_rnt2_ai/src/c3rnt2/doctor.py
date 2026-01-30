@@ -72,9 +72,13 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         _ = model.step_block(block_ids, state)
         last_tok = ids[-1]
         gen_state = state
-        for _ in range(16):
+        gen_tokens = 16
+        gen_start = time.time()
+        for _ in range(gen_tokens):
             logits, gen_state = model.step(last_tok, gen_state)
             last_tok = int(torch.argmax(logits, dim=-1).item())
+        gen_elapsed = max(1e-6, time.time() - gen_start)
+        tokens_per_sec = gen_tokens / gen_elapsed
     elapsed = time.time() - start
     vram_peak_gb = None
     if info.cuda_available:
@@ -83,6 +87,7 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         "deep_ok": True,
         "elapsed_sec": round(elapsed, 3),
         "vram_peak_gb": round(vram_peak_gb, 3) if vram_peak_gb is not None else None,
+        "tokens_per_sec": round(tokens_per_sec, 3),
     }
 
 
