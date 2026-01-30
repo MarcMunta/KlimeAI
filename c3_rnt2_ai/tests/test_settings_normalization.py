@@ -1,10 +1,11 @@
 ﻿from __future__ import annotations
 
-from c3rnt2.config import load_settings
+from c3rnt2.config import load_settings, validate_profile
 
 
 def _assert_profile(profile: str) -> None:
     settings = load_settings(profile)
+    validate_profile(settings)
     tok = settings.get("tokenizer", {})
     assert tok.get("vortex_tok_path")
     runtime = settings.get("runtime", {})

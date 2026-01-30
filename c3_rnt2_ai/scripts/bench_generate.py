@@ -23,9 +23,36 @@ def main() -> None:
     parser.add_argument("--prompt", type=str, default="def f(x):")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--bench-topk", action="store_true")
+    parser.add_argument("--use-cuda-graphs", action="store_true")
+    parser.add_argument("--use-compile", action="store_true")
+    parser.add_argument("--use-full-profile", action="store_true")
     args = parser.parse_args()
 
     settings = load_settings(args.profile)
+    core_cfg = settings.get("core", {})
+    if not args.use_full_profile:
+        decode_cfg_override = dict(settings.get("decode", {}) or {})
+        decode_cfg_override["use_mtp"] = False
+        decode_cfg_override["adaptive_granularity"] = False
+        draft_cfg = dict(decode_cfg_override.get("draft_model", {}) or {})
+        draft_cfg["enabled"] = False
+        decode_cfg_override["draft_model"] = draft_cfg
+        settings["decode"] = decode_cfg_override
+        core_cfg["layers"] = min(int(core_cfg.get("layers", 4)), 4)
+        settings["core"] = core_cfg
+        vx_cfg = dict(settings.get("vortex_model", {}) or {})
+        vx_cfg["lava_clusters"] = 0
+        vx_cfg["lava_ann_mode"] = "flat"
+        settings["vortex_model"] = vx_cfg
+
+    if core_cfg.get("compile") and not args.use_compile:
+        core_cfg["compile"] = False
+        core_cfg["compile_step"] = False
+        core_cfg["compile_local_mixer_step"] = False
+        settings["core"] = core_cfg
+    if core_cfg.get("cuda_graphs") and not args.use_cuda_graphs:
+        core_cfg["cuda_graphs"] = False
+        settings["core"] = core_cfg
     core = CoreTransformer.from_settings(settings)
     decode_cfg = settings.get("decode", {})
     bad_cfg = settings.get("bad", {})
@@ -138,6 +165,34 @@ def main() -> None:
             torch.cuda.synchronize()
         bench_topk_ms = (time.time() - start) * 1000.0 / iters
 
+    lm_head_ms = None
+    cache_hit_rate = None
+    lm_head = getattr(core, "lm_head", None)
+    if lm_head is not None:
+        try:
+            hidden = torch.randn(1, 1, core.config.hidden_size, device=core.device, dtype=core.dtype if core.device.type == "cuda" else torch.float32)
+            iters = 50
+            if core.device.type == "cuda":
+                torch.cuda.synchronize()
+            start = time.time()
+            for _ in range(iters):
+                _ = lm_head(hidden)
+            if core.device.type == "cuda":
+                torch.cuda.synchronize()
+            lm_head_ms = (time.time() - start) * 1000.0 / iters
+        except Exception:
+            lm_head_ms = None
+    if lm_head is not None and hasattr(lm_head, "stats"):
+        try:
+            stats_dict = lm_head.stats()
+            faults = stats_dict.get("page_faults", 0)
+            prefetch_hits = stats_dict.get("prefetch_hits", 0)
+            denom = faults + prefetch_hits
+            if denom > 0:
+                cache_hit_rate = prefetch_hits / denom
+        except Exception:
+            cache_hit_rate = None
+
     depth_stats = core.depth_stats()
     lava_reads = sum(block.lava.stats.reads for block in core.blocks)
     lava_writes = sum(block.lava.stats.writes for block in core.blocks)
@@ -156,6 +211,8 @@ def main() -> None:
         "page_faults": 0,
         "prefetch_hits": 0,
         "bytes_compressed_read": 0,
+        "lm_head_ms": round(lm_head_ms, 4) if lm_head_ms is not None else None,
+        "cache_hit_rate": round(cache_hit_rate, 4) if cache_hit_rate is not None else None,
         "cuda_graphs": bool(settings.get("core", {}).get("cuda_graphs", False)),
         "lava_clusters": int(settings.get("vortex_model", {}).get("lava_clusters", 0)),
         "lava_ann_mode": settings.get("vortex_model", {}).get("lava_ann_mode", "flat"),

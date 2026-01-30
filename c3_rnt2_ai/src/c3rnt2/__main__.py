@@ -124,6 +124,17 @@ def cmd_apply_patch(args: argparse.Namespace) -> None:
     print({"ok": result.ok, "message": result.message})
 
 
+
+
+def cmd_load_checkpoint(args: argparse.Namespace) -> None:
+    settings = load_settings(args.profile)
+    core = settings.get("core", {})
+    core["checkpoint_path"] = args.path
+    settings["core"] = core
+    model = CoreTransformer.from_settings(settings)
+    meta = getattr(model, "checkpoint_meta", {})
+    print({"ok": True, "path": args.path, "meta": meta})
+
 def cmd_save_checkpoint(args: argparse.Namespace) -> None:
     settings = load_settings(args.profile)
     model = CoreTransformer.from_settings(settings)
@@ -193,6 +204,11 @@ def main() -> None:
     ap.add_argument("--diff", required=True)
     ap.add_argument("--approve", action="store_true")
     ap.set_defaults(func=cmd_apply_patch)
+
+    lc = sub.add_parser("load-checkpoint")
+    lc.add_argument("--path", required=True)
+    lc.add_argument("--profile", default=None)
+    lc.set_defaults(func=cmd_load_checkpoint)
 
     sc = sub.add_parser("save-checkpoint")
     sc.add_argument("--out", required=True)

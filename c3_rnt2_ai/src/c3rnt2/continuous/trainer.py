@@ -39,7 +39,7 @@ class ContinualTrainer:
 
     def run_tick(self) -> TrainResult:
         run_id, _run_path = begin_run(self.base_dir)
-        seed = self.settings.get("continuous", {}).get("seed")
+        seed = self.settings.get("continuous", {}).get("seed", self.settings.get("seed"))
         if seed is not None:
             random.seed(int(seed))
             torch.manual_seed(int(seed))
@@ -239,11 +239,13 @@ class ContinualTrainer:
                     "samples": len(samples),
                     "stats": stats.__dict__,
                     "ts": time.time(),
-                    "seed": self.settings.get("continuous", {}).get("seed"),
                     "tokens_per_sec": tokens_per_sec,
                     "avg_seq_len": avg_seq_len,
                     "gpu_mem_mb": gpu_mem,
                     "lm_head_stats": lm_stats,
+                    "device": str(model.device),
+                    "dtype": str(model.dtype),
+                    "seed": seed,
                 },
             )
 

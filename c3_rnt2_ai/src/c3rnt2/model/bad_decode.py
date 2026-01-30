@@ -456,7 +456,12 @@ def bad_decode(
                             if logits_seq is not None:
                                 last_logits_full = logits_i
                             if use_mtp and mtp_seq is not None:
-                                last_mtp_logits = mtp_seq[:, i, :, :]
+                                if mtp_seq.dim() == 4:
+                                    last_mtp_logits = mtp_seq[:, i, :, :]
+                                elif mtp_seq.dim() == 3:
+                                    last_mtp_logits = mtp_seq[:, i, :].unsqueeze(1)
+                                else:
+                                    last_mtp_logits = None
                         else:
                             generated.append(next_tok)
                             stats.rejected += 1
@@ -466,7 +471,12 @@ def bad_decode(
                             if logits_seq is not None:
                                 last_logits_full = logits_i
                             if use_mtp and mtp_seq is not None:
-                                last_mtp_logits = mtp_seq[:, i, :, :]
+                                if mtp_seq.dim() == 4:
+                                    last_mtp_logits = mtp_seq[:, i, :, :]
+                                elif mtp_seq.dim() == 3:
+                                    last_mtp_logits = mtp_seq[:, i, :].unsqueeze(1)
+                                else:
+                                    last_mtp_logits = None
                             break
                 else:
                     for tok in draft_tokens:

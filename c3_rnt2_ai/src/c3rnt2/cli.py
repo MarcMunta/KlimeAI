@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
         print(*args, **kwargs)
 
 
-from .config import load_settings, resolve_profile
+from .config import load_settings, resolve_profile, validate_profile
 from .device import detect_device
 from .logging import setup_logging, get_logger
 from .tokenizer.rnt2_encode import encode_text
@@ -64,6 +64,13 @@ def doctor():
         except Exception as exc:
             status[name] = f"missing ({exc.__class__.__name__})"
     rprint({"deps": status})
+
+    try:
+        settings = load_settings(None)
+        validate_profile(settings)
+        rprint({"settings_ok": True, "profile": resolve_profile(None)})
+    except Exception as exc:
+        rprint({"warning": "settings_invalid", "error": str(exc)})
 
     tracked_env = []
     try:

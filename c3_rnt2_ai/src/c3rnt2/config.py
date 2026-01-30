@@ -51,25 +51,25 @@ def normalize_settings(settings: dict) -> dict:
 
     runtime = normalized.get("runtime")
     c3 = normalized.get("c3")
-    if runtime is None and c3:
-        runtime = {
-            "paged_lm_head": True,
-            "paged_tile_out": c3.get("tile_size"),
-            "paged_tile_in": c3.get("tile_in"),
-            "cache_vram_budget_mb": c3.get("cache_vram_budget_mb"),
-            "paged_lm_head_stream_topk": c3.get("paged_lm_head_stream_topk"),
-            "prefetch_depth": c3.get("prefetch_depth"),
-            "compression": c3.get("compression"),
-            "pinned_memory": c3.get("pinned_memory"),
-        }
-        normalized["runtime"] = {k: v for k, v in runtime.items() if v is not None}
-    elif runtime is not None:
-        runtime = dict(runtime)
-        if c3:
-            runtime.setdefault("cache_vram_budget_mb", c3.get("cache_vram_budget_mb"))
-            runtime.setdefault("paged_lm_head_stream_topk", c3.get("paged_lm_head_stream_topk"))
-        runtime.setdefault("cache_vram_budget_mb", 2048)
-        normalized["runtime"] = runtime
+    if runtime is None:
+        runtime = {}
+    runtime = dict(runtime)
+    if c3:
+        runtime.setdefault("paged_lm_head", True)
+        runtime.setdefault("paged_tile_out", c3.get("tile_size"))
+        runtime.setdefault("paged_tile_in", c3.get("tile_in"))
+        runtime.setdefault("cache_vram_budget_mb", c3.get("cache_vram_budget_mb"))
+        runtime.setdefault("paged_lm_head_stream_topk", c3.get("paged_lm_head_stream_topk"))
+        runtime.setdefault("prefetch_depth", c3.get("prefetch_depth"))
+        runtime.setdefault("compression", c3.get("compression"))
+        runtime.setdefault("pinned_memory", c3.get("pinned_memory"))
+    if "paged_lm_head" not in runtime:
+        runtime["paged_lm_head"] = False
+    if "cache_vram_budget_mb" not in runtime:
+        runtime["cache_vram_budget_mb"] = 2048
+    runtime.setdefault("prefetch_depth", 2)
+    runtime.setdefault("paged_lm_head_stream_topk", runtime.get("paged_lm_head_stream_topk", False) or False)
+    normalized["runtime"] = runtime
 
     vx = normalized.get("vortex_model", {}) or {}
     core = normalized.get("core", {}) or {}
@@ -104,6 +104,23 @@ def normalize_settings(settings: dict) -> dict:
         normalized["lava"] = lava
 
     return normalized
+
+
+
+def validate_profile(settings: dict) -> None:
+    missing = []
+    tok = settings.get("tokenizer", {}) or {}
+    core = settings.get("core", {}) or {}
+    runtime = settings.get("runtime", {}) or {}
+    if not tok.get("vortex_tok_path"):
+        missing.append("tokenizer.vortex_tok_path")
+    for key in ("hidden_size", "layers", "heads"):
+        if key not in core:
+            missing.append(f"core.{key}")
+    if "cache_vram_budget_mb" not in runtime:
+        missing.append("runtime.cache_vram_budget_mb")
+    if missing:
+        raise ValueError("missing settings keys: " + ", ".join(missing))
 
 def load_settings(profile: str | None = None, settings_path: str | Path | None = None) -> dict[str, Any]:
     path = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
