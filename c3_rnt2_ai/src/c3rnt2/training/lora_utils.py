@@ -16,6 +16,13 @@ from ..continuous.formatting import format_chat_sample
 from ..continuous.lora import LoRAConfig, LoRALinear, inject_lora, load_lora_state, save_lora_state, resolve_target_modules
 
 
+def _prompt_from_messages(messages: list[dict]) -> str:
+    for msg in messages:
+        if (msg.get("role") or "").lower() == "user":
+            return str(msg.get("content") or "")
+    return ""
+
+
 def load_samples_from_path(path: Path, source_kind: str) -> List[Sample]:
     samples: List[Sample] = []
     if path.is_dir():
@@ -31,11 +38,14 @@ def load_samples_from_path(path: Path, source_kind: str) -> List[Sample]:
                         payload = json.loads(line)
                     except Exception:
                         continue
+                    messages = payload.get("messages")
                     prompt = str(payload.get("prompt", ""))
                     response = str(payload.get("response", payload.get("text", "")))
+                    if not prompt and isinstance(messages, list):
+                        prompt = _prompt_from_messages(messages)
                     if not prompt and not response:
                         continue
-                    samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind))
+                    samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind, messages=messages if isinstance(messages, list) else None))
             else:
                 content = file.read_text(encoding="utf-8", errors="ignore").strip()
                 if not content:
@@ -47,15 +57,18 @@ def load_samples_from_path(path: Path, source_kind: str) -> List[Sample]:
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    payload = json.loads(line)
-                except Exception:
-                    continue
-                prompt = str(payload.get("prompt", ""))
-                response = str(payload.get("response", payload.get("text", "")))
-                if not prompt and not response:
-                    continue
-                samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind))
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            messages = payload.get("messages")
+            prompt = str(payload.get("prompt", ""))
+            response = str(payload.get("response", payload.get("text", "")))
+            if not prompt and isinstance(messages, list):
+                prompt = _prompt_from_messages(messages)
+            if not prompt and not response:
+                continue
+            samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind, messages=messages if isinstance(messages, list) else None))
         else:
             content = path.read_text(encoding="utf-8", errors="ignore").strip()
             if content:
@@ -72,14 +85,21 @@ def hash_files(paths: Iterable[Path]) -> str:
     return hasher.hexdigest()
 
 
-def eval_loss(model: CoreTransformer, samples: List[Sample]) -> float | None:
+def eval_loss(
+    model: CoreTransformer,
+    samples: List[Sample],
+    *,
+    backend: str = "vortex",
+    tokenizer: object | None = None,
+    default_system: str | None = None,
+) -> float | None:
     if not samples:
         return None
     model.eval()
     losses = []
     with torch.inference_mode():
         for sample in samples:
-            text = format_chat_sample(sample)
+            text = format_chat_sample(sample, backend=backend, tokenizer=tokenizer, default_system=default_system)
             if not text:
                 continue
             ids, _ = model.encode_prompt(text)
@@ -110,6 +130,10 @@ def train_lora(
     if not samples:
         raise ValueError("No samples provided")
     model = CoreTransformer.from_settings(settings)
+    core_cfg = settings.get("core", {}) or {}
+    backend = str(core_cfg.get("backend", "vortex"))
+    default_system = core_cfg.get("hf_system_prompt", "You are a helpful coding assistant.")
+    tokenizer = getattr(model, "tokenizer", None)
     strict = bool(adapter_cfg.get("strict_target_modules", False))
     target_modules = resolve_target_modules(adapter_cfg, strict=strict)
     lora_cfg = LoRAConfig(rank=int(adapter_cfg.get("rank", 4)), alpha=float(adapter_cfg.get("alpha", 1.0)))
@@ -143,7 +167,7 @@ def train_lora(
         attempts = 0
         while token_count < batch_tokens and attempts < max(4, len(samples)):
             sample = samples[attempts % len(samples)]
-            text = format_chat_sample(sample)
+            text = format_chat_sample(sample, backend=backend, tokenizer=tokenizer, default_system=default_system)
             ids, _ = model.encode_prompt(text)
             attempts += 1
             if len(ids) < 2:

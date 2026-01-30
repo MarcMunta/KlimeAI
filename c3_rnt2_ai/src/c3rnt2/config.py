@@ -144,11 +144,6 @@ def normalize_settings(settings: dict) -> dict:
         [
             "src/c3rnt2/",
             "tests/",
-            "config/",
-            "README.md",
-            "TODO.md",
-            "pyproject.toml",
-            "scripts/",
         ],
     )
     self_patch.setdefault(

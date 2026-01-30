@@ -71,19 +71,20 @@ class FileLock:
 
 def acquire_exclusive_lock(base_dir: Path, role: str) -> FileLock:
     role = role.lower()
-    if role not in {"serve", "train"}:
-        raise ValueError("role must be 'serve' or 'train'")
+    roles = {"serve", "train", "self_patch"}
+    if role not in roles:
+        raise ValueError("role must be 'serve', 'train', or 'self_patch'")
     lock_dir = base_dir / "data" / "locks"
     own_path = lock_dir / f"{role}.lock"
-    other_role = "train" if role == "serve" else "serve"
-    other_path = lock_dir / f"{other_role}.lock"
     own_lock = FileLock(own_path)
     own_lock.acquire(blocking=False)
-    other_lock = FileLock(other_path)
-    try:
-        other_lock.acquire(blocking=False)
-        other_lock.release()
-    except LockUnavailable:
-        own_lock.release()
-        raise
+    for other_role in roles - {role}:
+        other_path = lock_dir / f"{other_role}.lock"
+        other_lock = FileLock(other_path)
+        try:
+            other_lock.acquire(blocking=False)
+            other_lock.release()
+        except LockUnavailable:
+            own_lock.release()
+            raise
     return own_lock

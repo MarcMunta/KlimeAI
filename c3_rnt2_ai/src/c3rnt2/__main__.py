@@ -297,37 +297,55 @@ def cmd_self_improve(_args: argparse.Namespace) -> None:
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> None:
-    if args.patch_id and not args.diff:
-        settings = _load_and_validate(args.profile)
-        result = apply_self_patch(args.patch_id, Path("."), settings=settings)
-        print({"ok": result.ok, "message": result.message, "patch_id": args.patch_id})
+    base_dir = Path(".")
+    try:
+        lock = acquire_exclusive_lock(base_dir, "self_patch")
+    except LockUnavailable:
+        print({"ok": False, "error": "self_patch lock unavailable (train/serve running?)"})
         return
-    if args.diff:
-        diff = Path(args.diff).read_text(encoding="utf-8")
-        result = apply_patch_legacy(Path("."), diff, approve=args.approve)
-        print({"ok": result.ok, "message": result.message, "legacy": True})
-        return
-    print({"ok": False, "error": "patch_id or --diff required"})
+    try:
+        if args.patch_id and not args.diff:
+            settings = _load_and_validate(args.profile)
+            result = apply_self_patch(args.patch_id, base_dir, settings=settings)
+            print({"ok": result.ok, "message": result.message, "patch_id": args.patch_id})
+            return
+        if args.diff:
+            diff = Path(args.diff).read_text(encoding="utf-8")
+            result = apply_patch_legacy(base_dir, diff, approve=args.approve)
+            print({"ok": result.ok, "message": result.message, "legacy": True})
+            return
+        print({"ok": False, "error": "patch_id or --diff required"})
+    finally:
+        lock.release()
 
 
 def cmd_self_patch(args: argparse.Namespace) -> None:
-    settings = _load_and_validate(args.profile)
-    context = None
-    if args.context_file:
-        context = Path(args.context_file).read_text(encoding="utf-8", errors="ignore")
-    elif args.context:
-        context = args.context
-    proposal = propose_self_patch(args.goal, context, Path("."), settings=settings)
-    report = {
-        "patch_id": proposal.patch_id,
-        "status": proposal.meta.get("status"),
-        "paths": proposal.meta.get("paths", []),
-        "ready_for_review": proposal.meta.get("ready_for_review", False),
-    }
-    if not args.dry_run:
-        sandbox = run_self_patch_sandbox(proposal.patch_id, Path("."), settings=settings, profile=args.profile)
-        report["sandbox_ok"] = sandbox.ok
-    print(report)
+    base_dir = Path(".")
+    try:
+        lock = acquire_exclusive_lock(base_dir, "self_patch")
+    except LockUnavailable:
+        print({"ok": False, "error": "self_patch lock unavailable (train/serve running?)"})
+        return
+    try:
+        settings = _load_and_validate(args.profile)
+        context = None
+        if args.context_file:
+            context = Path(args.context_file).read_text(encoding="utf-8", errors="ignore")
+        elif args.context:
+            context = args.context
+        proposal = propose_self_patch(args.goal, context, base_dir, settings=settings)
+        report = {
+            "patch_id": proposal.patch_id,
+            "status": proposal.meta.get("status"),
+            "paths": proposal.meta.get("paths", []),
+            "ready_for_review": proposal.meta.get("ready_for_review", False),
+        }
+        if not args.dry_run:
+            sandbox = run_self_patch_sandbox(proposal.patch_id, base_dir, settings=settings, profile=args.profile)
+            report["sandbox_ok"] = sandbox.ok
+        print(report)
+    finally:
+        lock.release()
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:

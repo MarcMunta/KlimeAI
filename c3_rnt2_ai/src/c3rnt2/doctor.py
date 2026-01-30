@@ -151,7 +151,7 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
     lock_dir = base_dir / "data" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_status = {}
-    for role in ("serve", "train"):
+    for role in ("serve", "train", "self_patch"):
         lock_path = lock_dir / f"{role}.lock"
         lock = FileLock(lock_path)
         try:

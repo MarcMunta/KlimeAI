@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import random
 import time
@@ -104,17 +105,43 @@ def _dataset_path(base_dir: Path) -> Path:
     return _bootstrap_dir(base_dir) / "bootstrap_samples.jsonl"
 
 
-def _save_dataset(path: Path, samples: List[Sample], meta: dict) -> None:
+def _build_messages(prompt: str, default_system: str | None) -> list[dict]:
+    messages: list[dict] = []
+    if default_system:
+        messages.append({"role": "system", "content": default_system})
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _hash_messages(messages: list[dict]) -> str:
+    payload = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _extract_prompt(messages: list[dict]) -> str:
+    for msg in messages:
+        if (msg.get("role") or "").lower() == "user":
+            return str(msg.get("content") or "").strip()
+    return ""
+
+
+def _save_dataset(path: Path, samples: List[Sample], meta: dict, default_system: str | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for sample in samples:
+            messages = sample.messages or _build_messages(sample.prompt, default_system)
+            prompt_hash = _hash_messages(messages) if messages else ""
             record = {
+                "messages": messages,
+                "prompt_hash": prompt_hash,
                 "prompt": sample.prompt,
                 "response": sample.response,
                 "teacher": meta.get("teacher"),
-                "ts": meta.get("ts"),
-                "settings_profile": meta.get("settings_profile"),
+                "quant": meta.get("quant"),
                 "seed": meta.get("seed"),
+                "profile": meta.get("profile"),
+                "ts": meta.get("ts"),
                 "params": meta.get("params", {}),
             }
             handle.write(json.dumps(record) + "\n")
@@ -129,30 +156,47 @@ def _load_dataset(path: Path) -> List[Sample]:
             payload = json.loads(line)
         except Exception:
             continue
+        messages = payload.get("messages")
         prompt = str(payload.get("prompt", "")).strip()
         response = str(payload.get("response", "")).strip()
+        if not prompt and isinstance(messages, list):
+            prompt = _extract_prompt(messages)
         if not prompt or not response:
             continue
-        samples.append(Sample(prompt=prompt, response=response, source_kind="bootstrap"))
+        samples.append(Sample(prompt=prompt, response=response, source_kind="bootstrap", messages=messages if isinstance(messages, list) else None))
     return samples
 
 
 
 
+def _normalize_device(device: Any) -> str | None:
+    if isinstance(device, int):
+        return f"cuda:{device}"
+    if isinstance(device, str):
+        return device
+    try:
+        return str(device)
+    except Exception:
+        return None
+
+
 def _resolve_teacher_input_device(teacher_model: Any, fallback: str) -> str:
     device_map = getattr(teacher_model, "hf_device_map", None)
     if isinstance(device_map, dict) and device_map:
-        first = next(iter(device_map.values()))
-        if isinstance(first, int):
-            return f"cuda:{first}"
-        if isinstance(first, str):
-            return first
+        for key in ("model.embed_tokens", "embed_tokens", "transformer.wte"):
+            if key in device_map:
+                dev = _normalize_device(device_map[key])
+                if dev and dev != "disk":
+                    return dev
+        for value in device_map.values():
+            dev = _normalize_device(value)
+            if dev and dev != "disk":
+                return dev
     device_attr = getattr(teacher_model, "device", None)
     if device_attr is not None:
-        try:
-            return str(device_attr)
-        except Exception:
-            pass
+        dev = _normalize_device(device_attr)
+        if dev:
+            return dev
     return fallback
 
 def _parse_max_memory(spec: str | None) -> dict | None:
@@ -187,13 +231,7 @@ def _load_teacher(teacher: str, device: str, quant: str, max_memory: str | None)
                 kwargs["load_in_4bit"] = True
             else:
                 kwargs["load_in_8bit"] = True
-            if device == "cuda":
-                if torch.cuda.device_count() == 1:
-                    kwargs["device_map"] = {"": 0}
-                else:
-                    kwargs["device_map"] = "auto"
-            else:
-                kwargs["device_map"] = "cpu"
+            kwargs["device_map"] = "auto"
         except Exception:
             info["quant_fallback"] = True
             use_quant = False
@@ -225,8 +263,8 @@ def _generate_teacher_samples(
     samples: List[Sample] = []
     for prompt in prompts:
         try:
-            messages = [{"role": "user", "content": prompt}]
-            prompt_text = build_chat_prompt(messages, backend="hf", tokenizer=teacher_tok, default_system=default_system)
+            messages = _build_messages(prompt, default_system)
+            prompt_text = build_chat_prompt(messages, backend="hf", tokenizer=teacher_tok, default_system=None)
             inputs = teacher_tok(prompt_text, return_tensors="pt")
             inputs = {k: v.to(input_device) for k, v in inputs.items()}
             with torch.inference_mode():
@@ -244,7 +282,7 @@ def _generate_teacher_samples(
         completion = completion.strip()
         if not _filter_response(completion):
             continue
-        samples.append(Sample(prompt=prompt, response=completion, source_kind="bootstrap"))
+        samples.append(Sample(prompt=prompt, response=completion, source_kind="bootstrap", messages=messages))
 
     try:
         if hasattr(teacher_model, "to"):
@@ -273,6 +311,10 @@ def _train_from_samples(
         torch.manual_seed(int(seed))
 
     model = CoreTransformer.from_settings(settings)
+    core_cfg = settings.get("core", {}) or {}
+    backend = str(core_cfg.get("backend", "vortex"))
+    default_system = core_cfg.get("hf_system_prompt", "You are a helpful coding assistant.")
+    tokenizer = getattr(model, "tokenizer", None)
     adapter_cfg = settings.get("continuous", {}).get("adapters", {})
     lora_cfg = LoRAConfig(
         rank=int(adapter_cfg.get("rank", settings.get("continuous", {}).get("adapter_rank", 4))),
@@ -300,7 +342,7 @@ def _train_from_samples(
         attempts = 0
         while token_count < batch_tokens and attempts < max(4, len(samples)):
             sample = random.choice(samples)
-            text = format_chat_sample(sample)
+            text = format_chat_sample(sample, backend=backend, tokenizer=tokenizer, default_system=default_system)
             ids, _ = model.encode_prompt(text)
             attempts += 1
             if len(ids) < 2:
@@ -376,8 +418,9 @@ def _distill_teacher(
             return {"ok": False, "error": str(exc)}
         meta = {
             "teacher": teacher,
+            "quant": teacher_quant,
             "ts": time.time(),
-            "settings_profile": profile_name,
+            "profile": profile_name,
             "seed": settings.get("continuous", {}).get("seed", settings.get("seed")),
             "params": {
                 "max_prompts": max_prompts,
@@ -385,9 +428,15 @@ def _distill_teacher(
                 "teacher_device": teacher_device,
                 "teacher_quant": teacher_quant,
                 "teacher_max_memory": teacher_max_memory,
+                "teacher_info": info,
             },
         }
-        _save_dataset(dataset_path, samples, meta)
+        _save_dataset(
+            dataset_path,
+            samples,
+            meta,
+            default_system=settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant."),
+        )
 
     if not samples:
         return {"ok": False, "error": "no distillation samples produced"}

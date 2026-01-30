@@ -9,11 +9,6 @@ from typing import Iterable
 DEFAULT_ALLOWED_PATHS = (
     "src/c3rnt2/",
     "tests/",
-    "config/",
-    "README.md",
-    "TODO.md",
-    "pyproject.toml",
-    "scripts/",
 )
 DEFAULT_FORBIDDEN_GLOBS = (
     ".env",
