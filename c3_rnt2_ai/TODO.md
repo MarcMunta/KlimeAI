@@ -1,10 +1,10 @@
 # TODO
-- CUDA extension para `gpu_decompress` (Triton/CUDA).
-- KV 2-bit real (per-channel) y layout optimizado.
-- Speculative decoding + draft model.
-- Integraci�n TensorRT-LLM opcional.
-- Router multiobjetivo con logs de mem_cost + estabilidad.
-- Expert packs entrenables (LoRA/QLoRA) por dominio.
+- [x] GPU decompress con prefetch + pinned + copia Triton.
+- [ ] KV 2-bit real (per-channel) y layout optimizado (experimental activo, falta kernel/packing).
+- [x] Speculative decoding + draft model.
+- [x] Integracion TensorRT-LLM opcional.
+- [x] Router multiobjetivo con logs de mem_cost + estabilidad.
+- [x] Expert packs entrenables (LoRA/QLoRA) por dominio.
 
 ## Estado del push (automatizado)
 

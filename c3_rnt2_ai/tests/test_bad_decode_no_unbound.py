@@ -1,6 +1,7 @@
+import pytest
 ﻿from __future__ import annotations
 
-import torch
+torch = pytest.importorskip("torch")
 
 from c3rnt2.model.bad_decode import bad_decode
 

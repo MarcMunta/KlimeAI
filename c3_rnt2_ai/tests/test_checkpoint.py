@@ -1,4 +1,5 @@
-import torch
+import pytest
+torch = pytest.importorskip("torch")
 
 from c3rnt2.model.core_transformer import CoreTransformer, save_checkpoint
 
