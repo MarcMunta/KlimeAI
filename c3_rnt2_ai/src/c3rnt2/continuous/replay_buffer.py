@@ -64,6 +64,15 @@ class ReplayBuffer:
                     ts REAL
                 )
                 """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_events (
+                    event_id TEXT PRIMARY KEY,
+                    sample_hash TEXT,
+                    delta INTEGER,
+                    ts REAL
+                )
+                """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_sample ON pending_events(sample_hash)")
             conn.commit()
 
     def add(self, item: ReplayItem, max_items: Optional[int] = None) -> bool:
@@ -90,6 +99,7 @@ class ReplayBuffer:
                 ),
             )
             inserted = cur.rowcount > 0
+            self._apply_pending(digest, conn)
             conn.commit()
         if inserted and max_items:
             self._enforce_max_items(max_items)
@@ -110,10 +120,62 @@ class ReplayBuffer:
     def bump_success_once(self, sample_hash: str, event_id: str, delta: int = 1) -> bool:
         if not event_id:
             return False
-        if not self.mark_event_processed(event_id):
-            return False
-        self.update_success(sample_hash, delta=delta)
-        return True
+        now = time.time()
+        with sqlite3.connect(self.db_path) as conn:
+            cur_proc = conn.execute(
+                "INSERT OR IGNORE INTO processed_events (event_id, ts) VALUES (?, ?)",
+                (event_id, now),
+            )
+            if cur_proc.rowcount == 0:
+                return False
+            cur_upd = conn.execute(
+                "UPDATE replay SET success_count = success_count + ? WHERE hash = ?",
+                (int(delta), sample_hash),
+            )
+            if cur_upd.rowcount == 0:
+                conn.execute("DELETE FROM processed_events WHERE event_id = ?", (event_id,))
+                conn.execute(
+                    "INSERT OR IGNORE INTO pending_events (event_id, sample_hash, delta, ts) VALUES (?, ?, ?, ?)",
+                    (event_id, sample_hash, int(delta), now),
+                )
+                conn.commit()
+                return False
+            conn.commit()
+            return True
+
+    def _apply_pending(self, digest: str, conn: sqlite3.Connection | None = None) -> None:
+        own_conn = conn is None
+        if conn is None:
+            conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT event_id, delta FROM pending_events WHERE sample_hash = ?",
+            (digest,),
+        ).fetchall()
+        if not rows:
+            if own_conn:
+                conn.commit()
+                conn.close()
+            return
+        now = time.time()
+        for event_id, delta in rows:
+            cur_proc = conn.execute(
+                "INSERT OR IGNORE INTO processed_events (event_id, ts) VALUES (?, ?)",
+                (event_id, now),
+            )
+            if cur_proc.rowcount == 0:
+                conn.execute("DELETE FROM pending_events WHERE event_id = ?", (event_id,))
+                continue
+            cur_upd = conn.execute(
+                "UPDATE replay SET success_count = success_count + ? WHERE hash = ?",
+                (int(delta), digest),
+            )
+            if cur_upd.rowcount == 0:
+                conn.execute("DELETE FROM processed_events WHERE event_id = ?", (event_id,))
+                continue
+            conn.execute("DELETE FROM pending_events WHERE event_id = ?", (event_id,))
+        if own_conn:
+            conn.commit()
+            conn.close()
 
     def update_success(self, digest: str, delta: int = 1) -> None:
         with sqlite3.connect(self.db_path) as conn:

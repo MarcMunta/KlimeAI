@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 import hashlib
 import math
 from dataclasses import dataclass
@@ -28,6 +30,61 @@ class CollectedSamples:
     samples: List[Sample]
     stats: CollectStats
     gold_samples: List[Sample]
+
+
+class IngestState:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT, ts REAL)")
+            conn.commit()
+
+    def get(self, key: str) -> str | None:
+        with self._connect() as conn:
+            cur = conn.execute("SELECT value FROM ingest_state WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def set(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO ingest_state (key, value, ts) VALUES (?, ?, ?)", (key, value, time.time()))
+            conn.commit()
+
+    def get_json(self, key: str, default: dict) -> dict:
+        raw = self.get(key)
+        if not raw:
+            return dict(default)
+        try:
+            return json.loads(raw)
+        except Exception:
+            return dict(default)
+
+    def set_json(self, key: str, value: dict) -> None:
+        self.set(key, json.dumps(value))
+
+
+def _iter_log_files(data_dir: Path) -> Iterable[Path]:
+    for path in data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name == "agent.jsonl" and "episodes" in path.parts:
+            continue
+        suffix = path.suffix.lower()
+        if suffix in {".log", ".txt", ".jsonl"}:
+            yield path
 
 
 def _load_logs(data_dir: Path) -> Iterable[str]:
@@ -102,39 +159,153 @@ def _quality_score(text: str, source_kind: str, max_repeat_ratio: float) -> floa
 
 def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
     continuous = settings.get("continuous", {})
+    ingest_cfg = continuous.get("ingest", {}) or {}
+    max_files_per_tick = int(ingest_cfg.get("max_files_per_tick", 200))
+    max_bytes_per_file = int(ingest_cfg.get("max_bytes_per_file", 2_000_000))
+    max_total_bytes_per_tick = int(ingest_cfg.get("max_total_bytes_per_tick", 10_000_000))
+    web_cfg = ingest_cfg.get("web", {}) or {}
+    web_cooldown = float(web_cfg.get("cooldown_minutes", 60))
     knowledge_path = Path(continuous.get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
     store = KnowledgeStore(knowledge_path)
+    state = IngestState(knowledge_path)
     new_docs = 0
+    files_used = 0
+    bytes_used = 0
 
-    # Memory store
+    # Memory store (small; dedup via hash)
     memory_path = base_dir / "data" / "memory" / "agent_memory.sqlite"
     if memory_path.exists():
         mem = MemoryStore(memory_path)
         for item in mem.query("summary", top_k=50):
             new_docs += store.ingest_text("memory", str(memory_path), item.text, quality=0.6)
 
-    # Logs
-    for text in _load_logs(base_dir / "data"):
-        new_docs += store.ingest_text("logs", "local", text, quality=0.2)
+    # Logs (incremental)
+    for path in _iter_log_files(base_dir / "data"):
+        if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
+            break
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        key = f"log:{path.as_posix()}"
+        meta = state.get_json(key, {"mtime": 0.0, "size": 0, "offset": 0})
+        prev_mtime = float(meta.get("mtime", 0.0))
+        prev_size = int(meta.get("size", 0))
+        offset = int(meta.get("offset", 0))
+        if stat.st_size < offset:
+            offset = 0
+        if stat.st_mtime == prev_mtime and stat.st_size == prev_size and offset >= stat.st_size:
+            continue
+        remaining = stat.st_size - offset
+        if remaining <= 0:
+            state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
+            continue
+        budget_left = max_total_bytes_per_tick - bytes_used
+        if budget_left <= 0:
+            break
+        max_bytes = min(max_bytes_per_file, budget_left, remaining)
+        if max_bytes <= 0:
+            break
+        try:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                data = handle.read(max_bytes)
+        except Exception:
+            continue
+        if not data:
+            continue
+        if path.suffix.lower() == ".jsonl":
+            last_nl = data.rfind(b"\n")
+            if last_nl == -1:
+                continue
+            data = data[: last_nl + 1]
+        text = data.decode("utf-8", errors="ignore")
+        if text:
+            new_docs += store.ingest_text("logs", path.as_posix(), text, quality=0.2)
+        bytes_used += len(data)
+        files_used += 1
+        offset += len(data)
+        state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
 
-    # Web docs (best effort)
+    # Web docs (cache + cooldown)
     if bool(continuous.get("ingest_web", True)) and allowlist:
         urls = continuous.get("ingest_urls", ["https://docs.python.org/3/", "https://pytorch.org/docs/stable/"])
         tools = AgentTools(allowlist=allowlist)
         for url in urls:
+            if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
+                break
+            key = f"web:{url}"
+            meta = state.get_json(key, {})
+            last_ts = float(meta.get("ts", 0.0))
+            last_hash = meta.get("hash")
+            if web_cooldown > 0 and (time.time() - last_ts) < web_cooldown * 60.0:
+                continue
             doc = tools.open_docs(url)
-            if doc.ok:
-                new_docs += store.ingest_text("web", url, doc.output, quality=0.7)
+            if not doc.ok:
+                continue
+            content = doc.output or ""
+            content_bytes = content.encode("utf-8", errors="ignore")
+            content_hash = hashlib.sha256(content_bytes).hexdigest()
+            if content_hash == last_hash:
+                state.set_json(key, {"ts": time.time(), "hash": last_hash})
+                continue
+            budget_left = max_total_bytes_per_tick - bytes_used
+            if budget_left <= 0:
+                break
+            max_bytes = min(max_bytes_per_file, budget_left)
+            if max_bytes > 0 and len(content_bytes) > max_bytes:
+                content_bytes = content_bytes[:max_bytes]
+                content = content_bytes.decode("utf-8", errors="ignore")
+            new_docs += store.ingest_text("web", url, content, quality=0.7)
+            bytes_used += len(content_bytes)
+            files_used += 1
+            state.set_json(key, {"ts": time.time(), "hash": content_hash})
 
-    # Episodes
+    # Episodes (incremental)
     episodes_path = base_dir / "data" / "episodes" / "agent.jsonl"
-    for ep in _load_episodes(episodes_path):
-        task = str(ep.get("task", "")).strip()
-        context = str(ep.get("prompt", "")).strip()
-        diff = str(ep.get("patch", "")).strip()
-        if task or diff:
-            text = f"{task}\n{context}\n{diff}".strip()
-            new_docs += store.ingest_text("episode", episodes_path.as_posix(), text, quality=0.9)
+    if episodes_path.exists() and files_used < max_files_per_tick and bytes_used < max_total_bytes_per_tick:
+        key = f"episodes:{episodes_path.as_posix()}"
+        meta = state.get_json(key, {"size": 0, "offset": 0})
+        offset = int(meta.get("offset", 0))
+        try:
+            stat = episodes_path.stat()
+        except Exception:
+            stat = None
+        if stat is not None:
+            if stat.st_size < offset:
+                offset = 0
+            if not (stat.st_size == int(meta.get("size", 0)) and offset >= stat.st_size):
+                remaining = stat.st_size - offset
+                if remaining > 0:
+                    budget_left = max_total_bytes_per_tick - bytes_used
+                    max_bytes = min(max_bytes_per_file, budget_left, remaining)
+                    if max_bytes > 0:
+                        with episodes_path.open("rb") as handle:
+                            handle.seek(offset)
+                            data = handle.read(max_bytes)
+                        if data:
+                            last_nl = data.rfind(b"\n")
+                            if last_nl != -1:
+                                data = data[: last_nl + 1]
+                                offset += len(data)
+                                text = data.decode("utf-8", errors="ignore")
+                                for line in text.splitlines():
+                                    try:
+                                        payload = json.loads(line)
+                                    except Exception:
+                                        continue
+                                    if not isinstance(payload, dict):
+                                        continue
+                                    task = str(payload.get("task", "")).strip()
+                                    context = str(payload.get("prompt", "")).strip()
+                                    diff = str(payload.get("patch", "")).strip()
+                                    if task or diff:
+                                        doc_text = f"{task}\n{context}\n{diff}".strip()
+                                        new_docs += store.ingest_text("episode", episodes_path.as_posix(), doc_text, quality=0.9)
+                                bytes_used += len(data)
+                                files_used += 1
+                        state.set_json(key, {"size": stat.st_size, "offset": offset})
+
     return new_docs
 
 

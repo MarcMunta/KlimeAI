@@ -92,6 +92,14 @@ def normalize_settings(settings: dict) -> dict:
             lava[key] = vx.get(key)
         elif key in core:
             lava[key] = core.get(key)
+    cont = normalized.get("continuous", {}) or {}
+    if cont:
+        if "interval_minutes" not in cont and cont.get("run_interval_minutes") is not None:
+            cont["interval_minutes"] = cont.get("run_interval_minutes")
+        if "max_steps_per_tick" not in cont and cont.get("max_steps") is not None:
+            cont["max_steps_per_tick"] = cont.get("max_steps")
+        normalized["continuous"] = cont
+
     if lava:
         normalized["lava"] = lava
 

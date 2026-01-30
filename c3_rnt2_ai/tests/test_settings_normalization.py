@@ -12,6 +12,9 @@ def _assert_profile(profile: str) -> None:
     c3 = settings.get("c3", {})
     if c3.get("paged_lm_head_stream_topk") is not None:
         assert runtime.get("paged_lm_head_stream_topk") == c3.get("paged_lm_head_stream_topk")
+    cont = settings.get("continuous", {})
+    if cont.get("run_interval_minutes") is not None:
+        assert cont.get("interval_minutes") == cont.get("run_interval_minutes")
 
 
 def test_settings_normalization_profiles() -> None:

@@ -66,6 +66,7 @@ class KnowledgeStore:
         self.db_path = db_path
         self.dim = dim
         self.cache_limit = cache_limit
+        self.fts_rebuilds = 0
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -103,14 +104,22 @@ class KnowledgeStore:
             cols = [row[1] for row in conn.execute("PRAGMA table_info(docs)").fetchall()]
             if "vec_blob" not in cols:
                 conn.execute("ALTER TABLE docs ADD COLUMN vec_blob BLOB")
+            fts_exists = False
             try:
-                conn.execute(
-                    """
-                    CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
-                    USING fts5(text, source_kind, source_ref, content='docs', content_rowid='id')
-                    """
-                )
-                conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+                cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs_fts'")
+                fts_exists = cur.fetchone() is not None
+            except Exception:
+                fts_exists = False
+            try:
+                if not fts_exists:
+                    conn.execute(
+                        """
+                        CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
+                        USING fts5(text, source_kind, source_ref, content='docs', content_rowid='id')
+                        """
+                    )
+                    conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+                    self.fts_rebuilds += 1
             except Exception:
                 pass
             conn.commit()
