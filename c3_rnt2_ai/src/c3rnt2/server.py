@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable
 
 from .model.core_transformer import CoreTransformer
 from .model_loader import load_inference_model
+from .prompting.chat_format import build_chat_prompt
 from .model.bad_decode import _sample_logits, _sample_logits_topk, _RepetitionTracker, _NgramTracker
 from .continuous.lora import LoRAConfig, inject_lora, load_lora_state, resolve_target_modules
 from .continuous.registry import load_registry
@@ -27,20 +28,6 @@ def _maybe_load_adapter(model: CoreTransformer, settings: dict, base_dir: Path) 
             inject_lora(model, lora_cfg, target_modules=target_modules)
             load_lora_state(model, adapter_path)
 
-
-def _build_prompt(messages: list[dict[str, Any]]) -> str:
-    parts = []
-    for msg in messages:
-        role = (msg.get("role") or "user").lower()
-        content = msg.get("content") or ""
-        if role == "system":
-            parts.append(f"### System:\n{content}")
-        elif role == "assistant":
-            parts.append(f"### Assistant:\n{content}")
-        else:
-            parts.append(f"### User:\n{content}")
-    parts.append("### Assistant:\n")
-    return "\n".join(parts).strip()
 
 
 def _stream_generate(
@@ -150,7 +137,9 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             messages = [{"role": "user", "content": payload.get("prompt")}]
         if not messages:
             raise HTTPException(status_code=400, detail="messages required")
-        prompt = _build_prompt(messages)
+        backend = settings.get("core", {}).get("backend", "vortex")
+        default_system = settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant.")
+        prompt = build_chat_prompt(messages, backend, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
         stream = bool(payload.get("stream", False))
         decode_args = _resolve_decode_args(settings, payload)
         created = int(time.time())
@@ -267,7 +256,9 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 self.send_response(400)
                 self.end_headers()
                 return
-            prompt = _build_prompt(messages)
+            backend = settings.get("core", {}).get("backend", "vortex")
+        default_system = settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant.")
+        prompt = build_chat_prompt(messages, backend, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
             stream = bool(payload.get("stream", False))
             decode_args = _resolve_decode_args(settings, payload)
             created = int(time.time())

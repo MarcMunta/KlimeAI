@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 import torch
 
+from .prompting.chat_format import build_chat_prompt
 
 @dataclass
 class HFConfig:
@@ -32,6 +33,11 @@ class HFModel:
         self.model.eval()
         self.device = torch.device(cfg.device)
 
+    def _prepare_prompt(self, prompt: str | None, messages: list[dict] | None, system: str | None) -> str:
+        if messages is not None:
+            return build_chat_prompt(messages, backend="hf", tokenizer=self.tokenizer, default_system=system)
+        return prompt or ""
+
     def _encode(self, prompt: str) -> torch.Tensor:
         inputs = self.tokenizer(prompt, return_tensors="pt")
         return inputs["input_ids"].to(self.cfg.device)
@@ -46,7 +52,9 @@ class HFModel:
 
     def generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
+        messages: list[dict] | None = None,
+        system: str | None = None,
         max_new_tokens: int = 64,
         temperature: float = 1.0,
         top_p: float = 1.0,
@@ -54,7 +62,8 @@ class HFModel:
         no_repeat_ngram: int = 0,
         **_kwargs,
     ) -> str:
-        input_ids = self._encode(prompt)
+        prompt_text = self._prepare_prompt(prompt, messages, system)
+        input_ids = self._encode(prompt_text)
         do_sample = temperature > 0
         output = self.model.generate(
             input_ids=input_ids,
@@ -70,19 +79,22 @@ class HFModel:
 
     def stream_generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
+        messages: list[dict] | None = None,
+        system: str | None = None,
         max_new_tokens: int = 64,
         temperature: float = 1.0,
         top_p: float = 1.0,
         repetition_penalty: float = 1.0,
         no_repeat_ngram: int = 0,
     ) -> Iterable[str]:
+        prompt_text = self._prepare_prompt(prompt, messages, system)
         try:
             from transformers import TextIteratorStreamer  # type: ignore
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"transformers streamer not available: {exc}")
 
-        input_ids = self._encode(prompt)
+        input_ids = self._encode(prompt_text)
         do_sample = temperature > 0
         streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True)
 

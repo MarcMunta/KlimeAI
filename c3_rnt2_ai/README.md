@@ -41,7 +41,7 @@ Perfil HF (Qwen-8B):
 python -m c3rnt2 chat --profile qwen8b_base
 python -m c3rnt2 serve --profile qwen8b_base
 
-Requiere: pip install transformers
+Requiere: pip install .[hf]
 ```
 
 ## Tokenizador VORTEX-Tok

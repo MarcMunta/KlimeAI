@@ -13,6 +13,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..device import autocast_context
 from ..model.core_transformer import CoreTransformer
+from ..prompting.chat_format import build_chat_prompt
 from .anchors import load_anchors
 from .formatting import format_chat_sample
 from .lora import LoRAConfig, inject_lora, resolve_target_modules, save_lora_state
@@ -136,6 +137,24 @@ def _load_dataset(path: Path) -> List[Sample]:
     return samples
 
 
+
+
+def _resolve_teacher_input_device(teacher_model: Any, fallback: str) -> str:
+    device_map = getattr(teacher_model, "hf_device_map", None)
+    if isinstance(device_map, dict) and device_map:
+        first = next(iter(device_map.values()))
+        if isinstance(first, int):
+            return f"cuda:{first}"
+        if isinstance(first, str):
+            return first
+    device_attr = getattr(teacher_model, "device", None)
+    if device_attr is not None:
+        try:
+            return str(device_attr)
+        except Exception:
+            pass
+    return fallback
+
 def _parse_max_memory(spec: str | None) -> dict | None:
     if not spec:
         return None
@@ -148,37 +167,49 @@ def _parse_max_memory(spec: str | None) -> dict | None:
     return parsed or None
 
 
-def _load_teacher(teacher: str, device: str, quant: str, max_memory: str | None) -> tuple[Any, Any, dict]:
+def _load_teacher(teacher: str, device: str, quant: str, max_memory: str | None) -> tuple[Any, Any, dict, str]:
     info: dict[str, Any] = {"quant": quant, "device": device}
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"transformers not available: {exc}")
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
     kwargs: dict[str, Any] = {}
-    if device == "cuda":
-        kwargs["torch_dtype"] = torch.float16
-    if max_memory:
-        parsed = _parse_max_memory(max_memory)
-        if parsed:
-            kwargs["max_memory"] = parsed
-    if quant in {"4bit", "8bit"}:
+    max_mem = _parse_max_memory(max_memory)
+    if max_mem:
+        kwargs["max_memory"] = max_mem
+
+    use_quant = quant in {"4bit", "8bit"}
+    if use_quant:
         try:
             import bitsandbytes  # type: ignore  # noqa: F401
             if quant == "4bit":
                 kwargs["load_in_4bit"] = True
             else:
                 kwargs["load_in_8bit"] = True
+            if device == "cuda":
+                if torch.cuda.device_count() == 1:
+                    kwargs["device_map"] = {"": 0}
+                else:
+                    kwargs["device_map"] = "auto"
+            else:
+                kwargs["device_map"] = "cpu"
         except Exception:
             info["quant_fallback"] = True
-    if device == "cpu":
-        kwargs["torch_dtype"] = torch.float32
+            use_quant = False
+
+    if not use_quant:
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        kwargs["torch_dtype"] = dtype
+
     teacher_tok = AutoTokenizer.from_pretrained(teacher)
     teacher_model = AutoModelForCausalLM.from_pretrained(teacher, **kwargs)
-    teacher_model.to(device)
+    if not use_quant:
+        teacher_model.to(device)
     teacher_model.eval()
-    return teacher_model, teacher_tok, info
+
+    input_device = _resolve_teacher_input_device(teacher_model, device)
+    return teacher_model, teacher_tok, info, input_device
 
 
 def _generate_teacher_samples(
@@ -188,20 +219,24 @@ def _generate_teacher_samples(
     device: str,
     quant: str,
     max_memory: str | None,
+    default_system: str | None,
 ) -> tuple[List[Sample], dict]:
-    teacher_model, teacher_tok, info = _load_teacher(teacher, device=device, quant=quant, max_memory=max_memory)
+    teacher_model, teacher_tok, info, input_device = _load_teacher(teacher, device=device, quant=quant, max_memory=max_memory)
     samples: List[Sample] = []
     for prompt in prompts:
         try:
-            inputs = teacher_tok(prompt, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            output = teacher_model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                top_p=0.95,
-                temperature=0.7,
-            )
+            messages = [{"role": "user", "content": prompt}]
+            prompt_text = build_chat_prompt(messages, backend="hf", tokenizer=teacher_tok, default_system=default_system)
+            inputs = teacher_tok(prompt_text, return_tensors="pt")
+            inputs = {k: v.to(input_device) for k, v in inputs.items()}
+            with torch.inference_mode():
+                output = teacher_model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    top_p=0.95,
+                    temperature=0.7,
+                )
             gen_ids = output[0][inputs["input_ids"].shape[1] :]
             completion = teacher_tok.decode(gen_ids, skip_special_tokens=True)
         except Exception:
@@ -211,9 +246,9 @@ def _generate_teacher_samples(
             continue
         samples.append(Sample(prompt=prompt, response=completion, source_kind="bootstrap"))
 
-    # release teacher before student init
     try:
-        teacher_model.to("cpu")
+        if hasattr(teacher_model, "to"):
+            teacher_model.to("cpu")
     except Exception:
         pass
     del teacher_model
@@ -335,6 +370,7 @@ def _distill_teacher(
                 device=teacher_device,
                 quant=teacher_quant,
                 max_memory=teacher_max_memory,
+                default_system=settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant."),
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

@@ -19,6 +19,7 @@ from .continuous.lora import load_lora_state, inject_lora, LoRAConfig, resolve_t
 from .continuous.dataset import retrieve_context, ingest_sources, collect_samples
 from .continuous.anchors import write_default_anchors
 from .continuous.registry import load_registry, is_bootstrapped
+from .prompting.chat_format import build_chat_prompt
 from .continuous.bootstrap import run_bootstrap
 from .device import detect_device
 from .selfimprove.improve_loop import run_improve_loop
@@ -102,8 +103,12 @@ def cmd_chat(args: argparse.Namespace) -> None:
             context = retrieve_context(Path("."), prompt, settings, top_k=top_k)
             if context:
                 prompt = f"Context:\n{context}\n\nUser:\n{prompt}"
+        backend = settings.get("core", {}).get("backend", "vortex")
+        default_system = settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant.")
+        messages = [{"role": "user", "content": prompt}]
+        prompt_text = build_chat_prompt(messages, backend, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
         response = model.generate(
-            prompt,
+            prompt_text,
             max_new_tokens=args.max_new_tokens or int(decode_cfg.get("max_new_tokens", 64)),
             temperature=args.temperature if args.temperature is not None else float(decode_cfg.get("temperature", 1.0)),
             top_p=args.top_p if args.top_p is not None else float(decode_cfg.get("top_p", 1.0)),
