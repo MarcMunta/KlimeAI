@@ -38,10 +38,17 @@ def _log_episode(base_dir: Path, payload: dict) -> None:
 
 def run_demo_agent(settings: dict) -> Dict[str, str]:
     agent_cfg = settings.get("agent", {})
-    allowlist = agent_cfg.get("web_allowlist", ["docs.python.org"])
+    tools_cfg = settings.get("tools", {}).get("web", {}) or {}
+    allowlist = tools_cfg.get("allow_domains") or agent_cfg.get("web_allowlist", ["docs.python.org"])
     sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
-    rate_limit = int(agent_cfg.get("rate_limit_per_min", 30))
-    tools = AgentTools(allowlist=allowlist, sandbox_root=sandbox_root, rate_limit_per_min=rate_limit)
+    rate_limit = int(tools_cfg.get("rate_limit_per_min", agent_cfg.get("rate_limit_per_min", 30)))
+    tools = AgentTools(
+        allowlist=allowlist,
+        sandbox_root=sandbox_root,
+        rate_limit_per_min=rate_limit,
+        web_enabled=bool(tools_cfg.get("enabled", False)),
+        web_cfg=tools_cfg,
+    )
     repo = _setup_demo_repo(sandbox_root)
 
     memory = MemoryStore(Path("data") / "memory" / "agent_memory.sqlite")

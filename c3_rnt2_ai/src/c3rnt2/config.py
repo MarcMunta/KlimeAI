@@ -119,6 +119,53 @@ def normalize_settings(settings: dict) -> dict:
     if lava:
         normalized["lava"] = lava
 
+    tools = normalized.get("tools", {}) or {}
+    web = tools.get("web", {}) or {}
+    agent = normalized.get("agent", {}) or {}
+    if not web.get("allow_domains"):
+        web_allow = agent.get("web_allowlist")
+        if web_allow:
+            web["allow_domains"] = web_allow
+    web.setdefault("enabled", False)
+    web.setdefault("rate_limit_per_min", agent.get("rate_limit_per_min", 30))
+    web.setdefault("cache_dir", "data/web_cache")
+    web.setdefault("max_bytes", 1_000_000)
+    web.setdefault("timeout_s", 10)
+    tools["web"] = web
+    normalized["tools"] = tools
+
+    self_patch = normalized.get("self_patch", {}) or {}
+    self_patch.setdefault("enabled", True)
+    self_patch.setdefault("queue_dir", "data/self_patch/queue")
+    self_patch.setdefault("sandbox_dir", "data/self_patch/sandbox")
+    self_patch.setdefault("max_patch_kb", 128)
+    self_patch.setdefault(
+        "allowed_paths",
+        [
+            "src/c3rnt2/",
+            "tests/",
+            "config/",
+            "README.md",
+            "TODO.md",
+            "pyproject.toml",
+            "scripts/",
+        ],
+    )
+    self_patch.setdefault(
+        "forbidden_globs",
+        [
+            ".env",
+            ".env.*",
+            "data/**",
+            "*.key",
+            "*.pem",
+            "*.p12",
+            "*.sqlite",
+            "*.db",
+        ],
+    )
+    normalized["self_patch"] = self_patch
+
     return normalized
 
 
@@ -134,12 +181,20 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     decode = settings.get("decode", {}) or {}
     bad = settings.get("bad", {}) or {}
     cont = settings.get("continuous", {}) or {}
+    tools_cfg = settings.get("tools", {}) or {}
+    web_cfg = tools_cfg.get("web", {}) or {}
+    self_patch_cfg = settings.get("self_patch", {}) or {}
 
     if not tok.get("vortex_tok_path"):
         missing.append("tokenizer.vortex_tok_path")
     if backend == "hf":
         if not core.get("hf_model"):
             missing.append("core.hf_model")
+    elif backend == "tensorrt":
+        if not (core.get("tensorrt_engine_dir") or core.get("tensorrt_engine_path")):
+            missing.append("core.tensorrt_engine_dir")
+        if not (core.get("tensorrt_tokenizer") or core.get("hf_model")):
+            missing.append("core.tensorrt_tokenizer or core.hf_model")
     else:
         for key in ("hidden_size", "layers", "heads"):
             if key not in core:
@@ -164,6 +219,34 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     gpu_decompress = str(runtime.get("gpu_decompress", "none")).lower()
     if gpu_decompress not in {"none", "triton"}:
         errors.append("runtime.gpu_decompress must be none or triton")
+
+    if web_cfg:
+        if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_domains"):
+            errors.append("tools.web.allow_domains required when tools.web.enabled is true")
+        try:
+            if int(web_cfg.get("rate_limit_per_min", 1)) <= 0:
+                errors.append("tools.web.rate_limit_per_min must be > 0")
+        except Exception:
+            errors.append("tools.web.rate_limit_per_min must be > 0")
+        try:
+            if int(web_cfg.get("max_bytes", 1)) <= 0:
+                errors.append("tools.web.max_bytes must be > 0")
+        except Exception:
+            errors.append("tools.web.max_bytes must be > 0")
+        try:
+            if float(web_cfg.get("timeout_s", 1.0)) <= 0:
+                errors.append("tools.web.timeout_s must be > 0")
+        except Exception:
+            errors.append("tools.web.timeout_s must be > 0")
+
+    if self_patch_cfg:
+        if not self_patch_cfg.get("allowed_paths"):
+            errors.append("self_patch.allowed_paths must not be empty")
+        try:
+            if int(self_patch_cfg.get("max_patch_kb", 1)) <= 0:
+                errors.append("self_patch.max_patch_kb must be > 0")
+        except Exception:
+            errors.append("self_patch.max_patch_kb must be > 0")
 
     top_p = float(decode.get("top_p", bad.get("top_p", 1.0)))
     if not (0.0 < top_p <= 1.0):
@@ -216,6 +299,12 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     _check_data_path(cont.get("knowledge_path"), "continuous.knowledge_path")
     _check_data_path(cont.get("replay", {}).get("path"), "continuous.replay.path")
     _check_data_path(cont.get("eval", {}).get("anchors_path"), "continuous.eval.anchors_path")
+    if web_cfg.get("cache_dir"):
+        _check_data_path(web_cfg.get("cache_dir"), "tools.web.cache_dir")
+    if self_patch_cfg.get("queue_dir"):
+        _check_data_path(self_patch_cfg.get("queue_dir"), "self_patch.queue_dir")
+    if self_patch_cfg.get("sandbox_dir"):
+        _check_data_path(self_patch_cfg.get("sandbox_dir"), "self_patch.sandbox_dir")
 
     if missing or errors:
         message = []

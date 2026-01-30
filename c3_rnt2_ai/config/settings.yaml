@@ -72,6 +72,36 @@ profiles:
     agent:
       web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
       tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
+    tools:
+      web:
+        enabled: false
+        allow_domains: ["github.com", "docs.python.org", "pytorch.org"]
+        rate_limit_per_min: 30
+        max_bytes: 1000000
+        timeout_s: 10
+        cache_dir: data/web_cache
+    self_patch:
+      enabled: true
+      queue_dir: data/self_patch/queue
+      sandbox_dir: data/self_patch/sandbox
+      max_patch_kb: 128
+      allowed_paths:
+        - "src/c3rnt2/"
+        - "tests/"
+        - "config/"
+        - "README.md"
+        - "TODO.md"
+        - "pyproject.toml"
+        - "scripts/"
+      forbidden_globs:
+        - ".env"
+        - ".env.*"
+        - "data/**"
+        - "*.key"
+        - "*.pem"
+        - "*.p12"
+        - "*.sqlite"
+        - "*.db"
     continuous:
       run_interval_minutes: 30
       adapter_rank: 4
@@ -142,6 +172,7 @@ profiles:
       hf_attn_implementation: sdpa
       hf_system_prompt: "You are a helpful coding assistant."
       dtype: bf16
+      backend_fallback: vortex
     decode:
       max_new_tokens: 128
     runtime:

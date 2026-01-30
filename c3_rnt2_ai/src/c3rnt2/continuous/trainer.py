@@ -53,7 +53,8 @@ class ContinualTrainer:
             torch.manual_seed(int(seed))
 
         try:
-            allowlist = self.settings.get("agent", {}).get("web_allowlist", ["docs.python.org"])
+            tools_cfg = self.settings.get("tools", {}).get("web", {}) or {}
+            allowlist = tools_cfg.get("allow_domains") or self.settings.get("agent", {}).get("web_allowlist", ["docs.python.org"])
             collected = collect_samples(self.base_dir, allowlist, self.settings, ingest=ingest)
             stats = collected.stats
             trigger_cfg = self.settings.get("continuous", {}).get("trigger", {})
