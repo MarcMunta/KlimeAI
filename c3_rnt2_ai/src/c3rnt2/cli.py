@@ -74,6 +74,34 @@ def doctor():
     if tracked_env:
         rprint({"warning": "tracked_sensitive_files", "files": tracked_env})
 
+    tracked_cache = []
+    tracked_large = []
+    try:
+        result = subprocess.run(["git", "ls-files"], capture_output=True, text=True)
+        files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        repo_root = Path(__file__).resolve().parents[2]
+        cache_markers = [".mypy_cache/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", ".venv/", "data/"]
+        for rel in files:
+            rel_norm = rel.replace("\\", "/").lower()
+            if any(marker in rel_norm for marker in cache_markers) or rel_norm.endswith(".pyc"):
+                tracked_cache.append(rel)
+            if rel_norm.endswith((".pt", ".bin", ".safetensors")):
+                tracked_large.append(rel)
+                continue
+            try:
+                size = (repo_root / rel).stat().st_size
+                if size > 100 * 1024 * 1024:
+                    tracked_large.append(f"{rel} ({size / (1024 ** 2):.1f} MB)")
+            except Exception:
+                continue
+    except Exception:
+        tracked_cache = []
+        tracked_large = []
+    if tracked_cache:
+        rprint({"warning": "tracked_cache_files", "files": tracked_cache})
+    if tracked_large:
+        rprint({"warning": "tracked_large_files", "files": tracked_large})
+
 
 @app.command()
 def demo_tokenizer(text: Optional[str] = None, profile: Optional[str] = None):

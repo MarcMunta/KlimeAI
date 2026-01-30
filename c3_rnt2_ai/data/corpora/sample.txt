@@ -1,5 +1,0 @@
-# Sample corpus
-Hola mundo
-This is a tiny corpus for RNT-2 codebook bootstrap.
-for i in range(3):
-    print(i)

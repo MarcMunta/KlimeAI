@@ -4,6 +4,8 @@
 __pycache__/
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
+.venv/
 *.pyc
 *.pyo
 *.pyd
@@ -13,5 +15,6 @@ Thumbs.db
 
 # data artifacts
 /data/*
-!/data/examples/**
-!/data/bench/**
+
+# model weights
+*.pt
