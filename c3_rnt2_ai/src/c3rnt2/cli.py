@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
 
 from .config import load_settings, resolve_profile, validate_profile
 from .device import detect_device
+from .doctor import check_deps, run_deep_checks
 from .logging import setup_logging, get_logger
 from .tokenizer.rnt2_encode import encode_text
 from .tokenizer.rnt2_decode import decode_stream
@@ -35,7 +36,7 @@ def _main(log_level: Optional[str] = None, profile: Optional[str] = None):
 
 
 @app.command()
-def doctor():
+def doctor(deep: bool = False):
     """Check CUDA, deps, and environment."""
     info = detect_device()
     rprint({
@@ -56,21 +57,21 @@ def doctor():
         "zstandard",
         "lz4",
     ]
-    status = {}
-    for name in modules:
-        try:
-            __import__(name)
-            status[name] = "ok"
-        except Exception as exc:
-            status[name] = f"missing ({exc.__class__.__name__})"
+    status = check_deps(modules)
     rprint({"deps": status})
 
+    base_dir = Path(__file__).resolve().parents[2]
     try:
         settings = load_settings(None)
-        validate_profile(settings)
+        validate_profile(settings, base_dir=base_dir)
         rprint({"settings_ok": True, "profile": resolve_profile(None)})
+        if deep:
+            deep_result = run_deep_checks(settings, base_dir=base_dir)
+            rprint({"deep": deep_result})
     except Exception as exc:
         rprint({"warning": "settings_invalid", "error": str(exc)})
+        if deep:
+            rprint({"deep": {"deep_ok": False}})
 
     tracked_env = []
     try:
@@ -174,4 +175,3 @@ def demo_agent(profile: Optional[str] = None):
 
 if __name__ == "__main__":
     app()
-

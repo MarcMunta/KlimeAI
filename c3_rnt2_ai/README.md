@@ -7,11 +7,16 @@ Este repo implementa un prototipo modular para una “IA 120B-like” local comb
 - **BAD**: Blockwise Adaptive Decoding (draft+verify).
 - **Agente**: herramientas, memoria persistente, auto-entrenamiento y auto-mejora segura.
 
-## Instalación
+## Instalaci�n
 ```bash
 python -m venv .venv
 . .venv/bin/activate  # en Windows: .venv\Scripts\activate
 pip install -e .
+```
+
+Para API local (serve):
+```bash
+pip install -e .[api]
 ```
 
 ## CLI (VORTEX-X)
@@ -21,9 +26,15 @@ python -m c3rnt2 tokenizer-train
 python -m c3rnt2 eval
 python -m c3rnt2 chat
 python -m c3rnt2 agent-demo
+python -m c3rnt2 doctor --deep --profile rtx4080_16gb_vortexx_next
+python -m c3rnt2 serve --profile rtx4080_16gb_vortexx_next
+python -m c3rnt2 bootstrap --profile dev_small --checkpoint path.pt
+python -m c3rnt2 ingest-once --profile dev_small
+python -m c3rnt2 train-once --profile dev_small
 python -m c3rnt2 self-train --once
 python -m c3rnt2 self-improve
 python -m c3rnt2 apply-patch --diff data/selfimprove/runs/<id>/proposed.diff --approve
+python -m c3rnt2 bench --profile rtx4080_16gb_vortexx_next --max-new-tokens 512
 ```
 
 ## Tokenizador VORTEX-Tok
