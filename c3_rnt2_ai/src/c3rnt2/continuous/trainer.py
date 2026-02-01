@@ -37,6 +37,13 @@ class ContinualTrainer:
     def _build_model(self) -> CoreTransformer:
         return CoreTransformer.from_settings(self.settings)
 
+    def _format_sample(self, model: CoreTransformer, sample: Sample) -> str:
+        core_cfg = self.settings.get("core", {}) or {}
+        backend = str(core_cfg.get("backend", "vortex"))
+        default_system = core_cfg.get("hf_system_prompt", "You are a helpful coding assistant.")
+        tokenizer = getattr(model, "tokenizer", None)
+        return format_chat_sample(sample, backend=backend, tokenizer=tokenizer, default_system=default_system)
+
     def run_tick(self, ingest: bool = True) -> TrainResult:
         run_id, _run_path = begin_run(self.base_dir)
         if not is_bootstrapped(self.base_dir, self.settings):
@@ -53,7 +60,8 @@ class ContinualTrainer:
             torch.manual_seed(int(seed))
 
         try:
-            allowlist = self.settings.get("agent", {}).get("web_allowlist", ["docs.python.org"])
+            tools_cfg = self.settings.get("tools", {}).get("web", {}) or {}
+            allowlist = tools_cfg.get("allow_domains") or self.settings.get("agent", {}).get("web_allowlist", ["docs.python.org"])
             collected = collect_samples(self.base_dir, allowlist, self.settings, ingest=ingest)
             stats = collected.stats
             trigger_cfg = self.settings.get("continuous", {}).get("trigger", {})
@@ -143,7 +151,7 @@ class ContinualTrainer:
                 attempts = 0
                 while token_count < batch_tokens and attempts < max(4, len(train_samples)):
                     sample = random.choices(train_samples, weights=sample_weights, k=1)[0]
-                    text = format_chat_sample(sample)
+                    text = self._format_sample(model, sample)
                     ids, _ = model.encode_prompt(text)
                     attempts += 1
                     if len(ids) < 2:
@@ -285,7 +293,7 @@ class ContinualTrainer:
         losses = []
         with torch.inference_mode():
             for sample in samples[: max(1, len(samples))]:
-                text = format_chat_sample(sample)
+                text = self._format_sample(model, sample)
                 if not text:
                     continue
                 ids, _ = model.encode_prompt(text)

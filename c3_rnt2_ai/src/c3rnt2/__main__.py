@@ -14,20 +14,9 @@ from pathlib import Path
 
 from .config import load_settings, resolve_profile, validate_profile
 from .doctor import check_deps, run_deep_checks
-from .model.core_transformer import CoreTransformer, save_checkpoint
-from .model_loader import load_inference_model
-from .training import eval as eval_mod
-from .tokenizer import rnt2_train
-from .agent.agent_loop import run_demo_agent
-from .continuous.trainer import ContinualTrainer
-from .continuous.lora import load_lora_state, inject_lora, LoRAConfig, resolve_target_modules
-from .continuous.dataset import retrieve_context, ingest_sources, collect_samples
-from .continuous.anchors import write_default_anchors
-from .continuous.registry import load_registry, is_bootstrapped
-from .prompting.chat_format import build_chat_prompt
-from .continuous.bootstrap import run_bootstrap
 from .device import detect_device
 from .selfimprove.improve_loop import run_improve_loop
+<<<<<<< HEAD
 from .selfimprove.patch_ops import apply_patch as legacy_apply_patch
 from .self_patch import propose_patch as sp_propose_patch, sandbox_run as sp_run_sandbox, apply_patch as sp_apply_patch
 from .utils.locks import acquire_exclusive_lock, LockUnavailable
@@ -36,6 +25,13 @@ from .server import run_server
 from .training import train_router as train_router_mod
 from .training import train_experts as train_experts_mod
 from .training import finetune_adapters as finetune_mod
+=======
+from .selfimprove.patch_ops import apply_patch as apply_patch_legacy
+from .self_patch.propose_patch import propose_patch as propose_self_patch
+from .self_patch.sandbox_run import run_sandbox as run_self_patch_sandbox
+from .self_patch.apply_patch import apply_patch as apply_self_patch
+from .utils.locks import acquire_exclusive_lock, LockUnavailable
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
 
 
 def _parse_interval(interval: str) -> int:
@@ -44,6 +40,13 @@ def _parse_interval(interval: str) -> int:
     if interval.endswith("h"):
         return int(interval[:-1]) * 3600
     return int(interval)
+
+
+def _require_torch() -> bool:
+    if torch is None:
+        print({"ok": False, "error": "torch not available"})
+        return False
+    return True
 
 
 
@@ -64,6 +67,7 @@ def _default_profile() -> str:
 
 
 def cmd_tokenizer_train(args: argparse.Namespace) -> None:
+    from .tokenizer import rnt2_train
     sub_block_sizes = [int(x) for x in args.sub_block_sizes.split(",")] if args.sub_block_sizes else None
     sub_codebook_sizes = [int(x) for x in args.sub_codebook_sizes.split(",")] if args.sub_codebook_sizes else None
     rnt2_train.train(
@@ -82,6 +86,9 @@ def cmd_tokenizer_train(args: argparse.Namespace) -> None:
 
 
 def cmd_eval(_args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .training import eval as eval_mod
     eval_mod.main()
 
 
@@ -123,6 +130,14 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .model_loader import load_inference_model
+    from .continuous.registry import load_registry
+    from .continuous.lora import load_lora_state, inject_lora, LoRAConfig, resolve_target_modules
+    from .continuous.dataset import retrieve_context
+    from .prompting.chat_format import build_chat_prompt
+    from .runtime.router import build_features, load_router, log_router_event
     settings = _load_and_validate(args.profile)
     model = load_inference_model(settings)
     # Load current adapter if available (core backend only)
@@ -145,6 +160,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
     info = detect_device()
     print({"device": info.device, "vram_gb": info.vram_gb, "dtype": info.dtype})
     decode_cfg = settings.get("decode", {})
+    bad_cfg = settings.get("bad", {}) or {}
     print("VORTEX-X chat. Type 'exit' to quit.")
 
     def _set_stream_topk(enable: bool) -> object | None:
@@ -180,14 +196,56 @@ def cmd_chat(args: argparse.Namespace) -> None:
             decision = router.decide(feats)
             prev_stream = _set_stream_topk(bool(decision.stream_topk))
         start = time.time()
+        temperature = args.temperature if args.temperature is not None else float(decode_cfg.get("temperature", 1.0))
+        top_p = args.top_p if args.top_p is not None else float(decode_cfg.get("top_p", 1.0))
+        repetition_penalty = args.repetition_penalty if args.repetition_penalty is not None else float(decode_cfg.get("repetition_penalty", 1.0))
+        no_repeat_ngram = args.no_repeat_ngram if args.no_repeat_ngram is not None else int(decode_cfg.get("no_repeat_ngram", 0))
+        if args.stream:
+            try:
+                from .server import _stream_generate
+            except Exception:
+                _stream_generate = None
+            if hasattr(model, "stream_generate"):
+                for delta in model.stream_generate(
+                    prompt_text,
+                    max_new_tokens=max_new,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    no_repeat_ngram=no_repeat_ngram,
+                ):
+                    if delta:
+                        print(delta, end="", flush=True)
+                print()
+                continue
+            if _stream_generate is not None:
+                penalty_window = int(bad_cfg.get("penalty_window", 512))
+                top_p_min_k = int(bad_cfg.get("top_p_min_k", 128))
+                top_p_max_k = int(bad_cfg.get("top_p_max_k", 512))
+                for delta in _stream_generate(
+                    model,
+                    prompt_text,
+                    max_new_tokens=max_new,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    no_repeat_ngram=no_repeat_ngram,
+                    penalty_window=penalty_window,
+                    top_p_min_k=top_p_min_k,
+                    top_p_max_k=top_p_max_k,
+                ):
+                    if delta:
+                        print(delta, end="", flush=True)
+                print()
+                continue
         if hasattr(model, "blocks"):
             response, stats = model.generate(
                 prompt_text,
                 max_new_tokens=max_new,
-                temperature=args.temperature if args.temperature is not None else float(decode_cfg.get("temperature", 1.0)),
-                top_p=args.top_p if args.top_p is not None else float(decode_cfg.get("top_p", 1.0)),
-                repetition_penalty=args.repetition_penalty if args.repetition_penalty is not None else float(decode_cfg.get("repetition_penalty", 1.0)),
-                no_repeat_ngram=args.no_repeat_ngram if args.no_repeat_ngram is not None else int(decode_cfg.get("no_repeat_ngram", 0)),
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram=no_repeat_ngram,
                 adaptive_granularity=args.adaptive_granularity or bool(decode_cfg.get("adaptive_granularity", False)),
                 exact_copy_mode=bool(decode_cfg.get("exact_copy_mode", False)),
                 escape_restrict=bool(decode_cfg.get("escape_restrict", False)),
@@ -198,10 +256,10 @@ def cmd_chat(args: argparse.Namespace) -> None:
             response = model.generate(
                 prompt_text,
                 max_new_tokens=max_new,
-                temperature=args.temperature if args.temperature is not None else float(decode_cfg.get("temperature", 1.0)),
-                top_p=args.top_p if args.top_p is not None else float(decode_cfg.get("top_p", 1.0)),
-                repetition_penalty=args.repetition_penalty if args.repetition_penalty is not None else float(decode_cfg.get("repetition_penalty", 1.0)),
-                no_repeat_ngram=args.no_repeat_ngram if args.no_repeat_ngram is not None else int(decode_cfg.get("no_repeat_ngram", 0)),
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram=no_repeat_ngram,
                 adaptive_granularity=args.adaptive_granularity or bool(decode_cfg.get("adaptive_granularity", False)),
                 exact_copy_mode=bool(decode_cfg.get("exact_copy_mode", False)),
                 escape_restrict=bool(decode_cfg.get("escape_restrict", False)),
@@ -259,12 +317,17 @@ def cmd_serve(args: argparse.Namespace) -> None:
         lock.release()
 
 def cmd_agent_demo(args: argparse.Namespace) -> None:
+    from .agent.agent_loop import run_demo_agent
     settings = _load_and_validate(args.profile)
     report = run_demo_agent(settings)
     print(report)
 
 
 def cmd_self_train(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .continuous.trainer import ContinualTrainer
+    from .continuous.registry import is_bootstrapped
     settings = _load_and_validate(args.profile)
     info = detect_device()
     print({"device": info.device, "vram_gb": info.vram_gb, "dtype": info.dtype})
@@ -295,12 +358,107 @@ def cmd_self_improve(_args: argparse.Namespace) -> None:
     print(report)
 
 
+<<<<<<< HEAD
 def cmd_self_patch(args: argparse.Namespace) -> None:
     settings = _load_and_validate(args.profile)
     cfg = settings.get("self_patch", {}) or {}
     if not cfg.get("enabled", False) and not args.force and not args.dry_run:
         print({"ok": False, "error": "self_patch disabled"})
         return
+=======
+def cmd_apply_patch(args: argparse.Namespace) -> None:
+    base_dir = Path(".")
+    try:
+        lock = acquire_exclusive_lock(base_dir, "self_patch")
+    except LockUnavailable:
+        print({"ok": False, "error": "self_patch lock unavailable (train/serve running?)"})
+        return
+    try:
+        if args.patch_id and not args.diff:
+            settings = _load_and_validate(args.profile)
+            result = apply_self_patch(args.patch_id, base_dir, settings=settings)
+            print({"ok": result.ok, "message": result.message, "patch_id": args.patch_id})
+            return
+        if args.diff:
+            diff = Path(args.diff).read_text(encoding="utf-8")
+            result = apply_patch_legacy(base_dir, diff, approve=args.approve)
+            print({"ok": result.ok, "message": result.message, "legacy": True})
+            return
+        print({"ok": False, "error": "patch_id or --diff required"})
+    finally:
+        lock.release()
+
+
+def cmd_self_patch(args: argparse.Namespace) -> None:
+    base_dir = Path(".")
+    try:
+        lock = acquire_exclusive_lock(base_dir, "self_patch")
+    except LockUnavailable:
+        print({"ok": False, "error": "self_patch lock unavailable (train/serve running?)"})
+        return
+    try:
+        settings = _load_and_validate(args.profile)
+        context = None
+        if args.context_file:
+            context = Path(args.context_file).read_text(encoding="utf-8", errors="ignore")
+        elif args.context:
+            context = args.context
+        proposal = propose_self_patch(args.goal, context, base_dir, settings=settings)
+        report = {
+            "patch_id": proposal.patch_id,
+            "status": proposal.meta.get("status"),
+            "paths": proposal.meta.get("paths", []),
+            "ready_for_review": proposal.meta.get("ready_for_review", False),
+        }
+        if not args.dry_run:
+            sandbox = run_self_patch_sandbox(proposal.patch_id, base_dir, settings=settings, profile=args.profile)
+            report["sandbox_ok"] = sandbox.ok
+        print(report)
+    finally:
+        lock.release()
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    info = detect_device()
+    print({
+        "device": info.device,
+        "cuda_available": info.cuda_available,
+        "gpu": info.name,
+        "vram_gb": info.vram_gb,
+        "dtype": info.dtype,
+        "python": sys.version.split()[0],
+    })
+    modules = [
+        "torch",
+        "bitsandbytes",
+        "faiss",
+        "triton",
+        "fastapi",
+        "zstandard",
+        "lz4",
+    ]
+    print({"deps": check_deps(modules)})
+    base_dir = Path(".")
+    try:
+        settings = _load_and_validate(args.profile)
+    except Exception as exc:
+        print({"warning": "settings_invalid", "error": str(exc), "hint": "Update config/settings.yaml to include missing keys"})
+        return
+    print({"settings_ok": True, "profile": args.profile or resolve_profile(None)})
+    if args.deep:
+        try:
+            deep_result = run_deep_checks(settings, base_dir=base_dir)
+            print({"deep": deep_result})
+        except Exception as exc:
+            print({"deep": {"deep_ok": False, "error": str(exc)}})
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    profile = args.profile or _default_profile()
+    settings = _load_and_validate(profile)
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     base_dir = Path(".")
     try:
         lock = acquire_exclusive_lock(base_dir, "self_patch")
@@ -348,6 +506,9 @@ def cmd_apply_patch(args: argparse.Namespace) -> None:
 
 
 def cmd_load_checkpoint(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .model.core_transformer import CoreTransformer
     settings = _load_and_validate(args.profile)
     core = settings.get("core", {})
     core["checkpoint_path"] = args.path
@@ -358,6 +519,9 @@ def cmd_load_checkpoint(args: argparse.Namespace) -> None:
 
 
 def cmd_save_checkpoint(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .model.core_transformer import CoreTransformer, save_checkpoint
     settings = _load_and_validate(args.profile)
     model = CoreTransformer.from_settings(settings)
     save_checkpoint(model, Path(args.out), settings)
@@ -365,6 +529,9 @@ def cmd_save_checkpoint(args: argparse.Namespace) -> None:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .continuous.bootstrap import run_bootstrap
     settings = _load_and_validate(args.profile)
     base_dir = Path(".")
     result = run_bootstrap(
@@ -387,13 +554,16 @@ def cmd_bootstrap(args: argparse.Namespace) -> None:
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
+    from .continuous.dataset import ingest_sources
     settings = _load_and_validate(args.profile)
-    allowlist = settings.get("agent", {}).get("web_allowlist", [])
+    tools_cfg = settings.get("tools", {}).get("web", {}) or {}
+    allowlist = tools_cfg.get("allow_domains") or settings.get("agent", {}).get("web_allowlist", [])
     count = ingest_sources(Path("."), allowlist, settings)
     print({"ingested_docs": count})
 
 
 def cmd_ingest_once(args: argparse.Namespace) -> None:
+    from .continuous.dataset import collect_samples
     settings = _load_and_validate(args.profile)
     settings = deepcopy(settings)
     cont = settings.get("continuous", {}) or {}
@@ -401,12 +571,17 @@ def cmd_ingest_once(args: argparse.Namespace) -> None:
     replay["sample_size"] = 0
     cont["replay"] = replay
     settings["continuous"] = cont
-    allowlist = settings.get("agent", {}).get("web_allowlist", [])
+    tools_cfg = settings.get("tools", {}).get("web", {}) or {}
+    allowlist = tools_cfg.get("allow_domains") or settings.get("agent", {}).get("web_allowlist", [])
     collected = collect_samples(Path("."), allowlist, settings, ingest=True)
     print({"ingested_docs": collected.stats.new_docs, "filtered": collected.stats.filtered})
 
 
 def cmd_train_once(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .continuous.trainer import ContinualTrainer
+    from .continuous.registry import is_bootstrapped
     settings = _load_and_validate(args.profile)
     base_dir = Path(".")
     if not is_bootstrapped(base_dir, settings):
@@ -427,6 +602,9 @@ def cmd_train_once(args: argparse.Namespace) -> None:
 
 
 def cmd_train_router(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .training import train_router as train_router_mod
     settings = _load_and_validate(args.profile)
     weights_cfg = settings.get("router", {}).get("weights", {})
     weights = {
@@ -447,6 +625,9 @@ def cmd_train_router(args: argparse.Namespace) -> None:
 
 
 def cmd_train_experts(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .training import train_experts as train_experts_mod
     settings = _load_and_validate(args.profile)
     domains = [d.strip() for d in args.domains.split(",") if d.strip()]
     if not domains:
@@ -465,6 +646,9 @@ def cmd_train_experts(args: argparse.Namespace) -> None:
 
 
 def cmd_finetune_adapter(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
+    from .training import finetune_adapters as finetune_mod
     settings = _load_and_validate(args.profile)
     result = finetune_mod.finetune_adapter(
         settings=settings,
@@ -480,6 +664,8 @@ def cmd_finetune_adapter(args: argparse.Namespace) -> None:
 
 
 def cmd_bench(args: argparse.Namespace) -> None:
+    if not _require_torch():
+        return
     profile = args.profile or _default_profile()
     _ = _load_and_validate(profile)
     script = Path(__file__).resolve().parents[2] / "scripts" / "bench_generate.py"
@@ -496,6 +682,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
 
 
 def cmd_anchors_init(args: argparse.Namespace) -> None:
+    from .continuous.anchors import write_default_anchors
     settings = _load_and_validate(args.profile)
     anchors_path = Path(settings.get("continuous", {}).get("eval", {}).get("anchors_path", "data/continuous/anchors.jsonl"))
     write_default_anchors(anchors_path)
@@ -536,6 +723,7 @@ def main() -> None:
     chat.add_argument("--repetition-penalty", type=float, default=None)
     chat.add_argument("--no-repeat-ngram", type=int, default=None)
     chat.add_argument("--adaptive-granularity", action="store_true")
+    chat.add_argument("--stream", action="store_true")
     chat.set_defaults(func=cmd_chat)
 
     agent = sub.add_parser("agent-demo")
@@ -570,6 +758,7 @@ def main() -> None:
     si.set_defaults(func=cmd_self_improve)
 
     sp = sub.add_parser("self-patch")
+<<<<<<< HEAD
     sp.add_argument("--profile", default=None)
     sp.add_argument("--goal", required=True)
     sp.add_argument("--context", default=None)
@@ -583,6 +772,18 @@ def main() -> None:
     ap = sub.add_parser("apply-patch")
     ap.add_argument("patch_id", nargs="?")
     ap.add_argument("--diff", required=False)
+=======
+    sp.add_argument("--goal", required=True)
+    sp.add_argument("--context", default=None)
+    sp.add_argument("--context-file", default=None)
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--profile", default=None)
+    sp.set_defaults(func=cmd_self_patch)
+
+    ap = sub.add_parser("apply-patch")
+    ap.add_argument("patch_id", nargs="?", default=None)
+    ap.add_argument("--diff", default=None)
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     ap.add_argument("--approve", action="store_true")
     ap.add_argument("--profile", default=None)
     ap.set_defaults(func=cmd_apply_patch)

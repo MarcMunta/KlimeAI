@@ -1,6 +1,7 @@
 from __future__ import annotations
+import pytest
 
-import torch
+torch = pytest.importorskip("torch")
 
 from c3rnt2.model.bad_decode import bad_decode, _should_restrict_escape
 from c3rnt2.model.core_transformer import CoreTransformer

@@ -44,6 +44,21 @@ python -m c3rnt2 serve --profile qwen8b_base
 Requiere: pip install .[hf]
 ```
 
+## Base 100% (6 comandos)
+Flujo minimo reproducible:
+```bash
+python -m c3rnt2 doctor --deep --profile qwen8b_base
+python -m c3rnt2 serve --profile qwen8b_base
+python -m c3rnt2 bootstrap --teacher Qwen/Qwen2.5-8B-Instruct --teacher-quant 4bit --reuse-dataset --profile qwen8b_base
+python -m c3rnt2 ingest-once --profile qwen8b_base
+python -m c3rnt2 train-once --profile qwen8b_base
+python -m c3rnt2 self-patch --goal "mejorar seguridad de self_patch" --dry-run
+```
+Aplicar un patch aprobado:
+```bash
+python -m c3rnt2 apply-patch <id>
+```
+
 ## Tokenizador VORTEX-Tok
 Entrenamiento MVP (patch codebook + macro codebook opcional):
 ```bash
@@ -66,13 +81,13 @@ python -m c3rnt2 agent-demo
 ```bash
 python -m c3rnt2 eval
 ```
-Generaci?n r?pida (BAD decode + stats):
+Generación rápida (BAD decode + stats):
 ```bash
 python scripts/bench_generate.py --profile dev_small
 ```
 Salida reciente en `data/bench/latest.txt`.
 
-## Configuraci?n
+## Configuración
 `config/settings.yaml` define perfiles (`dev_small`, `core_only`, `c3_paged`, `agent`) con par?metros para VORTEX, BAD y self-train.
 
 Flags ?tiles:

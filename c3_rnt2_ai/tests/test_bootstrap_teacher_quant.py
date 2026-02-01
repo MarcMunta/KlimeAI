@@ -20,8 +20,11 @@ class FakeModel:
 
 
 class FakeAutoModel:
+    last_kwargs = None
+
     @classmethod
     def from_pretrained(cls, name, **kwargs):
+        cls.last_kwargs = kwargs
         return FakeModel()
 
 
@@ -40,3 +43,6 @@ def test_load_teacher_quant_no_to(monkeypatch):
     assert model.to_called is False
     assert input_device == "cuda:0"
     assert info.get("quant") == "4bit"
+    assert FakeAutoModel.last_kwargs is not None
+    assert FakeAutoModel.last_kwargs.get("device_map") == "auto"
+    assert FakeAutoModel.last_kwargs.get("load_in_4bit") is True

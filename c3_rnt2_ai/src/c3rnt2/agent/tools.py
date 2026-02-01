@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import subprocess
-import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
+<<<<<<< HEAD
 
 from .policies import WebPolicy
+=======
+from ..tools.web_access import web_fetch
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
 
 
 @dataclass
@@ -25,13 +27,26 @@ class AgentTools:
         sandbox_root: Path | None = None,
         cache_root: Path | None = None,
         rate_limit_per_min: int = 30,
+<<<<<<< HEAD
         web_cfg: dict | None = None,
     ):
         self.policy = WebPolicy(allowlist=allowlist, rate_limit_per_min=rate_limit_per_min)
         self.web_cfg = web_cfg or {}
+=======
+        web_enabled: bool | None = None,
+        web_cfg: dict | None = None,
+    ):
+        self.web_cfg = dict(web_cfg or {})
+        self.web_enabled = bool(web_enabled) if web_enabled is not None else bool(self.web_cfg.get("enabled", False))
+        allow_domains = self.web_cfg.get("allow_domains") or self.web_cfg.get("allowlist") or allowlist
+        self.allowlist = [str(a) for a in (allow_domains or [])]
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
         self.sandbox_root = sandbox_root or Path("data") / "workspaces"
-        self.cache_root = cache_root or Path("data") / "web_cache"
+        self.cache_root = Path(self.web_cfg.get("cache_dir") or cache_root or Path("data") / "web_cache")
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.rate_limit_per_min = int(self.web_cfg.get("rate_limit_per_min", rate_limit_per_min))
+        self.max_bytes = int(self.web_cfg.get("max_bytes", 1_000_000))
+        self.timeout_s = float(self.web_cfg.get("timeout_s", 10))
 
     def _sanitize_text(self, text: str) -> str:
         text = re.sub(r"<script.*?>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -40,24 +55,21 @@ class AgentTools:
         text = re.sub(r"\\s+", " ", text)
         return text.strip()
 
-    def _cache_path(self, key: str) -> Path:
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        return self.cache_root / f"{digest}.json"
-
-    def _cache_get(self, key: str) -> Optional[str]:
-        path = self._cache_path(key)
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload.get("text")
-        except Exception:
-            return None
-
-    def _cache_set(self, key: str, text: str) -> None:
-        path = self._cache_path(key)
-        payload = {"text": text}
-        path.write_text(json.dumps(payload), encoding="utf-8")
+    def _fetch(self, url: str) -> ToolResult:
+        if not self.web_enabled:
+            return ToolResult(ok=False, output="web tool disabled")
+        result = web_fetch(
+            url,
+            allowlist=self.allowlist,
+            max_bytes=self.max_bytes,
+            timeout_s=self.timeout_s,
+            cache_dir=self.cache_root,
+            rate_limit_per_min=self.rate_limit_per_min,
+        )
+        if not result.ok:
+            return ToolResult(ok=False, output=result.error or "web fetch failed")
+        text = self._sanitize_text(result.text) if result.text else ""
+        return ToolResult(ok=True, output=text)
 
 
     def web_fetch(self, url: str) -> ToolResult:
@@ -105,11 +117,31 @@ class AgentTools:
             return ToolResult(ok=False, output=f"pytest failed: {exc}")
 
     def search_web(self, query: str) -> ToolResult:
+<<<<<<< HEAD
         url = f"https://duckduckgo.com/html/?q={query}"
         return self.web_fetch(url)
 
     def open_docs(self, url: str) -> ToolResult:
         return self.web_fetch(url)
+=======
+        if not self.web_enabled:
+            return ToolResult(ok=False, output="web tool disabled")
+        # MVP: naive GET to duckduckgo html if allowlisted.
+        url = f"https://duckduckgo.com/html/?q={query}"
+        result = self._fetch(url)
+        if not result.ok:
+            return result
+        return ToolResult(ok=True, output=result.output[:1000])
+
+    def open_docs(self, url: str) -> ToolResult:
+        result = self._fetch(url)
+        if not result.ok:
+            return result
+        return ToolResult(ok=True, output=result.output[:1200])
+
+    def web_fetch(self, url: str) -> ToolResult:
+        return self._fetch(url)
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
 
     def edit_repo(self, file_path: Path, new_text: str) -> ToolResult:
         try:

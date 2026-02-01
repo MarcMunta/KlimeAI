@@ -1,9 +1,18 @@
+<<<<<<< HEAD
 ﻿# TODO
 - [x] gpu_decompress triton hook + metrics (CPU decompress + H2D overlap)
 - [ ] KV 2-bit real (per-channel) y layout optimizado
 - [ ] Speculative decoding + draft model
 - [~] Integracion TensorRT-LLM opcional (backend stub)
 - [x] Router multiobjetivo con logs de mem_cost + estabilidad
+=======
+# TODO
+- [x] GPU decompress con prefetch + pinned + copia Triton.
+- [ ] KV 2-bit real (per-channel) y layout optimizado (experimental activo, falta kernel/packing).
+- [x] Speculative decoding + draft model.
+- [x] Integracion TensorRT-LLM opcional.
+- [x] Router multiobjetivo con logs de mem_cost + estabilidad.
+>>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
 - [x] Expert packs entrenables (LoRA/QLoRA) por dominio.
 
 ## Estado del push (automatizado)
