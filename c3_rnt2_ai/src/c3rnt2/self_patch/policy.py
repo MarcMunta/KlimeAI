@@ -21,6 +21,10 @@ DEFAULT_FORBIDDEN_GLOBS = (
     "*.db",
     "src/c3rnt2/self_patch/**",
     "src/c3rnt2/selfimprove/**",
+    "src/c3rnt2/tools/**",
+    "src/c3rnt2/agent/sandbox.py",
+    "src/c3rnt2/agent/policies.py",
+    "src/c3rnt2/doctor.py",
 )
 DEFAULT_MAX_PATCH_KB = 128
 DEFAULT_ALLOWED_COMMANDS = ("pytest", "ruff", "python")

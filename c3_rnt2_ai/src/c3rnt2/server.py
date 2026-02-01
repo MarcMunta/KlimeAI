@@ -20,6 +20,7 @@ from .model.bad_decode import _sample_logits, _sample_logits_topk, _RepetitionTr
 from .continuous.lora import LoRAConfig, inject_lora, load_lora_state, resolve_target_modules
 from .continuous.registry import load_registry
 from .runtime.router import build_features, load_router, log_router_event
+from .utils.oom import is_oom_error, clear_cuda_cache
 
 
 def _maybe_load_adapter(model: CoreTransformer, settings: dict, base_dir: Path) -> None:
@@ -48,6 +49,28 @@ def _load_backend_model(settings: dict, base_dir: Path, backend: str):
     model = load_inference_model(local)
     _maybe_load_adapter(model, local, base_dir)
     return model
+
+
+def _resolve_fallback_backend(settings: dict, current: str) -> str | None:
+    core = settings.get("core", {}) or {}
+    fallback = core.get("backend_fallback") or core.get("hf_fallback")
+    if fallback:
+        fb = str(fallback).lower()
+        if fb != current:
+            return fb
+    if current != "hf" and core.get("hf_model"):
+        return "hf"
+    return None
+
+
+def _get_or_load_backend(models: dict, settings: dict, base_dir: Path, backend: str):
+    if backend in models:
+        return models[backend]
+    try:
+        models[backend] = _load_backend_model(settings, base_dir, backend)
+    except Exception:
+        return None
+    return models[backend]
 
 
 def _maybe_set_stream_topk(model: CoreTransformer, enabled: bool, top_k: int | None = None):
@@ -221,30 +244,70 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         if not stream:
             start = time.time()
             with model_lock:
-                if hasattr(selected_model, "generate"):
-                    if hasattr(selected_model, "blocks"):
-                        text, stats = selected_model.generate(
-                            prompt,
-                            max_new_tokens=decode_args["max_new_tokens"],
-                            temperature=decode_args["temperature"],
-                            top_p=decode_args["top_p"],
-                            repetition_penalty=decode_args["repetition_penalty"],
-                            no_repeat_ngram=decode_args["no_repeat_ngram"],
-                            return_stats=True,
-                        )
+                try:
+                    if hasattr(selected_model, "generate"):
+                        if hasattr(selected_model, "blocks"):
+                            text, stats = selected_model.generate(
+                                prompt,
+                                max_new_tokens=decode_args["max_new_tokens"],
+                                temperature=decode_args["temperature"],
+                                top_p=decode_args["top_p"],
+                                repetition_penalty=decode_args["repetition_penalty"],
+                                no_repeat_ngram=decode_args["no_repeat_ngram"],
+                                return_stats=True,
+                            )
+                        else:
+                            text = selected_model.generate(
+                                prompt,
+                                max_new_tokens=decode_args["max_new_tokens"],
+                                temperature=decode_args["temperature"],
+                                top_p=decode_args["top_p"],
+                                repetition_penalty=decode_args["repetition_penalty"],
+                                no_repeat_ngram=decode_args["no_repeat_ngram"],
+                            )
+                            stats = None
                     else:
-                        text = selected_model.generate(
-                            prompt,
-                            max_new_tokens=decode_args["max_new_tokens"],
-                            temperature=decode_args["temperature"],
-                            top_p=decode_args["top_p"],
-                            repetition_penalty=decode_args["repetition_penalty"],
-                            no_repeat_ngram=decode_args["no_repeat_ngram"],
-                        )
+                        text = ""
                         stats = None
-                else:
-                    text = ""
-                    stats = None
+                except RuntimeError as exc:
+                    if is_oom_error(exc):
+                        clear_cuda_cache()
+                        fb = _resolve_fallback_backend(settings, chosen_backend)
+                        if fb:
+                            fb_model = _get_or_load_backend(models, settings, base_dir, fb)
+                            if fb_model is not None:
+                                chosen_backend = fb
+                                selected_model = fb_model
+                                if hasattr(selected_model, "generate"):
+                                    if hasattr(selected_model, "blocks"):
+                                        text, stats = selected_model.generate(
+                                            prompt,
+                                            max_new_tokens=decode_args["max_new_tokens"],
+                                            temperature=decode_args["temperature"],
+                                            top_p=decode_args["top_p"],
+                                            repetition_penalty=decode_args["repetition_penalty"],
+                                            no_repeat_ngram=decode_args["no_repeat_ngram"],
+                                            return_stats=True,
+                                        )
+                                    else:
+                                        text = selected_model.generate(
+                                            prompt,
+                                            max_new_tokens=decode_args["max_new_tokens"],
+                                            temperature=decode_args["temperature"],
+                                            top_p=decode_args["top_p"],
+                                            repetition_penalty=decode_args["repetition_penalty"],
+                                            no_repeat_ngram=decode_args["no_repeat_ngram"],
+                                        )
+                                        stats = None
+                                else:
+                                    text = ""
+                                    stats = None
+                            else:
+                                raise
+                        else:
+                            raise
+                    else:
+                        raise
             elapsed = max(1e-6, time.time() - start)
             vram_peak = None
             if torch is not None and torch.cuda.is_available():
@@ -295,6 +358,8 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             return JSONResponse(content=data)
 
         def event_stream() -> Iterable[str]:
+            current_model = selected_model
+            current_backend = chosen_backend
             header = {
                 "id": resp_id,
                 "object": "chat.completion.chunk",
@@ -306,28 +371,59 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             chunks: list[str] = []
             start = time.time()
             with model_lock:
-                if hasattr(selected_model, "stream_generate"):
-                    for delta in selected_model.stream_generate(prompt, **decode_args):
-                        chunks.append(delta)
-                        chunk = {
-                            "id": resp_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": "vortex-x",
-                            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
+                if hasattr(current_model, "stream_generate"):
+                    gen = current_model.stream_generate(prompt, **decode_args)
                 else:
-                    for delta in _stream_generate(selected_model, prompt, **decode_args):
-                        chunks.append(delta)
-                        chunk = {
-                            "id": resp_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": "vortex-x",
-                            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
+                    gen = _stream_generate(current_model, prompt, **decode_args)
+                try:
+                    first = next(gen)
+                except StopIteration:
+                    first = None
+                except RuntimeError as exc:
+                    if is_oom_error(exc):
+                        clear_cuda_cache()
+                        fb = _resolve_fallback_backend(settings, current_backend)
+                        if fb:
+                            fb_model = _get_or_load_backend(models, settings, base_dir, fb)
+                            if fb_model is not None:
+                                current_backend = fb
+                                current_model = fb_model
+                                if hasattr(current_model, "stream_generate"):
+                                    gen = current_model.stream_generate(prompt, **decode_args)
+                                else:
+                                    gen = _stream_generate(current_model, prompt, **decode_args)
+                                try:
+                                    first = next(gen)
+                                except StopIteration:
+                                    first = None
+                            else:
+                                raise
+                        else:
+                            raise
+                    else:
+                        raise
+                if first:
+                    chunks.append(first)
+                    chunk = {
+                        "id": resp_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": "vortex-x",
+                        "choices": [{"index": 0, "delta": {"content": first}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                for delta in gen:
+                    if not delta:
+                        continue
+                    chunks.append(delta)
+                    chunk = {
+                        "id": resp_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": "vortex-x",
+                        "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
             elapsed = max(1e-6, time.time() - start)
             vram_peak = None
             if torch is not None and torch.cuda.is_available():
@@ -336,9 +432,9 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 except Exception:
                     vram_peak = None
             mem_cost = 0.0
-            if hasattr(selected_model, "blocks"):
+            if hasattr(current_model, "blocks"):
                 try:
-                    mem_cost = float(sum(block.lava.stats.reads + block.lava.stats.writes for block in selected_model.blocks))
+                    mem_cost = float(sum(block.lava.stats.reads + block.lava.stats.writes for block in current_model.blocks))
                 except Exception:
                     mem_cost = 0.0
             if router is not None:
@@ -348,7 +444,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                     base_dir,
                     {
                         "request_id": resp_id,
-                        "backend": chosen_backend,
+                        "backend": current_backend,
                         "stream_topk": bool(decision.stream_topk) if decision else False,
                         "prompt_tokens": len(prompt.split()),
                         "max_new_tokens": decode_args["max_new_tokens"],
@@ -392,6 +488,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
     model = load_inference_model(settings)
     _maybe_load_adapter(model, settings, base_dir)
     model_lock = threading.Lock()
+    fallback_backend = _resolve_fallback_backend(settings, str(settings.get("core", {}).get("backend", "vortex")).lower())
+    fallback_model = None
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):  # noqa: N802
@@ -427,14 +525,33 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
 
             if not stream:
                 with model_lock:
-                    text = model.generate(
-                        prompt,
-                        max_new_tokens=decode_args["max_new_tokens"],
-                        temperature=decode_args["temperature"],
-                        top_p=decode_args["top_p"],
-                        repetition_penalty=decode_args["repetition_penalty"],
-                        no_repeat_ngram=decode_args["no_repeat_ngram"],
-                    )
+                    try:
+                        text = model.generate(
+                            prompt,
+                            max_new_tokens=decode_args["max_new_tokens"],
+                            temperature=decode_args["temperature"],
+                            top_p=decode_args["top_p"],
+                            repetition_penalty=decode_args["repetition_penalty"],
+                            no_repeat_ngram=decode_args["no_repeat_ngram"],
+                        )
+                    except RuntimeError as exc:
+                        if is_oom_error(exc) and fallback_backend:
+                            clear_cuda_cache()
+                            if fallback_model is None:
+                                try:
+                                    fallback_model = load_inference_model(settings, backend_override=fallback_backend)
+                                except Exception:
+                                    raise
+                            text = fallback_model.generate(
+                                prompt,
+                                max_new_tokens=decode_args["max_new_tokens"],
+                                temperature=decode_args["temperature"],
+                                top_p=decode_args["top_p"],
+                                repetition_penalty=decode_args["repetition_penalty"],
+                                no_repeat_ngram=decode_args["no_repeat_ngram"],
+                            )
+                        else:
+                            raise
                 data = {
                     "id": resp_id,
                     "object": "chat.completion",

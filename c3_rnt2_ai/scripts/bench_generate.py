@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--use-cuda-graphs", action="store_true")
     parser.add_argument("--use-compile", action="store_true")
     parser.add_argument("--use-full-profile", action="store_true")
+    parser.add_argument("--latency-iters", type=int, default=3)
     args = parser.parse_args()
 
     settings = load_settings(args.profile)
@@ -85,28 +86,41 @@ def main() -> None:
     if stream_topk:
         core.runtime_cfg["paged_lm_head_stream_topk"] = False
 
-    start = time.time()
-    _text, stats = bad_decode(
-        core,
-        prompt=args.prompt,
-        max_new_tokens=args.max_new_tokens,
-        block_size=block_size,
-        entropy_threshold=entropy_threshold,
-        temperature=temperature,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-        no_repeat_ngram=no_repeat_ngram,
-        adaptive_granularity=adaptive_granularity,
-        entropy_top_k=entropy_top_k,
-        penalty_window=penalty_window,
-        top_p_min_k=top_p_min_k,
-        top_p_max_k=top_p_max_k,
-        exact_copy_mode=exact_copy_mode,
-        escape_restrict=escape_restrict,
-        use_mtp=use_mtp,
-    )
-    elapsed = max(1e-6, time.time() - start)
-    tokens_per_sec = args.max_new_tokens / elapsed
+    latencies = []
+    accept_rates = []
+    stats = None
+    iters = max(1, int(args.latency_iters))
+    for _ in range(iters):
+        start = time.time()
+        _text, stats = bad_decode(
+            core,
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+            block_size=block_size,
+            entropy_threshold=entropy_threshold,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram=no_repeat_ngram,
+            adaptive_granularity=adaptive_granularity,
+            entropy_top_k=entropy_top_k,
+            penalty_window=penalty_window,
+            top_p_min_k=top_p_min_k,
+            top_p_max_k=top_p_max_k,
+            exact_copy_mode=exact_copy_mode,
+            escape_restrict=escape_restrict,
+            use_mtp=use_mtp,
+        )
+        elapsed = max(1e-6, time.time() - start)
+        latencies.append(elapsed)
+        if stats is not None:
+            accept_rates.append(float(stats.accepted) / max(1, int(stats.proposed)))
+    avg_latency = sum(latencies) / max(1, len(latencies))
+    tokens_per_sec = args.max_new_tokens / max(1e-6, avg_latency)
+    lat_sorted = sorted(latencies)
+    p50 = lat_sorted[int(0.5 * (len(lat_sorted) - 1))] * 1000.0
+    p95 = lat_sorted[int(0.95 * (len(lat_sorted) - 1))] * 1000.0
+    accept_rate = sum(accept_rates) / max(1, len(accept_rates)) if accept_rates else 0.0
 
     stream_tps = None
     if stream_topk:
@@ -198,12 +212,15 @@ def main() -> None:
     lava_writes = sum(block.lava.stats.writes for block in core.blocks)
     result = {
         "tokens_per_second": round(tokens_per_sec, 3),
+        "latency_p50_ms": round(p50, 3),
+        "latency_p95_ms": round(p95, 3),
+        "draft_accept_rate": round(accept_rate, 4),
         "tokens_per_second_stream_topk": round(stream_tps, 3) if stream_tps else None,
         "topk_sample_ms": round(bench_topk_ms, 4) if bench_topk_ms is not None else None,
         "time_tokenizer_ms": round(time_tokenizer_ms, 3),
-        "proposed": stats.proposed,
-        "accepted": stats.accepted,
-        "entropy_high": stats.entropy_high,
+        "proposed": stats.proposed if stats else 0,
+        "accepted": stats.accepted if stats else 0,
+        "entropy_high": stats.entropy_high if stats else 0,
         "avg_depth_used": round(depth_stats.get("avg_depth_used", 0.0), 3),
         "lava_reads": lava_reads,
         "lava_writes": lava_writes,

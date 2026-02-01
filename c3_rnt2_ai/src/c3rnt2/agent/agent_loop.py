@@ -48,6 +48,8 @@ def run_demo_agent(settings: dict) -> Dict[str, str]:
         sandbox_root=sandbox_root,
         rate_limit_per_min=rate_limit,
         web_cfg=tools_cfg,
+        agent_cfg=agent_cfg,
+        self_patch_cfg=settings.get("self_patch", {}),
     )
     repo = _setup_demo_repo(sandbox_root)
 

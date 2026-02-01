@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 try:
     import torch
@@ -23,10 +24,18 @@ from .server import run_server
 from .utils.locks import LockUnavailable, acquire_exclusive_lock
 from .agent.agent_loop import run_demo_agent
 from .training.hf_qlora import train_once as train_hf_once
+from .utils.oom import is_oom_error, clear_cuda_cache
+from .learning_loop.data_collector import collect_from_episodes
+from .learning_loop.data_curator import curate_dataset
+from .learning_loop.trainer import train_qlora
+from .learning_loop.evaluator import evaluate_adapter, log_eval
+from .learning_loop.promoter import promote_latest
 
 
-def _load_and_validate(profile: str | None) -> dict:
+def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
     settings = load_settings(profile)
+    if override is not None:
+        settings = override(settings)
     validate_profile(settings, base_dir=Path("."))
     return settings
 
@@ -46,6 +55,38 @@ def _self_patch_queue_dir(base_dir: Path, settings: dict) -> Path:
     if not qpath.is_absolute():
         qpath = base_dir / qpath
     return qpath
+
+
+def _apply_cli_overrides(settings: dict, args: argparse.Namespace) -> dict:
+    core = dict(settings.get("core", {}) or {})
+    if getattr(args, "backend", None):
+        core["backend"] = str(args.backend)
+    if getattr(args, "model", None):
+        core["hf_model"] = str(args.model)
+    if getattr(args, "device", None):
+        core["hf_device"] = str(args.device)
+    backend = str(core.get("backend", "vortex")).lower()
+    if backend == "hf":
+        info = detect_device()
+        core.setdefault("hf_device", info.device if info.cuda_available else "cpu")
+        core.setdefault("dtype", info.dtype)
+        if info.cuda_available and info.vram_gb and "hf_load_in_4bit" not in core:
+            if info.vram_gb <= 16:
+                core["hf_load_in_4bit"] = True
+    settings["core"] = core
+    return settings
+
+
+def _resolve_fallback_backend(settings: dict, current: str) -> str | None:
+    core = settings.get("core", {}) or {}
+    fallback = core.get("backend_fallback") or core.get("hf_fallback")
+    if fallback:
+        fb = str(fallback).lower()
+        if fb != current:
+            return fb
+    if current != "hf" and core.get("hf_model"):
+        return "hf"
+    return None
 
 
 def _run_module(module: str, extra_args: list[str]) -> None:
@@ -96,7 +137,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
-    settings = _load_and_validate(args.profile)
+    settings = _load_and_validate(args.profile, override=lambda s: _apply_cli_overrides(s, args))
     model = load_inference_model(settings)
     info = detect_device()
     print({"device": info.device, "vram_gb": info.vram_gb, "dtype": info.dtype})
@@ -113,17 +154,73 @@ def cmd_chat(args: argparse.Namespace) -> None:
         max_new = args.max_new_tokens or int(decode_cfg.get("max_new_tokens", 64))
         temperature = args.temperature if args.temperature is not None else float(decode_cfg.get("temperature", 1.0))
         top_p = args.top_p if args.top_p is not None else float(decode_cfg.get("top_p", 1.0))
-        response = model.generate(
-            prompt_text,
-            max_new_tokens=max_new,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        print(response)
+        repetition_penalty = float(decode_cfg.get("repetition_penalty", 1.0))
+        no_repeat_ngram = int(decode_cfg.get("no_repeat_ngram", 0))
+        penalty_window = int(decode_cfg.get("penalty_window", 512))
+        top_p_min_k = int(decode_cfg.get("top_p_min_k", 128))
+        top_p_max_k = int(decode_cfg.get("top_p_max_k", 512))
+        if args.stream:
+            for attempt in range(2):
+                try:
+                    if hasattr(model, "stream_generate"):
+                        for chunk in model.stream_generate(prompt_text, max_new_tokens=max_new, temperature=temperature, top_p=top_p):
+                            print(chunk, end="", flush=True)
+                    else:
+                        from .server import _stream_generate
+
+                        for chunk in _stream_generate(
+                            model,
+                            prompt_text,
+                            max_new,
+                            temperature,
+                            top_p,
+                            repetition_penalty,
+                            no_repeat_ngram,
+                            penalty_window,
+                            top_p_min_k,
+                            top_p_max_k,
+                        ):
+                            print(chunk, end="", flush=True)
+                    print()
+                    break
+                except RuntimeError as exc:
+                    if is_oom_error(exc) and attempt == 0:
+                        clear_cuda_cache()
+                        fb = _resolve_fallback_backend(settings, str(backend).lower())
+                        if fb:
+                            model = load_inference_model(settings, backend_override=fb)
+                            backend = fb
+                            continue
+                    raise
+            continue
+        try:
+            response = model.generate(
+                prompt_text,
+                max_new_tokens=max_new,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            print(response)
+        except RuntimeError as exc:
+            if is_oom_error(exc):
+                clear_cuda_cache()
+                fb = _resolve_fallback_backend(settings, str(backend).lower())
+                if fb:
+                    model = load_inference_model(settings, backend_override=fb)
+                    backend = fb
+                    response = model.generate(
+                        prompt_text,
+                        max_new_tokens=max_new,
+                        temperature=temperature,
+                        top_p=top_p,
+                    )
+                    print(response)
+                    continue
+            raise
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    settings = _load_and_validate(args.profile)
+    settings = _load_and_validate(args.profile, override=lambda s: _apply_cli_overrides(s, args))
     base_dir = Path(".")
     try:
         lock = acquire_exclusive_lock(base_dir, "serve")
@@ -322,6 +419,53 @@ def cmd_agent_demo(args: argparse.Namespace) -> None:
     print(report)
 
 
+def cmd_learn_ingest(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    result = collect_from_episodes(base_dir, settings, max_events=args.max_events)
+    print(result.__dict__)
+    if not result.ok:
+        sys.exit(1)
+
+
+def cmd_learn_train(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    curate = curate_dataset(base_dir, settings)
+    if not curate.ok:
+        print(curate.__dict__)
+        sys.exit(1)
+    hf_cfg = dict(settings.get("hf_train", {}) or {})
+    hf_cfg["dataset_path"] = str(curate.output_path)
+    settings["hf_train"] = hf_cfg
+    result = train_qlora(settings, base_dir, steps=args.steps, reuse_dataset=True)
+    print(result.__dict__ if hasattr(result, "__dict__") else result)
+    if hasattr(result, "ok") and not result.ok:
+        sys.exit(1)
+
+
+def cmd_learn_eval(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    adapter = Path(args.adapter) if args.adapter else None
+    if adapter and not adapter.is_absolute():
+        adapter = base_dir / adapter
+    result = evaluate_adapter(base_dir, settings, adapter_path=adapter)
+    log_eval(base_dir, settings, result)
+    print(result.__dict__)
+    if not result.ok:
+        sys.exit(1)
+
+
+def cmd_learn_promote(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    result = promote_latest(base_dir, settings, min_improvement=args.min_improvement)
+    print(result.__dict__)
+    if not result.ok:
+        sys.exit(1)
+
+
 def cmd_tokenizer_train(args: argparse.Namespace) -> None:
     _run_module("c3rnt2.tokenizer.rnt2_train", args.extra)
 
@@ -365,6 +509,10 @@ def main() -> None:
 
     chat = sub.add_parser("chat")
     chat.add_argument("--profile", default=None)
+    chat.add_argument("--backend", default=None)
+    chat.add_argument("--model", default=None)
+    chat.add_argument("--device", default=None)
+    chat.add_argument("--stream", action="store_true")
     chat.add_argument("--max-new-tokens", type=int, default=None)
     chat.add_argument("--temperature", type=float, default=None)
     chat.add_argument("--top-p", type=float, default=None)
@@ -372,6 +520,9 @@ def main() -> None:
 
     serve = sub.add_parser("serve")
     serve.add_argument("--profile", default=None)
+    serve.add_argument("--backend", default=None)
+    serve.add_argument("--model", default=None)
+    serve.add_argument("--device", default=None)
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8000)
     serve.set_defaults(func=cmd_serve)
@@ -460,9 +611,35 @@ def main() -> None:
     si.add_argument("--no-bench", action="store_true")
     si.set_defaults(func=cmd_self_improve)
 
+    learn = sub.add_parser("learn")
+    learn_sub = learn.add_subparsers(dest="learn_command")
+
+    learn_ingest = learn_sub.add_parser("ingest")
+    learn_ingest.add_argument("--profile", default=None)
+    learn_ingest.add_argument("--max-events", type=int, default=None)
+    learn_ingest.set_defaults(func=cmd_learn_ingest)
+
+    learn_train = learn_sub.add_parser("train")
+    learn_train.add_argument("--profile", default=None)
+    learn_train.add_argument("--steps", type=int, default=None)
+    learn_train.set_defaults(func=cmd_learn_train)
+
+    learn_eval = learn_sub.add_parser("eval")
+    learn_eval.add_argument("--profile", default=None)
+    learn_eval.add_argument("--adapter", default=None)
+    learn_eval.set_defaults(func=cmd_learn_eval)
+
+    learn_promote = learn_sub.add_parser("promote")
+    learn_promote.add_argument("--profile", default=None)
+    learn_promote.add_argument("--min-improvement", type=float, default=None)
+    learn_promote.set_defaults(func=cmd_learn_promote)
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
+        sys.exit(1)
+    if args.command == "learn" and not getattr(args, "learn_command", None):
+        learn.print_help()
         sys.exit(1)
     args.func(args)
 

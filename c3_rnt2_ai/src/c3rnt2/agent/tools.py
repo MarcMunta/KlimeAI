@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ..tools.web_access import web_fetch
+from .sandbox import run_sandbox_command
 
 
 @dataclass
@@ -24,11 +25,15 @@ class AgentTools:
         cache_root: Path | None = None,
         rate_limit_per_min: int = 30,
         web_cfg: dict | None = None,
+        agent_cfg: dict | None = None,
+        self_patch_cfg: dict | None = None,
     ):
         raw_cfg = dict(web_cfg or {})
         if "web" in raw_cfg:
             raw_cfg = raw_cfg.get("web", {}) or {}
         self.web_cfg = raw_cfg
+        self.agent_cfg = dict(agent_cfg or {})
+        self.self_patch_cfg = dict(self_patch_cfg or {})
         self.web_enabled = bool(self.web_cfg.get("enabled", False))
         self.allowlist = list(self.web_cfg.get("allow_domains", allowlist) or [])
         self.cache_root = Path(self.web_cfg.get("cache_dir") or cache_root or Path("data") / "web_cache")
@@ -40,6 +45,7 @@ class AgentTools:
         self.cache_ttl_s = int(cache_ttl) if cache_ttl is not None else None
         self.allow_content_types = self.web_cfg.get("allow_content_types")
         self.sandbox_root = sandbox_root or Path("data") / "workspaces"
+        self.allow_git = bool(self.agent_cfg.get("allow_git", False))
 
     def _sanitize_text(self, text: str) -> str:
         text = re.sub(r"<script.*?>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -66,6 +72,9 @@ class AgentTools:
         text = self._sanitize_text(result.text)
         return ToolResult(ok=True, output=text)
 
+    def fetch_page(self, url: str) -> ToolResult:
+        return self.web_fetch(url)
+
     def search_web(self, query: str) -> ToolResult:
         url = f"https://duckduckgo.com/html/?q={query}"
         result = self.web_fetch(url)
@@ -74,24 +83,15 @@ class AgentTools:
         return ToolResult(ok=True, output=result.output[:1000])
 
     def open_docs(self, url: str) -> ToolResult:
-        result = self.web_fetch(url)
+        result = self.fetch_page(url)
         if not result.ok:
             return result
         return ToolResult(ok=True, output=result.output[:1200])
 
     def run_tests(self, repo_path: Path) -> ToolResult:
-        try:
-            result = subprocess.run(
-                ["pytest", "-q"],
-                cwd=str(repo_path),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            out = result.stdout + result.stderr
-            return ToolResult(ok=result.returncode == 0, output=out.strip())
-        except Exception as exc:
-            return ToolResult(ok=False, output=f"pytest failed: {exc}")
+        result = run_sandbox_command(repo_path, ["pytest", "-q"], self.sandbox_root, timeout_s=300)
+        out = (result.get("stdout", "") + result.get("stderr", "")).strip()
+        return ToolResult(ok=bool(result.get("ok")), output=out)
 
     def edit_repo(self, file_path: Path, new_text: str) -> ToolResult:
         try:
@@ -110,7 +110,7 @@ class AgentTools:
             from ..self_patch.propose_patch import propose_patch
 
             context = {"changes": {str(k): v for k, v in changes.items()}}
-            proposal = propose_patch(goal, context, repo_root, settings={})
+            proposal = propose_patch(goal, context, repo_root, settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {})
             return ToolResult(ok=True, output=proposal.patch_id)
         except Exception as exc:
             return ToolResult(ok=False, output=f"propose failed: {exc}")
@@ -119,7 +119,7 @@ class AgentTools:
         try:
             from ..self_patch.sandbox_run import sandbox_run
 
-            result = sandbox_run(repo_root, patch_id, settings={})
+            result = sandbox_run(repo_root, patch_id, settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {})
             return ToolResult(ok=bool(result.get("ok")), output=json.dumps(result))
         except Exception as exc:
             return ToolResult(ok=False, output=f"sandbox failed: {exc}")
@@ -130,7 +130,36 @@ class AgentTools:
                 return ToolResult(ok=False, output="approval required")
             from ..self_patch.apply_patch import apply_patch
 
-            result = apply_patch(patch_id, repo_root, settings={})
+            result = apply_patch(patch_id, repo_root, settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {})
             return ToolResult(ok=result.ok, output=result.error or "applied")
         except Exception as exc:
             return ToolResult(ok=False, output=f"apply failed: {exc}")
+
+    def write_patch(self, repo_root: Path, diff_text: str, goal: str = "agent_patch", create_branch: bool = False) -> ToolResult:
+        if create_branch and not self.allow_git:
+            return ToolResult(ok=False, output="git disabled")
+        try:
+            from ..self_patch.propose_patch import propose_patch
+
+            proposal = propose_patch(goal, {"changes": {}}, repo_root, settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {}, diff_text=diff_text)
+            branch = None
+            if create_branch and self.allow_git:
+                branch = f"agent/{proposal.patch_id}"
+                subprocess.run(["git", "checkout", "-b", branch], cwd=str(repo_root), check=False)
+            payload = {"patch_id": proposal.patch_id, "branch": branch}
+            return ToolResult(ok=True, output=json.dumps(payload))
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"write_patch failed: {exc}")
+
+    def summarize_diff(self, repo_root: Path) -> ToolResult:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=str(repo_root),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return ToolResult(ok=True, output=result.stdout.strip())
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"diff failed: {exc}")

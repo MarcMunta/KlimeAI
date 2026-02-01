@@ -166,6 +166,19 @@ def normalize_settings(settings: dict) -> dict:
     hf_train.setdefault("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
     normalized["hf_train"] = hf_train
 
+    learning = normalized.get("learning", {}) or {}
+    learning.setdefault("raw_path", "data/learning/raw.jsonl")
+    learning.setdefault("curated_path", "data/learning/curated.jsonl")
+    learning.setdefault("state_path", "data/learning/state.sqlite")
+    learning.setdefault("evals_path", "data/learning/evals.jsonl")
+    learning.setdefault("canary_path", "data/learning/canary.jsonl")
+    learning.setdefault("max_events", 500)
+    learning.setdefault("min_chars", 20)
+    learning.setdefault("max_chars", None)
+    learning.setdefault("max_eval_samples", 8)
+    learning.setdefault("promote_min_improvement", 0.0)
+    normalized["learning"] = learning
+
     vx = normalized.get("vortex_model", {}) or {}
     core = normalized.get("core", {}) or {}
     core.setdefault("backend", "vortex")
@@ -358,6 +371,8 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         if not allowed_paths:
             errors.append("self_patch.allowed_paths required when self_patch enabled")
 
+    learning = settings.get("learning", {}) or {}
+
     data_root = (base_dir / "data").resolve()
 
     def _check_data_path(path_value: str | Path | None, label: str) -> None:
@@ -386,6 +401,16 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         _check_data_path(self_patch_cfg.get("queue_dir"), "self_patch.queue_dir")
     if self_patch_cfg.get("sandbox_dir"):
         _check_data_path(self_patch_cfg.get("sandbox_dir"), "self_patch.sandbox_dir")
+    if learning.get("raw_path"):
+        _check_data_path(learning.get("raw_path"), "learning.raw_path")
+    if learning.get("curated_path"):
+        _check_data_path(learning.get("curated_path"), "learning.curated_path")
+    if learning.get("state_path"):
+        _check_data_path(learning.get("state_path"), "learning.state_path")
+    if learning.get("evals_path"):
+        _check_data_path(learning.get("evals_path"), "learning.evals_path")
+    if learning.get("canary_path"):
+        _check_data_path(learning.get("canary_path"), "learning.canary_path")
 
     if missing or errors:
         message = []

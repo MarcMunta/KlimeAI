@@ -119,6 +119,27 @@ class HFModel:
         thread.join(timeout=0.1)
 
 
+def _build_load_kwargs(
+    torch_dtype: torch.dtype,
+    device: str,
+    load_in_4bit: bool,
+    load_in_8bit: bool,
+    attn_impl: str | None,
+) -> dict:
+    load_kwargs: dict = {"torch_dtype": torch_dtype}
+    if attn_impl:
+        load_kwargs["attn_implementation"] = attn_impl
+    if load_in_4bit or load_in_8bit:
+        load_kwargs["load_in_4bit"] = load_in_4bit
+        load_kwargs["load_in_8bit"] = load_in_8bit
+        load_kwargs["device_map"] = "auto" if device.startswith("cuda") else "cpu"
+    return load_kwargs
+
+
+def _try_load(cfg: HFConfig) -> HFModel:
+    return HFModel(cfg)
+
+
 def load_hf_model(settings: dict) -> HFModel:
     core = settings.get("core", {}) or {}
     model_name = core.get("hf_model")
@@ -132,23 +153,77 @@ def load_hf_model(settings: dict) -> HFModel:
         torch_dtype = torch.float16
     else:
         torch_dtype = torch.float16 if device == "cuda" else torch.float32
-    load_kwargs: dict = {"torch_dtype": torch_dtype}
     attn_impl = core.get("hf_attn_implementation")
-    if attn_impl:
-        load_kwargs["attn_implementation"] = attn_impl
     load_in_4bit = bool(core.get("hf_load_in_4bit"))
     load_in_8bit = bool(core.get("hf_load_in_8bit"))
-    if load_in_4bit or load_in_8bit:
+    quant_requested = bool(load_in_4bit or load_in_8bit)
+    quant_available = False
+    if quant_requested:
         try:
             import bitsandbytes  # type: ignore  # noqa: F401
-            load_kwargs["load_in_4bit"] = load_in_4bit
-            load_kwargs["load_in_8bit"] = load_in_8bit
-            load_kwargs["device_map"] = "auto" if device == "cuda" else "cpu"
+            quant_available = True
         except Exception:
-            load_in_4bit = False
-            load_in_8bit = False
-    cfg = HFConfig(model_name=str(model_name), device=device, dtype=torch_dtype, load_kwargs=load_kwargs)
-    model = HFModel(cfg)
+            quant_available = False
+
+    attempts: list[HFConfig] = []
+    if quant_requested and quant_available:
+        attempts.append(
+            HFConfig(
+                model_name=str(model_name),
+                device=device,
+                dtype=torch_dtype,
+                load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, attn_impl),
+            )
+        )
+        if attn_impl:
+            attempts.append(
+                HFConfig(
+                    model_name=str(model_name),
+                    device=device,
+                    dtype=torch_dtype,
+                    load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, None),
+                )
+            )
+    # Non-quant fallback
+    attempts.append(
+        HFConfig(
+            model_name=str(model_name),
+            device=device,
+            dtype=torch_dtype,
+            load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl),
+        )
+    )
+    if attn_impl:
+        attempts.append(
+            HFConfig(
+                model_name=str(model_name),
+                device=device,
+                dtype=torch_dtype,
+                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, None),
+            )
+        )
+    # CPU fallback
+    if device.startswith("cuda"):
+        attempts.append(
+            HFConfig(
+                model_name=str(model_name),
+                device="cpu",
+                dtype=torch.float32,
+                load_kwargs=_build_load_kwargs(torch.float32, "cpu", False, False, None),
+            )
+        )
+
+    last_exc: Exception | None = None
+    model: HFModel | None = None
+    for cfg in attempts:
+        try:
+            model = _try_load(cfg)
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if model is None:
+        raise RuntimeError(f"hf model load failed: {last_exc}")
     adapter_path = core.get("hf_adapter_path")
     use_latest = bool(core.get("hf_use_latest_adapter", False))
     merge_adapter = bool(core.get("hf_merge_adapter", False))
@@ -168,10 +243,9 @@ def load_hf_model(settings: dict) -> HFModel:
         model.model = PeftModel.from_pretrained(model.model, adapter_path)
         if merge_adapter and hasattr(model.model, "merge_and_unload"):
             model.model = model.model.merge_and_unload()
-    if load_in_4bit or load_in_8bit:
-        model.quant_fallback = False
-    else:
-        if bool(core.get("hf_load_in_4bit")) or bool(core.get("hf_load_in_8bit")):
-            model.quant_fallback = True
+    used_quant = False
+    if hasattr(model, "cfg"):
+        used_quant = bool(model.cfg.load_kwargs.get("load_in_4bit") or model.cfg.load_kwargs.get("load_in_8bit"))
+    model.quant_fallback = bool(quant_requested) and not used_quant
     return model
 

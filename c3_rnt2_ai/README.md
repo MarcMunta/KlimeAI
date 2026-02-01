@@ -35,6 +35,7 @@ Comandos principales via `python -m c3rnt2`:
 python -m c3rnt2 tokenizer-train
 python -m c3rnt2 eval
 python -m c3rnt2 chat
+python -m c3rnt2 chat --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct
 python -m c3rnt2 agent-demo
 python -m c3rnt2 doctor --deep --profile rtx4080_16gb_vortexx_next
 python -m c3rnt2 serve --profile rtx4080_16gb_vortexx_next
@@ -45,11 +46,16 @@ python -m c3rnt2 self-train --once --profile qwen8b_train
 python -m c3rnt2 self-patch --goal "fix failing test" --dry-run
 python -m c3rnt2 apply-patch <id> --approve
 python -m c3rnt2 bench --profile rtx4080_16gb_vortexx_next --max-new-tokens 512
+python -m c3rnt2 learn ingest --profile qwen8b_train
+python -m c3rnt2 learn train --profile qwen8b_train --steps 50
+python -m c3rnt2 learn eval --profile qwen8b_train
+python -m c3rnt2 learn promote --profile qwen8b_train
 
 Perfil HF (Qwen-8B):
 
 python -m c3rnt2 chat --profile qwen8b_base
 python -m c3rnt2 serve --profile qwen8b_base
+python -m c3rnt2 chat --profile rtx4080_16gb
 
 Requiere: pip install .[hf]
 ```
@@ -96,6 +102,24 @@ Generación rápida (BAD decode + stats):
 python scripts/bench_generate.py --profile dev_small
 ```
 Salida reciente en `data/bench/latest.txt`.
+
+## Quickstart (Qwen-8B HF)
+```bash
+python -m c3rnt2 chat --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct --stream
+python -m c3rnt2 serve --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct
+```
+
+## Learning loop (incremental)
+```bash
+python -m c3rnt2 learn ingest --profile qwen8b_train
+python -m c3rnt2 learn train --profile qwen8b_train --steps 50
+python -m c3rnt2 learn eval --profile qwen8b_train
+python -m c3rnt2 learn promote --profile qwen8b_train
+```
+
+## Agent safe mode
+- Web tool desactivada por defecto. Activar en `config/settings.yaml` (`tools.web.enabled: true`) y allowlist.
+- Tests de herramientas en sandbox con `C3RNT2_NO_NET=1` y sin secretos del entorno.
 
 ## Configuración
 `config/settings.yaml` define perfiles (`dev_small`, `core_only`, `c3_paged`, `agent`) con par?metros para VORTEX, BAD y self-train.

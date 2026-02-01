@@ -179,6 +179,18 @@ profiles:
     runtime:
       paged_lm_head: false
 
+  rtx4080_16gb:
+    # RTX 4080 16GB + Ryzen 7800X3D (HF Qwen-8B)
+    base_profile: qwen8b_base
+    core:
+      hf_load_in_4bit: true
+      hf_device: cuda
+      hf_attn_implementation: sdpa
+      dtype: bf16
+      backend_fallback: vortex
+    decode:
+      max_new_tokens: 256
+
   qwen8b_train:
     base_profile: qwen8b_base
     hf_train:

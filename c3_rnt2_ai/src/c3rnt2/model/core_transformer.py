@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from ..device import detect_device, autocast_context
+from ..utils.oom import is_oom_error, clear_cuda_cache
 from ..tokenizer.vortex_tok import VortexTokModel, load_or_create, encode_to_ids, decode_from_ids
 from .vblock import VBlock, VBlockConfig, VBlockState
 from .lava_memory import LAVAMemory
@@ -775,27 +776,39 @@ class CoreTransformer(nn.Module):
         exact_copy_mode = bool(bad_cfg.get("exact_copy_mode", False))
         escape_restrict = bool(bad_cfg.get("escape_restrict", False))
         use_mtp = bool(bad_cfg.get("use_mtp", True))
-        with torch.inference_mode():
-            with autocast_context(enabled=self.device.type == "cuda", dtype=self.config.dtype):
-                text, stats = bad_decode(
-                    self,
-                    prompt=prompt,
-                    max_new_tokens=max_new_tokens,
-                    block_size=block_size,
-                    entropy_threshold=entropy_threshold,
-                    temperature=temperature,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    no_repeat_ngram=no_repeat_ngram,
-                    adaptive_granularity=adaptive_granularity,
-                    entropy_top_k=entropy_top_k,
-                    penalty_window=penalty_window,
-                    top_p_min_k=top_p_min_k,
-                    top_p_max_k=top_p_max_k,
-                    exact_copy_mode=exact_copy_mode,
-                    escape_restrict=escape_restrict,
-                    use_mtp=use_mtp,
-                )
+        def _run_decode(tokens: int, block: int):
+            with torch.inference_mode():
+                with autocast_context(enabled=self.device.type == "cuda", dtype=self.config.dtype):
+                    return bad_decode(
+                        self,
+                        prompt=prompt,
+                        max_new_tokens=tokens,
+                        block_size=block,
+                        entropy_threshold=entropy_threshold,
+                        temperature=temperature,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        no_repeat_ngram=no_repeat_ngram,
+                        adaptive_granularity=adaptive_granularity,
+                        entropy_top_k=entropy_top_k,
+                        penalty_window=penalty_window,
+                        top_p_min_k=top_p_min_k,
+                        top_p_max_k=top_p_max_k,
+                        exact_copy_mode=exact_copy_mode,
+                        escape_restrict=escape_restrict,
+                        use_mtp=use_mtp,
+                    )
+
+        try:
+            text, stats = _run_decode(max_new_tokens, block_size)
+        except RuntimeError as exc:
+            if is_oom_error(exc) and max_new_tokens > 1:
+                clear_cuda_cache()
+                retry_tokens = max(1, max_new_tokens // 2)
+                retry_block = max(1, block_size // 2)
+                text, stats = _run_decode(retry_tokens, retry_block)
+            else:
+                raise
         if return_stats:
             return text, stats
         return text
