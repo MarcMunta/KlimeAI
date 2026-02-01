@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+import difflib
 import json
 import time
-import difflib
+from pathlib import Path
 from typing import Dict
 
 from .memory import MemoryStore
@@ -37,24 +37,18 @@ def _log_episode(base_dir: Path, payload: dict) -> None:
 
 
 def run_demo_agent(settings: dict) -> Dict[str, str]:
-    agent_cfg = settings.get("agent", {})
-    tools_cfg = settings.get("tools", {}).get("web", {}) or {}
-    allowlist = tools_cfg.get("allow_domains") or agent_cfg.get("web_allowlist", ["docs.python.org"])
-    sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
-<<<<<<< HEAD
-    rate_limit = int(agent_cfg.get("rate_limit_per_min", 30))
+    agent_cfg = settings.get("agent", {}) or {}
     tools_cfg = settings.get("tools", {}) or {}
-    tools = AgentTools(allowlist=allowlist, sandbox_root=sandbox_root, rate_limit_per_min=rate_limit, web_cfg=tools_cfg)
-=======
-    rate_limit = int(tools_cfg.get("rate_limit_per_min", agent_cfg.get("rate_limit_per_min", 30)))
+    web_cfg = tools_cfg.get("web", {}) or {}
+    allowlist = web_cfg.get("allow_domains") or agent_cfg.get("web_allowlist", ["docs.python.org"])
+    sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
+    rate_limit = int(web_cfg.get("rate_limit_per_min", agent_cfg.get("rate_limit_per_min", 30)))
     tools = AgentTools(
         allowlist=allowlist,
         sandbox_root=sandbox_root,
         rate_limit_per_min=rate_limit,
-        web_enabled=bool(tools_cfg.get("enabled", False)),
         web_cfg=tools_cfg,
     )
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     repo = _setup_demo_repo(sandbox_root)
 
     memory = MemoryStore(Path("data") / "memory" / "agent_memory.sqlite")
@@ -64,7 +58,7 @@ def run_demo_agent(settings: dict) -> Dict[str, str]:
     docs = tools.open_docs("https://docs.python.org/3/faq/programming.html")
 
     # Step 2: fix bug
-    before = calc.read_text(encoding="utf-8")
+    before = (repo / "calc.py").read_text(encoding="utf-8")
     fixed = "def add(a, b):\n    return a + b\n"
     edit_result = tools.edit_repo(repo / "calc.py", fixed)
     after = fixed

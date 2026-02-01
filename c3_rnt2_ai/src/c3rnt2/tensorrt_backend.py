@@ -1,58 +1,3 @@
-<<<<<<< HEAD
-﻿from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Iterable
-
-try:
-    import torch
-except Exception:  # pragma: no cover
-    torch = None
-
-
-@dataclass
-class TRTConfig:
-    engine_path: str
-    tokenizer_path: str | None
-    device: str
-
-
-class TRTModel:
-    is_tensorrt = True
-
-    def __init__(self, cfg: TRTConfig):
-        try:
-            import tensorrt_llm  # type: ignore
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(f"tensorrt backend not available: {exc}")
-        if not cfg.engine_path:
-            raise RuntimeError("core.trt_engine_path required for tensorrt backend")
-        self.cfg = cfg
-        self.device = torch.device(cfg.device) if torch is not None else "cpu"
-        # Placeholder: implement real TRT-LLM session wiring here.
-        raise RuntimeError("tensorrt backend detected but not configured; set core.trt_engine_path and install tensorrt_llm")
-
-    def encode_prompt(self, prompt: str):  # pragma: no cover
-        raise RuntimeError("tensorrt backend not configured")
-
-    def decode_ids(self, ids: list[int], total_len: int | None = None) -> str:  # pragma: no cover
-        raise RuntimeError("tensorrt backend not configured")
-
-    def generate(self, prompt: str, max_new_tokens: int = 64, **_kwargs) -> str:  # pragma: no cover
-        raise RuntimeError("tensorrt backend not configured")
-
-    def stream_generate(self, prompt: str, max_new_tokens: int = 64, **_kwargs) -> Iterable[str]:  # pragma: no cover
-        raise RuntimeError("tensorrt backend not configured")
-
-
-def load_trt_model(settings: dict) -> TRTModel:
-    core = settings.get("core", {}) or {}
-    device = str(core.get("trt_device") or ("cuda" if torch is not None and torch.cuda.is_available() else "cpu"))
-    engine_path = str(core.get("trt_engine_path", ""))
-    tokenizer_path = core.get("trt_tokenizer_path")
-    cfg = TRTConfig(engine_path=engine_path, tokenizer_path=tokenizer_path, device=device)
-    return TRTModel(cfg)
-=======
 from __future__ import annotations
 
 import importlib
@@ -60,7 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-import torch
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
 
 
 @dataclass
@@ -73,20 +21,24 @@ class TensorRTModel:
     is_tensorrt = True
 
     def __init__(self, cfg: TensorRTConfig):
-        self.cfg = cfg
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("torch not available for TensorRT backend")
         try:
             from transformers import AutoTokenizer  # type: ignore
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"transformers not available: {exc}")
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
-
-        runtime = importlib.import_module("tensorrt_llm.runtime")
+        try:
+            runtime = importlib.import_module("tensorrt_llm.runtime")
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("tensorrt_llm not installed") from exc
         if not hasattr(runtime, "ModelRunner"):
             raise RuntimeError("tensorrt_llm runtime does not expose ModelRunner")
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
         self.runner = runtime.ModelRunner.from_dir(str(cfg.engine_dir))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.cfg = cfg
 
-    def _encode(self, prompt: str) -> torch.Tensor:
+    def _encode(self, prompt: str) -> "torch.Tensor":
         inputs = self.tokenizer(prompt, return_tensors="pt")
         return inputs["input_ids"].to(self.device)
 
@@ -107,7 +59,7 @@ class TensorRTModel:
                 out_ids = next(iter(outputs.values()))
         else:
             out_ids = outputs
-        if torch.is_tensor(out_ids):
+        if torch is not None and torch.is_tensor(out_ids):
             out_ids = out_ids.tolist()
         if isinstance(out_ids, list) and out_ids and isinstance(out_ids[0], list):
             out_ids = out_ids[0]
@@ -179,10 +131,6 @@ def load_tensorrt_model(settings: dict) -> TensorRTModel:
     try:
         importlib.import_module("tensorrt_llm")
     except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "tensorrt_llm not installed. Install TensorRT-LLM or set core.backend=hf/vortex."
-        ) from exc
+        raise RuntimeError("tensorrt_llm not installed. Install TensorRT-LLM or set core.backend=hf/vortex.") from exc
     cfg = TensorRTConfig(engine_dir=Path(engine_dir), tokenizer_name=str(tokenizer_name))
     return TensorRTModel(cfg)
-
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974

@@ -17,16 +17,16 @@ def test_kv_quant_integration_forward():
 
 
 def test_kv_quant_int8_dequant_path():
-    mem = LAVAMemory(hidden_size=2, latent_slots=2, top_k=1, kv_quant_bits=8, dtype="fp32")
+    mem = LAVAMemory(hidden_size=2, latent_slots=2, top_k=1, kv_quant="int8", dtype="fp32")
     with torch.no_grad():
         mem.addresses.copy_(torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
         mem.contents.copy_(torch.tensor([[5.0, 5.0], [9.0, 9.0]]))
         mem.addr_proj.weight.copy_(torch.eye(2))
         mem.read_proj.weight.copy_(torch.eye(2))
     mem._refresh_address_cache()
-    mem._quantize_slot(0)
+    mem._refresh_quant_cache()
     with torch.no_grad():
         mem.contents[0].zero_()
-    expected = mem._dequantize_contents(torch.tensor([[0]]))[0, 0]
+    expected = mem.contents_q[torch.tensor([[0]])].to(torch.float32) * mem.contents_scale
     out = mem.read_block(torch.tensor([[[1.0, 0.0]]]))
-    assert torch.allclose(out[0, 0], expected, atol=1e-2)
+    assert torch.allclose(out[0, 0], expected[0, 0], atol=1e-2)

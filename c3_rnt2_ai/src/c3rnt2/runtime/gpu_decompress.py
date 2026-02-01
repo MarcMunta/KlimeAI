@@ -1,12 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple
-<<<<<<< HEAD
-=======
-from dataclasses import dataclass
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
 import time
+from typing import Any, Tuple
 
 import numpy as np
 
@@ -35,17 +31,13 @@ class DecompressStats:
     ms_triton_copy: float = 0.0
 
 
-<<<<<<< HEAD
-def _maybe_stream(stream: object | None):
-    if stream is None or torch is None:
-        return None
-    return torch.cuda.stream(stream)
-
-
-def _to_tensor(tile: np.ndarray, device: str = "cpu", pin_memory: bool = False, non_blocking: bool = False, stream: object | None = None, stats: DecompressStats | None = None):
-=======
-def _to_tensor(tile: np.ndarray, device: str = "cpu", pin_memory: bool = False, non_blocking: bool = False):
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
+def _to_tensor(
+    tile: np.ndarray,
+    device: str = "cpu",
+    pin_memory: bool = False,
+    non_blocking: bool = False,
+    stream: object | None = None,
+) -> "torch.Tensor":
     if torch is None:
         raise RuntimeError("PyTorch not available")
     if not tile.flags["C_CONTIGUOUS"]:
@@ -54,20 +46,18 @@ def _to_tensor(tile: np.ndarray, device: str = "cpu", pin_memory: bool = False, 
     if pin_memory:
         tensor = tensor.pin_memory()
     if device.startswith("cuda"):
-        start = time.perf_counter()
-        if stream is not None:
+        if stream is not None and hasattr(torch.cuda, "stream"):
             with torch.cuda.stream(stream):
                 tensor = tensor.to(device, non_blocking=non_blocking)
         else:
             tensor = tensor.to(device, non_blocking=non_blocking)
-        if stats is not None:
-            stats.ms_h2d += (time.perf_counter() - start) * 1000.0
     else:
         tensor = tensor.to(device, non_blocking=non_blocking)
     return tensor
 
 
 if triton is not None:  # pragma: no cover
+
     @triton.jit
     def _copy_kernel(in_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
@@ -76,14 +66,15 @@ if triton is not None:  # pragma: no cover
         x = tl.load(in_ptr + offs, mask=mask)
         tl.store(out_ptr + offs, x, mask=mask)
 
-
     def _triton_copy(inp: "torch.Tensor") -> "torch.Tensor":
         out = torch.empty_like(inp)
         n = inp.numel()
         grid = (triton.cdiv(n, 1024),)
         _copy_kernel[grid](inp, out, n, BLOCK=1024)
         return out
+
 else:
+
     def _triton_copy(inp: "torch.Tensor") -> "torch.Tensor":
         return inp
 
@@ -98,21 +89,7 @@ def decompress_to_tensor(
     backend: str = "none",
     pinned: bool | None = None,
     stream: object | None = None,
-<<<<<<< HEAD
-    stats: DecompressStats | None = None,
-):
-    """Decompress tile payload if needed and move to device."""
-    if pinned is not None:
-        pin_memory = pinned
-    if stats is None:
-        stats = None
-
-    if isinstance(tile, np.ndarray):
-        tensor = _to_tensor(tile, device=device, pin_memory=pin_memory, non_blocking=non_blocking, stream=stream, stats=stats)
-        if stats is not None:
-            stats.bytes_decompressed += int(tensor.numel() * tensor.element_size())
-=======
-):
+) -> tuple["torch.Tensor", DecompressStats]:
     """Decompress tile payload if needed and move to device."""
     if torch is None:
         raise RuntimeError("PyTorch not available")
@@ -124,23 +101,13 @@ def decompress_to_tensor(
 
     if isinstance(tile, np.ndarray):
         arr = tile
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     elif isinstance(tile, (bytes, bytearray)):
         if codec is None or shape is None:
             raise ValueError("codec and shape required for compressed tiles")
         start = time.perf_counter()
         raw = decompress(bytes(tile), codec=codec)
-<<<<<<< HEAD
-        if stats is not None:
-            stats.ms_cpu_decompress += (time.perf_counter() - start) * 1000.0
-        arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-        tensor = _to_tensor(arr, device=device, pin_memory=pin_memory, non_blocking=non_blocking, stream=stream, stats=stats)
-        if stats is not None:
-            stats.bytes_decompressed += int(tensor.numel() * tensor.element_size())
-=======
         stats.ms_cpu_decompress = (time.perf_counter() - start) * 1000.0
         arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     else:
         raise TypeError("Unsupported tile type")
 
@@ -149,27 +116,16 @@ def decompress_to_tensor(
 
     if device != "cpu":
         start = time.perf_counter()
-        if stream is not None and torch is not None and hasattr(torch.cuda, "stream"):
-            try:
-                with torch.cuda.stream(stream):
-                    tensor = tensor.to(device, non_blocking=bool(use_non_blocking))
-            except Exception:
+        if stream is not None and hasattr(torch.cuda, "stream"):
+            with torch.cuda.stream(stream):
                 tensor = tensor.to(device, non_blocking=bool(use_non_blocking))
         else:
             tensor = tensor.to(device, non_blocking=bool(use_non_blocking))
         stats.ms_h2d = (time.perf_counter() - start) * 1000.0
 
-    if backend == "triton" and torch is not None and triton is not None:
-        if isinstance(tensor, torch.Tensor) and tensor.device.type == "cuda":
-            start = time.perf_counter()
-<<<<<<< HEAD
-            tensor = _triton_copy(tensor)
-            if stats is not None:
-                stats.ms_triton_copy += (time.perf_counter() - start) * 1000.0
-    return tensor
-=======
-            out = _triton_copy(tensor)
-            stats.ms_triton_copy = (time.perf_counter() - start) * 1000.0
-            return out, stats
+    if backend == "triton" and triton is not None and tensor.device.type == "cuda":
+        start = time.perf_counter()
+        tensor = _triton_copy(tensor)
+        stats.ms_triton_copy = (time.perf_counter() - start) * 1000.0
+
     return tensor, stats
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974

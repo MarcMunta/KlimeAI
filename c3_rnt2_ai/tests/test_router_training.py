@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 
 from c3rnt2.training.train_router import train_router

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -57,18 +57,18 @@ def load_samples_from_path(path: Path, source_kind: str) -> List[Sample]:
                 line = line.strip()
                 if not line:
                     continue
-            try:
-                payload = json.loads(line)
-            except Exception:
-                continue
-            messages = payload.get("messages")
-            prompt = str(payload.get("prompt", ""))
-            response = str(payload.get("response", payload.get("text", "")))
-            if not prompt and isinstance(messages, list):
-                prompt = _prompt_from_messages(messages)
-            if not prompt and not response:
-                continue
-            samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind, messages=messages if isinstance(messages, list) else None))
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                messages = payload.get("messages")
+                prompt = str(payload.get("prompt", ""))
+                response = str(payload.get("response", payload.get("text", "")))
+                if not prompt and isinstance(messages, list):
+                    prompt = _prompt_from_messages(messages)
+                if not prompt and not response:
+                    continue
+                samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind, messages=messages if isinstance(messages, list) else None))
         else:
             content = path.read_text(encoding="utf-8", errors="ignore").strip()
             if content:

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from c3rnt2.config import load_settings
 from c3rnt2.training.train_experts import train_experts

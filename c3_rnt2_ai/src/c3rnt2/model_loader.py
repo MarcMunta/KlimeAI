@@ -4,34 +4,33 @@ from typing import Any
 
 from .model.core_transformer import CoreTransformer
 from .hf_model import load_hf_model
-<<<<<<< HEAD
-from .tensorrt_backend import load_trt_model
-=======
 from .tensorrt_backend import load_tensorrt_model
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
+
+
+def _fallback_backend(core: dict, current: str) -> str | None:
+    fallback = core.get("backend_fallback") or core.get("hf_fallback")
+    if fallback and str(fallback).lower() != current:
+        return str(fallback).lower()
+    return None
 
 
 def load_inference_model(settings: dict, backend_override: str | None = None) -> Any:
     core = settings.get("core", {}) or {}
     backend = str(backend_override or core.get("backend", "vortex")).lower()
     if backend == "hf":
-<<<<<<< HEAD
-        return load_hf_model(settings)
-    if backend == "tensorrt":
-        return load_trt_model(settings)
-=======
         try:
             return load_hf_model(settings)
         except Exception:
-            fallback = core.get("backend_fallback") or core.get("hf_fallback")
-            if fallback:
-                local = dict(settings)
-                core_local = dict(core)
-                core_local["backend"] = str(fallback)
-                local["core"] = core_local
-                return CoreTransformer.from_settings(local)
+            fb = _fallback_backend(core, backend)
+            if fb:
+                return load_inference_model(settings, backend_override=fb)
             raise
     if backend == "tensorrt":
-        return load_tensorrt_model(settings)
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
+        try:
+            return load_tensorrt_model(settings)
+        except Exception:
+            fb = _fallback_backend(core, backend)
+            if fb:
+                return load_inference_model(settings, backend_override=fb)
+            return CoreTransformer.from_settings(settings)
     return CoreTransformer.from_settings(settings)

@@ -78,17 +78,6 @@ def acquire_exclusive_lock(base_dir: Path, role: str) -> FileLock:
     own_path = lock_dir / f"{role}.lock"
     own_lock = FileLock(own_path)
     own_lock.acquire(blocking=False)
-<<<<<<< HEAD
-    other_roles = roles - {role}
-    try:
-        for other_role in other_roles:
-            other_lock = FileLock(lock_dir / f"{other_role}.lock")
-            other_lock.acquire(blocking=False)
-            other_lock.release()
-    except LockUnavailable:
-        own_lock.release()
-        raise
-=======
     for other_role in roles - {role}:
         other_path = lock_dir / f"{other_role}.lock"
         other_lock = FileLock(other_path)
@@ -98,5 +87,4 @@ def acquire_exclusive_lock(base_dir: Path, role: str) -> FileLock:
         except LockUnavailable:
             own_lock.release()
             raise
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
     return own_lock

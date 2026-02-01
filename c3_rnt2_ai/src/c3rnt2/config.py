@@ -86,11 +86,14 @@ def normalize_settings(settings: dict) -> dict:
 
     tools = normalized.get("tools", {}) or {}
     web = tools.get("web", {}) or {}
+    agent = normalized.get("agent", {}) or {}
+    if not web.get("allow_domains") and agent.get("web_allowlist"):
+        web["allow_domains"] = agent.get("web_allowlist")
     web.setdefault("enabled", False)
     web.setdefault("allow_domains", ["docs.python.org", "pytorch.org", "github.com"])
     web.setdefault("max_bytes", 512000)
     web.setdefault("timeout_s", 10)
-    web.setdefault("rate_limit_per_min", 30)
+    web.setdefault("rate_limit_per_min", agent.get("rate_limit_per_min", 30))
     web.setdefault("cache_dir", "data/web_cache")
     web.setdefault("cache_ttl_s", 3600)
     web.setdefault("allow_content_types", ["text/", "application/json"])
@@ -100,8 +103,25 @@ def normalize_settings(settings: dict) -> dict:
     self_patch = normalized.get("self_patch", {}) or {}
     self_patch.setdefault("enabled", False)
     self_patch.setdefault("auto_sandbox", True)
+    self_patch.setdefault("queue_dir", "data/self_patch/queue")
+    self_patch.setdefault("sandbox_dir", "data/self_patch/sandbox")
+    self_patch.setdefault("max_patch_kb", 128)
     self_patch.setdefault("allowed_paths", ["src/", "tests/"])
-    self_patch.setdefault("forbidden_paths", [".env", ".env.", ".git/", "data/", "data/db", "data/keys", "keys", "secrets"])
+    self_patch.setdefault(
+        "forbidden_globs",
+        [
+            ".env",
+            ".env.*",
+            "data/**",
+            "*.key",
+            "*.pem",
+            "*.p12",
+            "*.sqlite",
+            "*.db",
+            "keys/**",
+            "secrets/**",
+        ],
+    )
     normalized["self_patch"] = self_patch
 
     vx = normalized.get("vortex_model", {}) or {}
@@ -139,48 +159,6 @@ def normalize_settings(settings: dict) -> dict:
 
     if lava:
         normalized["lava"] = lava
-
-    tools = normalized.get("tools", {}) or {}
-    web = tools.get("web", {}) or {}
-    agent = normalized.get("agent", {}) or {}
-    if not web.get("allow_domains"):
-        web_allow = agent.get("web_allowlist")
-        if web_allow:
-            web["allow_domains"] = web_allow
-    web.setdefault("enabled", False)
-    web.setdefault("rate_limit_per_min", agent.get("rate_limit_per_min", 30))
-    web.setdefault("cache_dir", "data/web_cache")
-    web.setdefault("max_bytes", 1_000_000)
-    web.setdefault("timeout_s", 10)
-    tools["web"] = web
-    normalized["tools"] = tools
-
-    self_patch = normalized.get("self_patch", {}) or {}
-    self_patch.setdefault("enabled", True)
-    self_patch.setdefault("queue_dir", "data/self_patch/queue")
-    self_patch.setdefault("sandbox_dir", "data/self_patch/sandbox")
-    self_patch.setdefault("max_patch_kb", 128)
-    self_patch.setdefault(
-        "allowed_paths",
-        [
-            "src/c3rnt2/",
-            "tests/",
-        ],
-    )
-    self_patch.setdefault(
-        "forbidden_globs",
-        [
-            ".env",
-            ".env.*",
-            "data/**",
-            "*.key",
-            "*.pem",
-            "*.p12",
-            "*.sqlite",
-            "*.db",
-        ],
-    )
-    normalized["self_patch"] = self_patch
 
     return normalized
 
@@ -241,6 +219,8 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     if web_cfg:
         if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_domains"):
             errors.append("tools.web.allow_domains required when tools.web.enabled is true")
+        if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_content_types"):
+            errors.append("tools.web.allow_content_types required when tools.web.enabled is true")
         try:
             if int(web_cfg.get("rate_limit_per_min", 1)) <= 0:
                 errors.append("tools.web.rate_limit_per_min must be > 0")

@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Dict, Iterable, List, Any
+from typing import Any, Dict, Iterable, List
 
 try:
     import torch
@@ -10,7 +10,7 @@ except Exception:  # pragma: no cover
     torch = None
 
 from .cache_manager import CacheManager
-from .gpu_decompress import decompress_to_tensor, DecompressStats
+from .gpu_decompress import DecompressStats, decompress_to_tensor
 from .prefetch import Prefetcher
 
 
@@ -57,13 +57,11 @@ class PagedWeights:
             async_mode=self.non_blocking,
         )
 
-    def _load_tile_payload(self, tile_id: int):
+    def _load_tile_payload(self, tile_id: int) -> dict:
         tile = self.tile_store[tile_id]
         codec = None
         shape = None
         compressed_bytes = 0
-        tensor = None
-        dec_stats = DecompressStats()
         if isinstance(tile, dict):
             payload = tile.get("payload")
             codec = tile.get("codec")
@@ -80,7 +78,6 @@ class PagedWeights:
                 pin_memory=self.pin_memory,
                 non_blocking=self.non_blocking,
                 backend=self.gpu_decompress,
-                stats=dec_stats,
             )
         else:
             compressed_bytes = int(tile.nbytes)
@@ -90,7 +87,6 @@ class PagedWeights:
                 pin_memory=self.pin_memory,
                 non_blocking=self.non_blocking,
                 backend=self.gpu_decompress,
-                stats=dec_stats,
             )
         size_bytes = int(tensor.numel() * tensor.element_size()) if hasattr(tensor, "numel") else int(compressed_bytes)
         return {
@@ -98,11 +94,7 @@ class PagedWeights:
             "tensor": tensor,
             "size_bytes": size_bytes,
             "compressed_bytes": compressed_bytes,
-<<<<<<< HEAD
-            "decompress_stats": dec_stats,
-=======
             "stats": stats,
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
         }
 
     def _cache_payload(self, payload: dict) -> object:
@@ -110,24 +102,18 @@ class PagedWeights:
         tensor = payload["tensor"]
         size_bytes = int(payload["size_bytes"])
         compressed_bytes = int(payload["compressed_bytes"])
-        dec_stats = payload.get("decompress_stats")
-        if dec_stats is not None:
-            self.stats.bytes_decompressed += int(getattr(dec_stats, "bytes_decompressed", 0))
-            self.stats.ms_cpu_decompress += float(getattr(dec_stats, "ms_cpu_decompress", 0.0))
-            self.stats.ms_triton_copy += float(getattr(dec_stats, "ms_triton_copy", 0.0))
+        stats = payload.get("stats")
         if isinstance(payload.get("ms_h2d"), (int, float)):
-            self.stats.ms_h2d += float(payload.get("ms_h2d"))
+            if stats is None:
+                stats = DecompressStats()
+            stats.ms_h2d += float(payload.get("ms_h2d"))
+        if stats is not None:
+            self.stats.bytes_decompressed += int(getattr(stats, "bytes_decompressed", 0))
+            self.stats.ms_cpu_decompress += float(getattr(stats, "ms_cpu_decompress", 0.0))
+            self.stats.ms_h2d += float(getattr(stats, "ms_h2d", 0.0))
+            self.stats.ms_triton_copy += float(getattr(stats, "ms_triton_copy", 0.0))
         self.stats.bytes_transferred += compressed_bytes
         self.stats.compressed_bytes += compressed_bytes
-        stats = payload.get("stats")
-        if stats is not None:
-            try:
-                self.stats.bytes_decompressed += int(getattr(stats, "bytes_decompressed", 0))
-                self.stats.ms_cpu_decompress += float(getattr(stats, "ms_cpu_decompress", 0.0))
-                self.stats.ms_h2d += float(getattr(stats, "ms_h2d", 0.0))
-                self.stats.ms_triton_copy += float(getattr(stats, "ms_triton_copy", 0.0))
-            except Exception:
-                pass
         if hasattr(tensor, "numel"):
             decompressed = int(tensor.numel() * tensor.element_size())
             self.stats.decompressed_bytes += decompressed
@@ -159,16 +145,12 @@ class PagedWeights:
                 if self.device.startswith("cuda") and hasattr(tensor, "device") and tensor.device.type == "cpu":
                     start = time.perf_counter()
                     tensor = tensor.to(self.device, non_blocking=True)
-<<<<<<< HEAD
-                    payload["ms_h2d"] = (time.perf_counter() - start) * 1000.0
-=======
                     payload_stats = payload.get("stats")
                     if payload_stats is not None:
                         try:
                             payload_stats.ms_h2d += (time.perf_counter() - start) * 1000.0
                         except Exception:
                             pass
->>>>>>> 7ef3a231663391568cb83c4c686642e75f55c974
                     payload["tensor"] = tensor
                 result.append(self._cache_payload(payload))
         return result
