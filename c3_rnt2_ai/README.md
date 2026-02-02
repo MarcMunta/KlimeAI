@@ -152,7 +152,7 @@ Para habilitar busqueda y apertura de docs en el agente/servidor:
 tools:
   web:
     enabled: true
-    allow_domains: ["docs.python.org", "pytorch.org", "github.com"]
+    allow_domains: ["docs.python.org", "pytorch.org", "github.com", "duckduckgo.com"]
 ```
 
 ## Feedback y entrenamiento

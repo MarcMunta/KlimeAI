@@ -266,6 +266,7 @@ def _inject_rag_context(
 ) -> tuple[list[dict], str | None, dict]:
     rag_cfg = settings.get("rag", {}) or {}
     enabled = bool(rag_cfg.get("enabled", False))
+    max_chars = int(rag_cfg.get("max_chars", 1200))
     rag_info = {
         "enabled": enabled,
         "top_k": int(rag_cfg.get("top_k", 3)),
@@ -283,6 +284,8 @@ def _inject_rag_context(
     top_k = rag_info["top_k"]
     start = time.time()
     context, refs = retrieve_context_details(base_dir, query, settings, top_k=top_k)
+    if context and max_chars and len(context) > max_chars:
+        context = context[:max_chars]
     elapsed_ms = (time.time() - start) * 1000.0
     rag_info.update({"refs": refs, "chars": len(context or ""), "latency_ms": elapsed_ms})
     if not context:
@@ -290,10 +293,21 @@ def _inject_rag_context(
         return messages, prompt, rag_info
     block = f"CONTEXT:\n{context}\nEND_CONTEXT"
     if messages:
-        new_messages = [{"role": "system", "content": block}] + list(messages)
+        insert_at = 0
+        for msg in messages:
+            if str(msg.get("role", "")).lower() == "system":
+                insert_at += 1
+            else:
+                break
+        new_messages = list(messages)
+        new_messages.insert(insert_at, {"role": "system", "content": block})
         _log_rag_event(base_dir, {"query": query, "top_k": top_k, "chars": len(context), "source_refs": refs, "latency_ms": elapsed_ms})
         return new_messages, prompt, rag_info
-    new_prompt = f"{block}\n\n{prompt or ''}".strip()
+    base_prompt = prompt or ""
+    if base_prompt:
+        new_prompt = f"{base_prompt}\n\n{block}".strip()
+    else:
+        new_prompt = block
     _log_rag_event(base_dir, {"query": query, "top_k": top_k, "chars": len(context), "source_refs": refs, "latency_ms": elapsed_ms})
     return messages, new_prompt, rag_info
 

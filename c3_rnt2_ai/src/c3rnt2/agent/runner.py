@@ -101,12 +101,16 @@ def run_agent(
     tools_cfg = settings.get("tools", {}) or {}
     allowlist = tools_cfg.get("web", {}).get("allow_domains", agent_cfg.get("web_allowlist", []))
     sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
+    self_patch_cfg = dict(settings.get("self_patch", {}) or {})
+    safety_cfg = settings.get("continuous", {}).get("safety", {}) or {}
+    if safety_cfg:
+        self_patch_cfg["safety"] = dict(safety_cfg)
     tools = AgentTools(
         allowlist=list(allowlist or []),
         sandbox_root=sandbox_root,
         web_cfg=tools_cfg,
         agent_cfg=agent_cfg,
-        self_patch_cfg=settings.get("self_patch", {}),
+        self_patch_cfg=self_patch_cfg,
         repo_root=base_dir,
     )
     model = None

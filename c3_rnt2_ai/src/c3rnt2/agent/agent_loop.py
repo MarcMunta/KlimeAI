@@ -43,13 +43,17 @@ def run_demo_agent(settings: dict) -> Dict[str, str]:
     allowlist = web_cfg.get("allow_domains") or agent_cfg.get("web_allowlist", ["docs.python.org"])
     sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
     rate_limit = int(web_cfg.get("rate_limit_per_min", agent_cfg.get("rate_limit_per_min", 30)))
+    self_patch_cfg = dict(settings.get("self_patch", {}) or {})
+    safety_cfg = settings.get("continuous", {}).get("safety", {}) or {}
+    if safety_cfg:
+        self_patch_cfg["safety"] = dict(safety_cfg)
     tools = AgentTools(
         allowlist=allowlist,
         sandbox_root=sandbox_root,
         rate_limit_per_min=rate_limit,
         web_cfg=tools_cfg,
         agent_cfg=agent_cfg,
-        self_patch_cfg=settings.get("self_patch", {}),
+        self_patch_cfg=self_patch_cfg,
     )
     repo = _setup_demo_repo(sandbox_root)
 

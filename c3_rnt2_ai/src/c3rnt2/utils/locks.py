@@ -88,3 +88,20 @@ def acquire_exclusive_lock(base_dir: Path, role: str) -> FileLock:
             own_lock.release()
             raise
     return own_lock
+
+
+def is_lock_held(base_dir: Path, role: str) -> bool:
+    role = role.lower()
+    roles = {"serve", "train", "self_patch"}
+    if role not in roles:
+        raise ValueError("role must be 'serve', 'train', or 'self_patch'")
+    lock_dir = base_dir / "data" / "locks"
+    path = lock_dir / f"{role}.lock"
+    lock = FileLock(path)
+    try:
+        lock.acquire(blocking=False)
+    except LockUnavailable:
+        return True
+    finally:
+        lock.release()
+    return False

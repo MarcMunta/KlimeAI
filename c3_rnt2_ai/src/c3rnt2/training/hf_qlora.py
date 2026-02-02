@@ -429,11 +429,12 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         batch = {k: v.to(model_device) for k, v in batch.items() if v is not None}
         with torch.autocast(device_type="cuda", dtype=torch_dtype, enabled=use_autocast):
             outputs = model(**batch)
-            loss = outputs.loss / max(1, grad_accum)
+            raw_loss = outputs.loss
+            loss = raw_loss / max(1, grad_accum)
         loss.backward()
         tokens_seen += int(batch["input_ids"].numel())
         steps += 1
-        total_loss += float(loss.item())
+        total_loss += float(raw_loss.item())
         if steps % grad_accum == 0:
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
@@ -472,6 +473,10 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     adapter_loss = None
     improvement = None
     eval_ok = True
+    repeat_ratio = None
+    min_improve = None
+    max_regress = None
+    max_repeat = None
     if eval_enabled and base_eval_samples:
         adapter_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=max_length)
         if base_loss is not None and adapter_loss is not None:
@@ -494,7 +499,19 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                     eval_ok = False
             except Exception:
                 pass
-    meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok})
+    eval_meta = {
+        "enabled": eval_enabled,
+        "samples": len(base_eval_samples),
+        "base_loss": base_loss,
+        "adapter_loss": adapter_loss,
+        "improvement": improvement,
+        "min_improvement": min_improve,
+        "max_regression": max_regress,
+        "repeat_ratio": repeat_ratio,
+        "max_repeat_ratio": max_repeat,
+        "eval_ok": eval_ok,
+    }
+    meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok, "eval": eval_meta})
     (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
 
     state.update({"last_ts": time.time(), "last_run_id": run_id})

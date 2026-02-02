@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from .utils import PatchMeta, generate_diff
+from ..utils.locks import is_lock_held
 from .policy import policy_from_settings, validate_patch
 from .llm_diff import generate_diff_with_llm
 
@@ -48,6 +49,32 @@ def propose_patch(
     queue_dir = queue_root / patch_id
     queue_dir.mkdir(parents=True, exist_ok=True)
     patch_path = queue_dir / "patch.diff"
+    safety_cfg = settings.get("continuous", {}).get("safety", {}) if settings else {}
+    if safety_cfg.get("forbid_self_patch_during_train") and is_lock_held(repo_root, "train"):
+        patch_path.write_text("", encoding="utf-8")
+        context_payload: str | None = None
+        if context is not None:
+            if isinstance(context, str):
+                context_payload = context
+            else:
+                context_payload = json.dumps(context, ensure_ascii=True)
+        meta = PatchMeta(
+            patch_id=patch_id,
+            goal=goal,
+            context=context_payload,
+            created_ts=time.time(),
+            status="blocked",
+            error="train_lock_active",
+        )
+        meta_path = queue_dir / "meta.json"
+        meta_path.write_text(json.dumps(meta.__dict__, ensure_ascii=True), encoding="utf-8")
+        return PatchProposal(
+            patch_id=patch_id,
+            queue_dir=queue_dir,
+            patch_path=patch_path,
+            meta_path=meta_path,
+            dry_run=bool(dry_run),
+        )
 
     diff_payload = diff_text or ""
     changes = {}

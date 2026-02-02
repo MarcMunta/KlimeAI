@@ -200,6 +200,31 @@ def _quality_score(text: str, source_kind: str, max_repeat_ratio: float) -> floa
     return max(0.0, min(1.0, base))
 
 
+def _promote_web_quarantine(
+    store: KnowledgeStore,
+    recent_vecs: List[List[float]],
+    filter_cfg: dict,
+    max_repeat_ratio: float,
+) -> int:
+    min_quality = float(filter_cfg.get("min_quality", 0.35))
+    min_chars = int(filter_cfg.get("min_chars", 200))
+    min_novelty = float(filter_cfg.get("min_novelty", 0.2))
+    limit = int(filter_cfg.get("quarantine_limit", 200))
+    promoted = 0
+    for chunk in store.sample_chunks(limit=limit, min_quality=0.0, source_kinds=["web"]):
+        if chunk.score >= min_quality:
+            continue
+        text = chunk.text
+        if len(text) < min_chars:
+            continue
+        quality = _quality_score(text, "web", max_repeat_ratio)
+        novelty = _novelty_score(text, recent_vecs)
+        if quality >= min_quality and novelty >= min_novelty:
+            if store.update_quality(text, max(min_quality, quality)):
+                promoted += 1
+    return promoted
+
+
 def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
     continuous = settings.get("continuous", {})
     ingest_cfg = continuous.get("ingest", {}) or {}
@@ -320,7 +345,7 @@ def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
             if max_bytes > 0 and len(content_bytes) > max_bytes:
                 content_bytes = content_bytes[:max_bytes]
                 content = content_bytes.decode("utf-8", errors="ignore")
-            new_docs += store.ingest_text("web", url, content, quality=0.7)
+            new_docs += store.ingest_text("web", url, content, quality=0.0)
             bytes_used += len(content_bytes)
             files_used += 1
             state.set_json(key, {"ts": time.time(), "hash": content_hash})
@@ -402,6 +427,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
     new_docs = ingest_sources(base_dir, allowlist, settings) if ingest else 0
 
     recent_vecs = [embed_text(t) for t in replay.recent_texts(limit=50)]
+    _promote_web_quarantine(store, recent_vecs, filter_cfg, max_repeat_ratio)
     total_candidates = 0
     filtered = 0
     novelty_scores: List[float] = []

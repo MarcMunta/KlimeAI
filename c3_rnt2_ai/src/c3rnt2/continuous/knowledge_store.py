@@ -350,6 +350,23 @@ class KnowledgeStore:
             conn.commit()
         return added
 
+    def update_quality(self, text: str, quality: float) -> bool:
+        normalized = _normalize_text(text)
+        if not normalized:
+            return False
+        digest = _hash_text(normalized)
+        with self._connect() as conn:
+            cur = conn.execute("SELECT quality FROM docs WHERE hash = ?", (digest,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            current = row[0]
+            if current is not None and float(current) >= float(quality):
+                return False
+            conn.execute("UPDATE docs SET quality = ? WHERE hash = ?", (float(quality), digest))
+            conn.commit()
+            return True
+
     def count_new_since(self, since_ts: float) -> int:
         with self._connect() as conn:
             cur = conn.execute("SELECT COUNT(*) FROM docs WHERE ts > ?", (since_ts,))

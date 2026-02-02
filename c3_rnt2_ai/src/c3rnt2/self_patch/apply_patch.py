@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .utils import diff_paths
+from ..utils.locks import is_lock_held
 
 
 DEFAULT_ALLOWED = [
@@ -81,6 +82,9 @@ def _is_allowed(rel: str, allowed_paths: Iterable[str], forbidden_globs: Iterabl
 
 def apply_patch(patch_id: str, base_dir: Path, settings: dict | None = None) -> PatchApplyResult:
     base_dir = Path(base_dir)
+    safety_cfg = settings.get("continuous", {}).get("safety", {}) if settings else {}
+    if safety_cfg.get("forbid_self_patch_during_train") and is_lock_held(base_dir, "train"):
+        return PatchApplyResult(ok=False, patch_id=patch_id, error="train_lock_active")
     queue_root = _resolve_queue_root(base_dir, settings)
     queue_dir = queue_root / patch_id
     patch_path = queue_dir / "patch.diff"

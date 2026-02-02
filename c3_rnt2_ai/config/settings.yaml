@@ -70,12 +70,12 @@ profiles:
         error: 5.0
         quality: 1.0
     agent:
-      web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
+      web_allowlist: ["github.com", "docs.python.org", "pytorch.org", "duckduckgo.com"]
       tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
     tools:
       web:
         enabled: false
-        allow_domains: ["github.com", "docs.python.org", "pytorch.org"]
+        allow_domains: ["github.com", "docs.python.org", "pytorch.org", "duckduckgo.com"]
         max_bytes: 512000
         timeout_s: 10
         rate_limit_per_min: 30
@@ -126,6 +126,9 @@ profiles:
       filter:
         min_quality: 0.35
         max_repeat_ratio: 0.8
+        min_chars: 200
+        min_novelty: 0.2
+        quarantine_limit: 200
       replay:
         path: data/continuous/replay.sqlite
         max_items: 2000
@@ -406,12 +409,12 @@ profiles:
       compute_cost_weight: 0.0
       smoothness: 1.0
     agent:
-      web_allowlist: ["github.com", "docs.python.org", "pytorch.org"]
+      web_allowlist: ["github.com", "docs.python.org", "pytorch.org", "duckduckgo.com"]
       tools_enabled: ["run_tests", "search_web", "edit_repo", "open_docs"]
     tools:
       web:
         enabled: false
-        allow_domains: ["github.com", "docs.python.org", "pytorch.org"]
+        allow_domains: ["github.com", "docs.python.org", "pytorch.org", "duckduckgo.com"]
         max_bytes: 512000
         timeout_s: 10
         rate_limit_per_min: 30
@@ -538,6 +541,7 @@ profiles:
         - "github.com"
         - "docs.python.org"
         - "pytorch.org"
+        - "duckduckgo.com"
         - "developer.nvidia.com"
       tools_enabled: ["run_tests", "search_web", "open_docs", "propose_patch"]
       rate_limit_per_min: 30
@@ -600,6 +604,9 @@ profiles:
       filter:
         min_quality: 0.35
         max_repeat_ratio: 0.8
+        min_chars: 200
+        min_novelty: 0.2
+        quarantine_limit: 200
       replay:
         path: data/continuous/replay.sqlite
         max_items: 5000

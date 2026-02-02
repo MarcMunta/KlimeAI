@@ -4,11 +4,13 @@ import html
 import json
 import re
 import subprocess
+from urllib.parse import quote_plus
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
 from ..tools.web_access import web_fetch
+from ..utils.locks import is_lock_held
 from .sandbox import run_sandbox_command
 
 
@@ -38,6 +40,10 @@ class AgentTools:
         self.self_patch_cfg = dict(self_patch_cfg or {})
         self.web_enabled = bool(self.web_cfg.get("enabled", False))
         self.allowlist = list(self.web_cfg.get("allow_domains", allowlist) or [])
+        if self.web_enabled:
+            normalized = [str(item).lower().strip() for item in self.allowlist if item]
+            if "duckduckgo.com" not in normalized:
+                self.allowlist.append("duckduckgo.com")
         self.cache_root = Path(self.web_cfg.get("cache_dir") or cache_root or Path("data") / "web_cache")
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.rate_limit_per_min = int(self.web_cfg.get("rate_limit_per_min", rate_limit_per_min))
@@ -110,7 +116,8 @@ class AgentTools:
             return ToolResult(ok=False, output="web disabled")
         if not query:
             return ToolResult(ok=False, output="query required")
-        url = f"https://duckduckgo.com/html/?q={query}"
+        encoded = quote_plus(query)
+        url = f"https://duckduckgo.com/html/?q={encoded}"
         result = web_fetch(
             url,
             allowlist=self.allowlist,
@@ -124,7 +131,11 @@ class AgentTools:
         if not result.ok:
             return ToolResult(ok=False, output=result.error or "fetch failed")
         html_text = result.text or ""
-        matches = re.findall(r'<a[^>]+class="result__a"[^>]*href="(.*?)"[^>]*>(.*?)</a>', html_text, flags=re.IGNORECASE | re.DOTALL)
+        matches = re.findall(
+            r'<a[^>]+class="result__a"[^>]*href="(.*?)"[^>]*>(.*?)</a>',
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         lines: List[str] = []
         for href, title_html in matches:
             title = re.sub(r"<[^>]+>", " ", title_html)
@@ -132,12 +143,23 @@ class AgentTools:
             link = html.unescape(href)
             if not title or not link:
                 continue
-            lines.append(f"{title} — {link}")
+            lines.append(f"{title} - {link}")
             if len(lines) >= max_results:
                 break
         if not lines:
+            fallback = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', html_text, flags=re.IGNORECASE | re.DOTALL)
+            for href, title_html in fallback:
+                title = re.sub(r"<[^>]+>", " ", title_html)
+                title = html.unescape(" ".join(title.split()))
+                link = html.unescape(href)
+                if not title or not link:
+                    continue
+                lines.append(f"{title} - {link}")
+                if len(lines) >= max_results:
+                    break
+        if not lines:
             cleaned = self._sanitize_text(html_text)
-            return ToolResult(ok=True, output=cleaned[:1000])
+            return ToolResult(ok=True, output=cleaned[:800])
         return ToolResult(ok=True, output="\n".join(lines))
 
     def open_docs(self, url: str, max_chars: int | None = None) -> ToolResult:
@@ -252,6 +274,9 @@ class AgentTools:
         llm_context: dict | None = None,
     ) -> ToolResult:
         try:
+            safety_cfg = self.self_patch_cfg.get("safety", {}) if isinstance(self.self_patch_cfg, dict) else {}
+            if safety_cfg.get("forbid_self_patch_during_train") and self.repo_root and is_lock_held(self.repo_root, "train"):
+                return ToolResult(ok=False, output="self_patch blocked during training")
             from ..self_patch.propose_patch import propose_patch
 
             context: dict[str, object] = {"changes": {str(k): v for k, v in changes.items()}}

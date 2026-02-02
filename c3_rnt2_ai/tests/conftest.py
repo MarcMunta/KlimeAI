@@ -46,6 +46,9 @@ _NUMPY_TESTS = {
 
 
 def pytest_ignore_collect(collection_path, config):  # pragma: no cover - env dependent
+    path_str = str(collection_path).replace("\\", "/")
+    if "/data/workspaces/" in path_str:
+        return True
     name = getattr(collection_path, "name", None) or getattr(collection_path, "basename", "")
     if _MISSING_TORCH and name in _TORCH_TESTS:
         return True
