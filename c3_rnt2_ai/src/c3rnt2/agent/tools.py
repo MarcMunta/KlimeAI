@@ -105,12 +105,28 @@ class AgentTools:
         except Exception as exc:
             return ToolResult(ok=False, output=f"edit failed: {exc}")
 
-    def propose_patch(self, repo_root: Path, changes: Dict[Path, str], goal: str = "agent_patch") -> ToolResult:
+    def propose_patch(
+        self,
+        repo_root: Path,
+        changes: Dict[Path, str],
+        goal: str = "agent_patch",
+        *,
+        llm_generate_diff: bool = False,
+        llm_context: dict | None = None,
+    ) -> ToolResult:
         try:
             from ..self_patch.propose_patch import propose_patch
 
             context = {"changes": {str(k): v for k, v in changes.items()}}
-            proposal = propose_patch(goal, context, repo_root, settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {})
+            if llm_context:
+                context.update(llm_context)
+            proposal = propose_patch(
+                goal,
+                context,
+                repo_root,
+                settings={"self_patch": self.self_patch_cfg} if self.self_patch_cfg else {},
+                llm_generate_diff=llm_generate_diff,
+            )
             return ToolResult(ok=True, output=proposal.patch_id)
         except Exception as exc:
             return ToolResult(ok=False, output=f"propose failed: {exc}")

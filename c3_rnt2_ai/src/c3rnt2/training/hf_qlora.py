@@ -12,6 +12,8 @@ from torch.utils.data import DataLoader, Dataset
 from ..continuous.knowledge_store import KnowledgeStore, KnowledgeChunk, EmbeddingBackend
 from ..continuous.types import Sample
 from ..continuous.formatting import format_chat_sample
+from ..continuous.anchors import load_anchors, write_default_anchors
+from .dataset_builder import build_sft_dataset
 
 
 @dataclass
@@ -181,6 +183,58 @@ def _load_dataset(path: Path) -> List[Sample]:
     return samples
 
 
+def _pack_texts(texts: List[str], tokenizer: object, max_tokens: int) -> List[str]:
+    packed: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for text in texts:
+        try:
+            length = len(tokenizer(text)["input_ids"])
+        except Exception:
+            length = len(text.split())
+        if current and current_len + length > max_tokens:
+            packed.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(text)
+        current_len += length
+    if current:
+        packed.append("\n\n".join(current))
+    return packed
+
+
+def _bucket_by_length(texts: List[str], tokenizer: object) -> List[str]:
+    lengths = []
+    for text in texts:
+        try:
+            length = len(tokenizer(text)["input_ids"])
+        except Exception:
+            length = len(text.split())
+        lengths.append((length, text))
+    lengths.sort(key=lambda x: x[0])
+    return [t for _, t in lengths]
+
+
+def _eval_loss(model, tokenizer, samples: List[Sample], max_length: int) -> float:
+    losses: List[float] = []
+    with torch.inference_mode():
+        for sample in samples:
+            text = format_chat_sample(sample, backend="hf", tokenizer=tokenizer, default_system=None)
+            enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
+            enc = {k: v.to(model.device) for k, v in enc.items()}
+            out = model(**enc, labels=enc["input_ids"])
+            losses.append(float(out.loss.item()))
+    return sum(losses) / max(1, len(losses))
+
+
+def _repeat_ratio(text: str) -> float:
+    words = text.split()
+    if not words:
+        return 1.0
+    unique = len(set(words))
+    return 1.0 - (unique / max(1, len(words)))
+
+
 def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> HfTrainResult:
     cfg = settings.get("hf_train", {}) or {}
     model_name = cfg.get("model_name") or settings.get("core", {}).get("hf_model")
@@ -212,15 +266,25 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     max_samples = int(cfg.get("max_samples", 128))
     min_quality = float(cfg.get("min_quality", 0.0))
     chunks = store.sample_chunks(limit=max_samples, min_quality=min_quality, since_ts=last_ts)
-    if not chunks and not reuse_dataset:
+    episodes_path = base_dir / "data" / "episodes" / "agent.jsonl"
+    if not chunks and not episodes_path.exists() and not reuse_dataset:
         return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, error="no_samples")
 
-    prompt_template = str(cfg.get("prompt_template", "Context:\n{text}\nAnswer:"))
     if reuse_dataset and dataset_path.exists():
         samples = _load_dataset(dataset_path)
     else:
-        samples = build_sft_samples_from_chunks(chunks, prompt_template=prompt_template)
-        _save_dataset(dataset_path, samples)
+        system_prompt = cfg.get("default_system") or settings.get("core", {}).get("hf_system_prompt") or "You are a helpful coding assistant."
+        build_sft_dataset(
+            chunks=chunks,
+            episodes_path=episodes_path,
+            output_path=dataset_path,
+            system_prompt=system_prompt,
+            min_chars=int(cfg.get("min_chars", 40)),
+            max_repeat_ratio=float(cfg.get("max_repeat_ratio", 0.8)),
+            semantic_dedup_threshold=float(cfg.get("semantic_dedup_threshold", 0.97)),
+            embedding_backend=embedder if isinstance(embedder, EmbeddingBackend) else None,
+        )
+        samples = _load_dataset(dataset_path)
 
     if not samples:
         return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, error="empty_dataset")
@@ -256,11 +320,34 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     tokenizer.padding_side = "right"
 
     load_kwargs = {"torch_dtype": torch_dtype}
+    attn_impl = cfg.get("attn_implementation") or settings.get("core", {}).get("hf_attn_implementation")
+    if attn_impl:
+        load_kwargs["attn_implementation"] = attn_impl
+    max_memory = cfg.get("max_memory")
+    if max_memory:
+        load_kwargs["max_memory"] = max_memory
     if quant_config is not None:
         load_kwargs["quantization_config"] = quant_config
         load_kwargs["device_map"] = "auto" if device.startswith("cuda") else "cpu"
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+    base_eval_samples: list[Sample] = []
+    eval_cfg = cfg.get("eval", {}) or {}
+    eval_enabled = bool(eval_cfg.get("enabled", True))
+    if eval_enabled:
+        anchors_path = Path(settings.get("continuous", {}).get("eval", {}).get("anchors_path", base_dir / "data" / "continuous" / "anchors.jsonl"))
+        if not anchors_path.is_absolute():
+            anchors_path = base_dir / anchors_path
+        if not anchors_path.exists():
+            write_default_anchors(anchors_path)
+        anchors = load_anchors(anchors_path)
+        base_eval_samples = anchors[: int(eval_cfg.get("max_samples", 8) or 8)]
+        if base_eval_samples:
+            base_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=int(cfg.get("max_seq_len", 1024)))
+        else:
+            base_loss = None
+    else:
+        base_loss = None
     if load_in_4bit or load_in_8bit:
         model = prepare_model_for_kbit_training(model)
 
@@ -293,12 +380,24 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     max_length = int(cfg.get("max_seq_len", 1024))
     default_system = cfg.get("default_system") or settings.get("core", {}).get("hf_system_prompt")
     texts = build_sft_texts(samples, tokenizer=tokenizer, default_system=default_system)
+    if bool(cfg.get("pack_samples", False)):
+        texts = _pack_texts(texts, tokenizer, max_tokens=max_length)
+    if bool(cfg.get("bucket_by_length", True)):
+        texts = _bucket_by_length(texts, tokenizer)
     dataset = SFTDataset(texts, tokenizer=tokenizer, max_length=max_length)
     micro_batch = max(1, int(cfg.get("micro_batch_size", 1)))
     loader = DataLoader(dataset, batch_size=micro_batch, shuffle=True, collate_fn=lambda b: _collate_fn(b, tokenizer.pad_token_id))
 
     lr = float(cfg.get("lr", 2e-4))
-    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+    optim_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = None
+    if device.startswith("cuda"):
+        try:
+            optimizer = torch.optim.AdamW(optim_params, lr=lr, fused=True)
+        except Exception:
+            optimizer = None
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(optim_params, lr=lr)
     grad_accum = int(cfg.get("grad_accum_steps", 4))
     max_steps = int(cfg.get("max_steps", 50))
     if max_steps <= 0:
@@ -311,20 +410,29 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     steps = 0
     tokens_seen = 0
     optimizer.zero_grad(set_to_none=True)
+    if device.startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats()
+    use_autocast = device.startswith("cuda")
+    grad_clip = float(cfg.get("grad_clip", 1.0))
     for batch in loader:
         batch = {k: v.to(model_device) for k, v in batch.items() if v is not None}
-        outputs = model(**batch)
-        loss = outputs.loss / max(1, grad_accum)
+        with torch.autocast(device_type="cuda", dtype=torch_dtype, enabled=use_autocast):
+            outputs = model(**batch)
+            loss = outputs.loss / max(1, grad_accum)
         loss.backward()
         tokens_seen += int(batch["input_ids"].numel())
         steps += 1
         total_loss += float(loss.item())
         if steps % grad_accum == 0:
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         if steps >= max_steps:
             break
     if steps % grad_accum != 0:
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -333,22 +441,62 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     tokens_per_sec = tokens_seen / elapsed
 
     model.save_pretrained(adapter_dir)
+    vram_peak = None
+    if device.startswith("cuda"):
+        try:
+            vram_peak = float(torch.cuda.max_memory_allocated() / (1024**2))
+        except Exception:
+            vram_peak = None
     meta = {
         "run_id": run_id,
         "loss": avg_loss,
         "steps": steps,
         "samples": len(samples),
         "tokens_per_sec": tokens_per_sec,
+        "vram_peak_mb": vram_peak,
         "ts": time.time(),
     }
+    (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
+
+    adapter_loss = None
+    improvement = None
+    eval_ok = True
+    if eval_enabled and base_eval_samples:
+        adapter_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=max_length)
+        if base_loss is not None and adapter_loss is not None:
+            improvement = base_loss - adapter_loss
+            min_improve = float(eval_cfg.get("min_improvement", settings.get("continuous", {}).get("eval", {}).get("min_improvement", 0.0)))
+            max_regress = float(eval_cfg.get("max_regression", settings.get("continuous", {}).get("eval", {}).get("max_regression", 0.0)))
+            eval_ok = improvement >= min_improve and improvement >= -max_regress
+        if hasattr(model, "generate"):
+            prompt_text = format_chat_sample(base_eval_samples[0], backend="hf", tokenizer=tokenizer, default_system=default_system)
+            try:
+                gen_ids = model.generate(
+                    input_ids=tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(model_device),
+                    max_new_tokens=int(eval_cfg.get("gen_max_new_tokens", 64)),
+                    do_sample=False,
+                )
+                gen_text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+                repeat_ratio = _repeat_ratio(gen_text)
+                max_repeat = float(eval_cfg.get("max_repeat_ratio", 0.9))
+                if repeat_ratio > max_repeat:
+                    eval_ok = False
+            except Exception:
+                pass
+    meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok})
     (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
 
     state.update({"last_ts": time.time(), "last_run_id": run_id})
     _save_state(state_path, state)
 
     registry_path = reg_dir / "registry.json"
-    registry = {"current_adapter": str(adapter_dir), "last_run_id": run_id, "ts": time.time()}
-    registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+    if eval_ok:
+        registry = {"current_adapter": str(adapter_dir), "last_run_id": run_id, "ts": time.time()}
+        registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+    else:
+        candidate_path = reg_dir / "candidates.jsonl"
+        with candidate_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"run_id": run_id, "adapter": str(adapter_dir), "improvement": improvement, "ts": time.time()}, ensure_ascii=True) + "\n")
 
     return HfTrainResult(
         ok=True,

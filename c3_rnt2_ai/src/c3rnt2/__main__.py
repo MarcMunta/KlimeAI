@@ -30,6 +30,7 @@ from .learning_loop.data_curator import curate_dataset
 from .learning_loop.trainer import train_qlora
 from .learning_loop.evaluator import evaluate_adapter, log_eval
 from .learning_loop.promoter import promote_latest
+from .agent.runner import run_agent
 
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
@@ -419,6 +420,13 @@ def cmd_agent_demo(args: argparse.Namespace) -> None:
     print(report)
 
 
+def cmd_agent_run(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    report = run_agent(args.task, settings, base_dir, max_iters=int(args.max_iters))
+    print(report)
+
+
 def cmd_learn_ingest(args: argparse.Namespace) -> None:
     settings = _load_and_validate(args.profile)
     base_dir = Path(".")
@@ -585,6 +593,12 @@ def main() -> None:
     ad = sub.add_parser("agent-demo")
     ad.add_argument("--profile", default=None)
     ad.set_defaults(func=cmd_agent_demo)
+
+    ar = sub.add_parser("agent-run")
+    ar.add_argument("--profile", default=None)
+    ar.add_argument("--task", required=True)
+    ar.add_argument("--max-iters", type=int, default=5)
+    ar.set_defaults(func=cmd_agent_run)
 
     tok = sub.add_parser("tokenizer-train")
     tok.add_argument("extra", nargs=argparse.REMAINDER)

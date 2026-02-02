@@ -18,6 +18,7 @@ from .model_loader import load_inference_model
 from .prompting.chat_format import build_chat_prompt
 from .model.bad_decode import _sample_logits, _sample_logits_topk, _RepetitionTracker, _NgramTracker
 from .continuous.lora import LoRAConfig, inject_lora, load_lora_state, resolve_target_modules
+from .continuous.dataset import retrieve_context_details
 from .continuous.registry import load_registry
 from .runtime.router import build_features, load_router, log_router_event
 from .utils.oom import is_oom_error, clear_cuda_cache
@@ -174,6 +175,65 @@ def _resolve_decode_args(settings: dict, payload: dict) -> dict[str, Any]:
     }
 
 
+def _log_rag_event(base_dir: Path, payload: dict) -> None:
+    log_path = base_dir / "data" / "logs" / "rag_events.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    payload.setdefault("ts", time.time())
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def _extract_query(messages: list[dict], prompt: str | None) -> str:
+    if messages:
+        for msg in reversed(messages):
+            if str(msg.get("role", "")).lower() == "user":
+                return str(msg.get("content", "")).strip()
+    return (prompt or "").strip()
+
+
+def _has_context_marker(messages: list[dict], prompt: str | None) -> bool:
+    markers = ("context:", "end_context")
+    if prompt and any(marker in prompt.lower() for marker in markers):
+        return True
+    for msg in messages:
+        content = str(msg.get("content", "")).lower()
+        if any(marker in content for marker in markers):
+            return True
+    return False
+
+
+def _inject_rag_context(
+    base_dir: Path,
+    settings: dict,
+    messages: list[dict],
+    prompt: str | None,
+) -> tuple[list[dict], str | None]:
+    rag_cfg = settings.get("rag", {}) or {}
+    if not bool(rag_cfg.get("enabled", False)):
+        return messages, prompt
+    if _has_context_marker(messages, prompt):
+        return messages, prompt
+    query = _extract_query(messages, prompt)
+    if not query:
+        return messages, prompt
+    top_k = int(rag_cfg.get("top_k", 3))
+    start = time.time()
+    context, refs = retrieve_context_details(base_dir, query, settings, top_k=top_k)
+    elapsed_ms = (time.time() - start) * 1000.0
+    if not context:
+        _log_rag_event(base_dir, {"query": query, "top_k": top_k, "chars": 0, "source_refs": refs, "latency_ms": elapsed_ms})
+        return messages, prompt
+    block = f"CONTEXT:\n{context}\nEND_CONTEXT"
+    if messages:
+        new_messages = [{"role": "system", "content": block}] + list(messages)
+        _log_rag_event(base_dir, {"query": query, "top_k": top_k, "chars": len(context), "source_refs": refs, "latency_ms": elapsed_ms})
+        return new_messages, prompt
+    new_prompt = f"{block}\n\n{prompt or ''}".strip()
+    _log_rag_event(base_dir, {"query": query, "top_k": top_k, "chars": len(context), "source_refs": refs, "latency_ms": elapsed_ms})
+    return messages, new_prompt
+
+
 def create_app(settings: dict, base_dir: Path) -> "FastAPI":
     try:
         from fastapi import FastAPI, HTTPException, Request
@@ -218,9 +278,12 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             messages = [{"role": "user", "content": payload.get("prompt")}]
         if not messages:
             raise HTTPException(status_code=400, detail="messages required")
+        messages, prompt_override = _inject_rag_context(base_dir, settings, messages, payload.get("prompt"))
         backend_cfg = settings.get("core", {}).get("backend", "vortex")
         default_system = settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant.")
         prompt = build_chat_prompt(messages, backend_cfg, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
+        if prompt_override:
+            prompt = prompt_override
         stream = bool(payload.get("stream", False))
         decode_args = _resolve_decode_args(settings, payload)
         created = int(time.time())
@@ -515,9 +578,12 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 self.send_response(400)
                 self.end_headers()
                 return
+            messages, prompt_override = _inject_rag_context(base_dir, settings, messages, payload.get("prompt"))
             backend = settings.get("core", {}).get("backend", "vortex")
             default_system = settings.get("core", {}).get("hf_system_prompt", "You are a helpful coding assistant.")
             prompt = build_chat_prompt(messages, backend, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
+            if prompt_override:
+                prompt = prompt_override
             stream = bool(payload.get("stream", False))
             decode_args = _resolve_decode_args(settings, payload)
             created = int(time.time())

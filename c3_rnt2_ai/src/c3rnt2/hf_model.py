@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import threading
+import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -8,6 +10,21 @@ from typing import Iterable, Optional
 import torch
 
 from .prompting.chat_format import build_chat_prompt
+
+
+def _log_infer_stats(base_dir: Path, payload: dict) -> None:
+    log_dir = base_dir / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "hf_infer.jsonl"
+    meta_path = log_dir / "hf_infer_meta.json"
+    payload = dict(payload)
+    payload.setdefault("ts", time.time())
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    try:
+        meta_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    except Exception:
+        pass
 
 @dataclass
 class HFConfig:
@@ -63,6 +80,7 @@ class HFModel:
         no_repeat_ngram: int = 0,
         **_kwargs,
     ) -> str:
+        start = time.time()
         prompt_text = self._prepare_prompt(prompt, messages, system)
         input_ids = self._encode(prompt_text)
         do_sample = temperature > 0
@@ -76,7 +94,16 @@ class HFModel:
             no_repeat_ngram_size=no_repeat_ngram if no_repeat_ngram > 0 else None,
         )
         gen_ids = output[0][input_ids.shape[1] :]
-        return self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        elapsed = max(1e-6, time.time() - start)
+        vram_peak = None
+        if torch.cuda.is_available():
+            try:
+                vram_peak = float(torch.cuda.max_memory_allocated() / (1024**2))
+            except Exception:
+                vram_peak = None
+        _log_infer_stats(Path("."), {"tokens": int(gen_ids.numel()), "tokens_per_sec": float(gen_ids.numel()) / elapsed, "vram_peak_mb": vram_peak})
+        return text
 
     def stream_generate(
         self,
@@ -98,6 +125,8 @@ class HFModel:
         input_ids = self._encode(prompt_text)
         do_sample = temperature > 0
         streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True)
+        start = time.time()
+        chunks: list[str] = []
 
         def _run():
             self.model.generate(
@@ -115,8 +144,21 @@ class HFModel:
         thread.start()
         for chunk in streamer:
             if chunk:
+                chunks.append(chunk)
                 yield chunk
         thread.join(timeout=0.1)
+        elapsed = max(1e-6, time.time() - start)
+        try:
+            count = len(self.tokenizer("".join(chunks), add_special_tokens=False)["input_ids"])
+        except Exception:
+            count = len("".join(chunks).split())
+        vram_peak = None
+        if torch.cuda.is_available():
+            try:
+                vram_peak = float(torch.cuda.max_memory_allocated() / (1024**2))
+            except Exception:
+                vram_peak = None
+        _log_infer_stats(Path("."), {"tokens": int(count), "tokens_per_sec": float(count) / elapsed, "vram_peak_mb": vram_peak, "stream": True})
 
 
 def _build_load_kwargs(
@@ -125,10 +167,13 @@ def _build_load_kwargs(
     load_in_4bit: bool,
     load_in_8bit: bool,
     attn_impl: str | None,
+    max_memory: dict | str | None,
 ) -> dict:
     load_kwargs: dict = {"torch_dtype": torch_dtype}
     if attn_impl:
         load_kwargs["attn_implementation"] = attn_impl
+    if max_memory:
+        load_kwargs["max_memory"] = max_memory
     if load_in_4bit or load_in_8bit:
         load_kwargs["load_in_4bit"] = load_in_4bit
         load_kwargs["load_in_8bit"] = load_in_8bit
@@ -154,8 +199,16 @@ def load_hf_model(settings: dict) -> HFModel:
     else:
         torch_dtype = torch.float16 if device == "cuda" else torch.float32
     attn_impl = core.get("hf_attn_implementation")
+    if not attn_impl and core.get("hf_attn_auto"):
+        try:
+            import flash_attn  # type: ignore  # noqa: F401
+
+            attn_impl = "flash_attention_2"
+        except Exception:
+            attn_impl = "sdpa"
     load_in_4bit = bool(core.get("hf_load_in_4bit"))
     load_in_8bit = bool(core.get("hf_load_in_8bit"))
+    max_memory = core.get("hf_max_memory")
     quant_requested = bool(load_in_4bit or load_in_8bit)
     quant_available = False
     if quant_requested:
@@ -172,7 +225,7 @@ def load_hf_model(settings: dict) -> HFModel:
                 model_name=str(model_name),
                 device=device,
                 dtype=torch_dtype,
-                load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, attn_impl),
+                load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, attn_impl, max_memory),
             )
         )
         if attn_impl:
@@ -181,7 +234,7 @@ def load_hf_model(settings: dict) -> HFModel:
                     model_name=str(model_name),
                     device=device,
                     dtype=torch_dtype,
-                    load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, None),
+                    load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, None, max_memory),
                 )
             )
     # Non-quant fallback
@@ -190,7 +243,7 @@ def load_hf_model(settings: dict) -> HFModel:
             model_name=str(model_name),
             device=device,
             dtype=torch_dtype,
-            load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl),
+            load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl, max_memory),
         )
     )
     if attn_impl:
@@ -199,7 +252,7 @@ def load_hf_model(settings: dict) -> HFModel:
                 model_name=str(model_name),
                 device=device,
                 dtype=torch_dtype,
-                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, None),
+                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, None, max_memory),
             )
         )
     # CPU fallback
@@ -209,7 +262,7 @@ def load_hf_model(settings: dict) -> HFModel:
                 model_name=str(model_name),
                 device="cpu",
                 dtype=torch.float32,
-                load_kwargs=_build_load_kwargs(torch.float32, "cpu", False, False, None),
+                load_kwargs=_build_load_kwargs(torch.float32, "cpu", False, False, None, None),
             )
         )
 

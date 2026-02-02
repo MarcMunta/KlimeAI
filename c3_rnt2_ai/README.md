@@ -37,6 +37,7 @@ python -m c3rnt2 eval
 python -m c3rnt2 chat
 python -m c3rnt2 chat --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct
 python -m c3rnt2 agent-demo
+python -m c3rnt2 agent-run --task "Fix failing test"
 python -m c3rnt2 doctor --deep --profile rtx4080_16gb_vortexx_next
 python -m c3rnt2 serve --profile rtx4080_16gb_vortexx_next
 python -m c3rnt2 bootstrap --profile dev_small --checkpoint path.pt
@@ -58,6 +59,15 @@ python -m c3rnt2 serve --profile qwen8b_base
 python -m c3rnt2 chat --profile rtx4080_16gb
 
 Requiere: pip install .[hf]
+```
+
+## Dependencias HF / RAG
+```bash
+pip install -e .[hf,train,rag]
+```
+FAISS (opcional):
+```bash
+pip install faiss-cpu
 ```
 
 ## Base 100% (6 comandos)
@@ -108,6 +118,14 @@ Salida reciente en `data/bench/latest.txt`.
 python -m c3rnt2 chat --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct --stream
 python -m c3rnt2 serve --profile rtx4080_16gb --backend hf --model Qwen/Qwen2.5-8B-Instruct
 ```
+Para activar RAG en el servidor:
+```bash
+# en config/settings.yaml
+rag:
+  enabled: true
+  top_k: 3
+  max_chars: 1200
+```
 
 ## Learning loop (incremental)
 ```bash
@@ -115,6 +133,11 @@ python -m c3rnt2 learn ingest --profile qwen8b_train
 python -m c3rnt2 learn train --profile qwen8b_train --steps 50
 python -m c3rnt2 learn eval --profile qwen8b_train
 python -m c3rnt2 learn promote --profile qwen8b_train
+```
+
+## Agent run
+```bash
+python -m c3rnt2 agent-run --task "Fix failing test" --profile qwen8b_base
 ```
 
 ## Agent safe mode

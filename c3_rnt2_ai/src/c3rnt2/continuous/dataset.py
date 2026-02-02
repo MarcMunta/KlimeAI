@@ -444,7 +444,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
     return CollectedSamples(samples=samples, stats=stats, gold_samples=gold_samples)
 
 
-def retrieve_context(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> str:
+def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> tuple[str, list[str]]:
     rag_cfg = settings.get("rag", {})
     max_chars = int(rag_cfg.get("max_chars", 1200))
     knowledge_path = Path(settings.get("continuous", {}).get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
@@ -453,5 +453,11 @@ def retrieve_context(base_dir: Path, query: str, settings: dict, top_k: int = 3)
     joined = "\n\n".join(chunk.text for chunk in chunks)
     if max_chars and len(joined) > max_chars:
         joined = joined[:max_chars]
-    return joined
+    refs = [chunk.source_ref for chunk in chunks if chunk.source_ref]
+    return joined, refs
+
+
+def retrieve_context(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> str:
+    context, _refs = retrieve_context_details(base_dir, query, settings, top_k=top_k)
+    return context
 

@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from c3rnt2.training.dataset_builder import build_sft_dataset
+from c3rnt2.continuous.knowledge_store import KnowledgeChunk
+
+
+def test_dataset_builder_dedup(tmp_path: Path) -> None:
+    chunks = [
+        KnowledgeChunk(text="alpha beta gamma", score=0.9, source_kind="web", source_ref="local"),
+        KnowledgeChunk(text="alpha beta gamma", score=0.9, source_kind="web", source_ref="local"),
+    ]
+    out = tmp_path / "sft.jsonl"
+    stats = build_sft_dataset(
+        chunks=chunks,
+        episodes_path=tmp_path / "episodes.jsonl",
+        output_path=out,
+        system_prompt="You are a helpful assistant.",
+        min_chars=5,
+        max_repeat_ratio=0.9,
+        semantic_dedup_threshold=0.95,
+        embedding_backend=None,
+    )
+    assert stats.written == 1
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload.get("messages")
+    roles = [m.get("role") for m in payload["messages"]]
+    assert "system" in roles and "user" in roles
+    assert payload.get("response")

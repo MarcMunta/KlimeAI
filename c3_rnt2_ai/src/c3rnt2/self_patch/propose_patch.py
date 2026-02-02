@@ -5,9 +5,11 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from .utils import PatchMeta, generate_diff
+from .policy import policy_from_settings, validate_patch
+from .llm_diff import generate_diff_with_llm
 
 
 @dataclass
@@ -38,6 +40,8 @@ def propose_patch(
     settings: dict | None = None,
     dry_run: bool = False,
     diff_text: Optional[str] = None,
+    llm_generate_diff: bool = False,
+    llm_generate_fn: Optional[Callable[[str, dict, Path, dict], str]] = None,
 ) -> PatchProposal:
     patch_id = uuid.uuid4().hex[:10]
     queue_root = _resolve_queue_root(repo_root, settings)
@@ -51,6 +55,11 @@ def propose_patch(
         changes = context.get("changes", {}) or {}
     if not diff_payload and changes:
         diff_payload = generate_diff(repo_root, {Path(k): v for k, v in changes.items()})
+    if not diff_payload and llm_generate_diff:
+        if llm_generate_fn is not None:
+            diff_payload = llm_generate_fn(goal, context or {}, repo_root, settings or {})
+        else:
+            diff_payload = generate_diff_with_llm(goal, context or {}, repo_root, settings or {})
     patch_path.write_text(diff_payload, encoding="utf-8")
 
     context_payload: str | None = None
@@ -66,6 +75,12 @@ def propose_patch(
         created_ts=time.time(),
         status="proposed",
     )
+    if diff_payload:
+        policy = policy_from_settings(settings)
+        ok, message, _paths = validate_patch(repo_root, diff_payload, policy)
+        if not ok:
+            meta.status = "blocked"
+            meta.error = message
     meta_path = queue_dir / "meta.json"
     meta_path.write_text(json.dumps(meta.__dict__, ensure_ascii=True), encoding="utf-8")
     return PatchProposal(
