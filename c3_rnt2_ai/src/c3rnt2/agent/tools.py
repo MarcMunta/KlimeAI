@@ -42,7 +42,7 @@ class AgentTools:
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.rate_limit_per_min = int(self.web_cfg.get("rate_limit_per_min", rate_limit_per_min))
         self.max_bytes = int(self.web_cfg.get("max_bytes", 512_000))
-        self.timeout_s = float(self.web_cfg.get("timeout_s", 10))
+        self.timeout_s = int(self.web_cfg.get("timeout_s", 10))
         cache_ttl = self.web_cfg.get("cache_ttl_s", None)
         self.cache_ttl_s = int(cache_ttl) if cache_ttl is not None else None
         self.allow_content_types = self.web_cfg.get("allow_content_types")
@@ -132,7 +132,7 @@ class AgentTools:
             link = html.unescape(href)
             if not title or not link:
                 continue
-            lines.append(f"{title} - {link}")
+            lines.append(f"{title} — {link}")
             if len(lines) >= max_results:
                 break
         if not lines:
@@ -184,7 +184,7 @@ class AgentTools:
                 try:
                     rel = path.relative_to(base)
                 except Exception:
-                    rel = path.name
+                    rel = Path(path.name)
                 entries.append(rel.as_posix())
             return ToolResult(ok=True, output="\n".join(entries))
         except Exception as exc:
@@ -254,12 +254,13 @@ class AgentTools:
         try:
             from ..self_patch.propose_patch import propose_patch
 
-            context = {"changes": {str(k): v for k, v in changes.items()}}
+            context: dict[str, object] = {"changes": {str(k): v for k, v in changes.items()}}
             if llm_context:
                 context.update(llm_context)
             files = []
-            if isinstance(context.get("files"), list):
-                files.extend([str(f) for f in context.get("files") if f])
+            files_value = context.get("files")
+            if isinstance(files_value, list):
+                files.extend([str(f) for f in files_value if f])
             tool_calls = llm_context.get("tool_calls") if isinstance(llm_context, dict) else None
             pytest_output = ""
             if isinstance(tool_calls, list):
