@@ -33,7 +33,59 @@ class HfTrainResult:
     eval_ok: bool | None = None
     improvement: float | None = None
     repeat_ratio: float | None = None
+    bench_ok: bool | None = None
+    bench_tokens_per_sec: float | None = None
+    baseline_tokens_per_sec: float | None = None
+    regression: float | None = None
     error: str | None = None
+
+
+def _load_bench_baseline(reg_dir: Path) -> float | None:
+    path = reg_dir / "bench_baseline.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    val = payload.get("bench_tokens_per_sec")
+    try:
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> float | None:
+    if not hasattr(model, "generate") or tokenizer is None:
+        return None
+    prompts = [
+        "Explain what a context manager is in Python and give a short example.",
+        "In PyTorch, what does torch.no_grad() do and when should you use it?",
+        "Write a concise FastAPI endpoint that returns JSON.",
+        "What is LoRA and why is it useful for finetuning LLMs?",
+    ]
+    try:
+        device = getattr(model, "device", None)
+        total_new = 0
+        start = time.time()
+        with torch.inference_mode():
+            for prompt in prompts:
+                enc = tokenizer(prompt, return_tensors="pt")
+                input_ids = enc["input_ids"].to(device) if device is not None else enc["input_ids"]
+                out_ids = model.generate(input_ids=input_ids, max_new_tokens=int(max_new_tokens), do_sample=False)
+                try:
+                    total_new += max(0, int(out_ids.shape[1]) - int(input_ids.shape[1]))
+                except Exception:
+                    total_new += int(max_new_tokens)
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+        elapsed = max(1e-6, time.time() - start)
+        return float(total_new) / elapsed if total_new > 0 else 0.0
+    except Exception:
+        return None
 
 
 class SFTDataset(Dataset):
@@ -674,6 +726,10 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     max_seq_len = int(cfg.get("max_seq_len", 1024))
     min_improve = None
     max_regress = None
+    bench_ok = None
+    bench_tps = None
+    baseline_tps = None
+    bench_regression = None
     if eval_enabled and base_eval_samples:
         try:
             adapter_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=max_seq_len)
@@ -697,6 +753,25 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         except Exception as exc:
             eval_ok = False
             eval_error = str(exc)
+    autopilot_cfg = settings.get("autopilot", {}) or {}
+    if bool(autopilot_cfg.get("bench_enabled", False)) and hasattr(model, "generate"):
+        try:
+            baseline_tps = _load_bench_baseline(reg_dir)
+            bench_tps = _bench_short(model, tokenizer, max_new_tokens=int(autopilot_cfg.get("bench_max_new_tokens", 64)))
+            min_tps = float(autopilot_cfg.get("bench_min_tokens_per_sec", 0.0))
+            max_drop = float(autopilot_cfg.get("bench_max_regression", 0.15))
+            if bench_tps is None:
+                bench_ok = None
+            else:
+                if baseline_tps and baseline_tps > 0:
+                    bench_regression = max(0.0, (baseline_tps - bench_tps) / baseline_tps)
+                else:
+                    bench_regression = 0.0
+                speed_ok = bench_tps >= min_tps
+                reg_ok = bench_regression <= max_drop
+                bench_ok = bool(speed_ok and reg_ok)
+        except Exception:
+            bench_ok = None
     post_error = None
     try:
         eval_meta = {
@@ -710,9 +785,25 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
             "repeat_ratio": repeat_ratio,
             "max_repeat_ratio": max_repeat,
             "eval_ok": eval_ok,
+            "bench_ok": bench_ok,
+            "bench_tokens_per_sec": bench_tps,
+            "baseline_tokens_per_sec": baseline_tps,
+            "regression": bench_regression,
             "error": eval_error,
         }
-        meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok, "eval": eval_meta})
+        meta.update(
+            {
+                "base_loss": base_loss,
+                "adapter_loss": adapter_loss,
+                "improvement": improvement,
+                "eval_ok": eval_ok,
+                "bench_ok": bench_ok,
+                "bench_tokens_per_sec": bench_tps,
+                "baseline_tokens_per_sec": baseline_tps,
+                "regression": bench_regression,
+                "eval": eval_meta,
+            }
+        )
         (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
 
         state.update({"last_ts": time.time(), "last_run_id": run_id})
@@ -747,6 +838,10 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         eval_ok=eval_ok,
         improvement=improvement,
         repeat_ratio=repeat_ratio,
+        bench_ok=bench_ok,
+        bench_tokens_per_sec=bench_tps,
+        baseline_tokens_per_sec=baseline_tps,
+        regression=bench_regression,
         error=post_error or eval_error,
     )
 

@@ -234,6 +234,8 @@ def normalize_settings(settings: dict) -> dict:
     learning.setdefault("max_chars", None)
     learning.setdefault("max_eval_samples", 8)
     learning.setdefault("promote_min_improvement", 0.0)
+    learning.setdefault("require_eval_ok", True)
+    learning.setdefault("require_bench_ok", False)
     normalized["learning"] = learning
 
     vx = normalized.get("vortex_model", {}) or {}
@@ -299,9 +301,14 @@ def normalize_settings(settings: dict) -> dict:
     autopilot.setdefault("autopatch_on_test_fail", True)
     autopilot.setdefault("autopatch_on_doctor_fail", True)
     autopilot.setdefault("autopatch_require_eval", True)
+    autopilot.setdefault("autopatch_strategy", "subprocess_cpu")
     autopilot.setdefault("autopatch_require_approval", False)
     autopilot.setdefault("approval_file", "data/APPROVE_AUTOPATCH")
     autopilot.setdefault("restart_after_patch", False)
+    autopilot.setdefault("bench_enabled", False)
+    autopilot.setdefault("bench_max_new_tokens", 64)
+    autopilot.setdefault("bench_max_regression", 0.15)
+    autopilot.setdefault("bench_min_tokens_per_sec", 0.0)
     autopilot.setdefault("todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL")
     normalized["autopilot"] = autopilot
 

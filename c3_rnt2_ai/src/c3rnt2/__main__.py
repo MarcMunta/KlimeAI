@@ -36,7 +36,7 @@ from .learning_loop.evaluator import evaluate_adapter, log_eval
 from .learning_loop.promoter import promote_latest
 from .agent.runner import run_agent
 from .runtime.vram_governor import decide_max_new_tokens
-from .autopilot import run_autopilot_loop, run_autopilot_tick
+from .autopilot import run_autopilot_loop, run_autopilot_tick, run_autopatch_once
 
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
@@ -1150,6 +1150,31 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
         force=bool(args.force),
     )
 
+
+def cmd_autopatch_once(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    patch_device = os.getenv("C3RNT2_PATCH_DEVICE", "").strip().lower()
+    if patch_device:
+        core = dict(settings.get("core", {}) or {})
+        if patch_device in {"cpu"}:
+            core["hf_device"] = "cpu"
+            core["device"] = "cpu"
+        settings["core"] = core
+    try:
+        lock = acquire_exclusive_lock(base_dir, "self_patch")
+    except LockUnavailable:
+        print(json.dumps({"ok": False, "promoted": False, "error": "self_patch lock unavailable"}, ensure_ascii=True))
+        sys.exit(1)
+    try:
+        eval_short = {"ok": False} if bool(getattr(args, "eval_regression", False)) else None
+        result = run_autopatch_once(settings, base_dir, profile=resolve_profile(args.profile), eval_short=eval_short)
+        print(json.dumps(result, ensure_ascii=True))
+        if not result.get("ok", False):
+            sys.exit(1)
+    finally:
+        lock.release()
+
 def cmd_bench(args: argparse.Namespace) -> None:
     profile = args.profile or resolve_profile(None)
     _ = _load_and_validate(profile)
@@ -1316,6 +1341,11 @@ def main() -> None:
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.set_defaults(func=cmd_autopilot)
+
+    apo = sub.add_parser("autopatch-once")
+    apo.add_argument("--profile", default=None)
+    apo.add_argument("--eval-regression", action="store_true")
+    apo.set_defaults(func=cmd_autopatch_once)
 
     learn = sub.add_parser("learn")
     learn_sub = learn.add_subparsers(dest="learn_command")

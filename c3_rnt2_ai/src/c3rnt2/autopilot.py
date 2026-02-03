@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .continuous.dataset import ingest_sources
 from .continuous.knowledge_store import KnowledgeStore, EmbeddingBackend
@@ -133,9 +134,16 @@ def _ingest_web(base_dir: Path, settings: dict, state: dict) -> dict[str, Any]:
         embedding_backend=embedder,
         index_backend=knowledge_cfg.get("index_backend", "auto"),
     )
+    official = {"docs.python.org", "pytorch.org"}
     ingested = 0
     for item in items:
-        ingested += store.ingest_text("web", item.source_ref, item.text, quality=0.0)
+        domain = urlparse(item.url).netloc.lower().split(":")[0]
+        quality = 0.25
+        if domain in official or any(domain.endswith("." + d) for d in official):
+            quality = 0.4
+        if len(item.text) < 400:
+            quality = min(quality, 0.2)
+        ingested += store.ingest_text("web", item.source_ref, item.text, quality=float(quality))
     payload = {"ok": True, "ingested": ingested, "items": len(items)}
     if discovery is not None:
         payload["discovery"] = discovery
@@ -171,15 +179,36 @@ def _append_training_from_web(base_dir: Path, state: dict, max_items: int) -> di
             digest = hashlib.sha256(f"{source_ref}\n{text}".encode("utf-8")).hexdigest()
             if digest in seen:
                 continue
-            record = {
-                "messages": [{"role": "user", "content": "Read docs"}],
-                "response": text,
-                "source_ref": source_ref,
-                "ts": time.time(),
-            }
-            out.write(json.dumps(record, ensure_ascii=True) + "\n")
+            domain = urlparse(source_ref).netloc.lower().split(":")[0] if source_ref.startswith("http") else ""
+            excerpt = text.strip()
+            if len(excerpt) > 900:
+                excerpt = excerpt[:900]
+            summary = "Summary:\n- " + "\n- ".join([s.strip() for s in re.split(r"(?<=[.!?])\\s+", excerpt) if s.strip()][:5])
+            records = [
+                {
+                    "messages": [
+                        {"role": "user", "content": "Summarize the following text into structured bullet points.\\n\\n" + excerpt}
+                    ],
+                    "response": summary,
+                },
+                {
+                    "messages": [
+                        {"role": "user", "content": "Q: What is this content about? Answer concisely.\\n\\n" + excerpt}
+                    ],
+                    "response": summary.replace("Summary:\n", ""),
+                },
+                {
+                    "messages": [
+                        {"role": "user", "content": "Q: List 3 key takeaways from this content.\\n\\n" + excerpt}
+                    ],
+                    "response": "\n".join(summary.splitlines()[1:4]),
+                },
+            ]
+            for rec in records:
+                rec.update({"source_ref": source_ref, "domain": domain, "ts": time.time()})
+                out.write(json.dumps(rec, ensure_ascii=True) + "\n")
             seen.add(digest)
-            added += 1
+            added += len(records)
     meta["offset"] = offset
     if len(seen) > 5000:
         meta["seen_hashes"] = list(seen)[-5000:]
@@ -261,6 +290,20 @@ def _train_subprocess(profile: str, reuse_dataset: bool, max_steps: int | None) 
 def validate_autopatch_diff(base_dir: Path, settings: dict, diff_text: str) -> tuple[bool, str, list[str]]:
     policy = policy_from_settings(settings)
     return validate_patch(base_dir, diff_text, policy)
+
+
+def run_autopatch_once(settings: dict, base_dir: Path, *, profile: str, eval_short: dict | None = None) -> dict[str, Any]:
+    cfg = settings.get("autopilot", {}) or {}
+    if not bool(cfg.get("autopatch_enabled", False)):
+        return {"ok": True, "promoted": False, "skipped": "disabled"}
+    if is_lock_held(base_dir, "self_patch"):
+        return {"ok": False, "promoted": False, "error": "self_patch_locked"}
+    res = _autopatch_inprocess(base_dir, settings, eval_short=eval_short, profile=profile)
+    if res.get("promoted") and bool(cfg.get("restart_after_patch", False)):
+        res["requested_restart"] = True
+    else:
+        res.setdefault("requested_restart", False)
+    return res
 
 
 def _export_adapter_marker(base_dir: Path, adapter_path: str | None) -> None:
@@ -358,6 +401,39 @@ def _maybe_autopatch(
         return {"ok": True, "skipped": "disabled_or_mock"}
     if is_lock_held(base_dir, "self_patch"):
         return {"ok": False, "skipped": "self_patch_locked"}
+    strategy = str(cfg.get("autopatch_strategy", "subprocess_cpu")).lower()
+    if strategy in {"subprocess_cpu", "subprocess"}:
+        cmd = [sys.executable, "-m", "c3rnt2", "autopatch-once", "--profile", str(profile)]
+        if eval_short and eval_short.get("ok") is False:
+            cmd.append("--eval-regression")
+        env = dict(os.environ)
+        if strategy == "subprocess_cpu":
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            env["C3RNT2_PATCH_DEVICE"] = "cpu"
+        result = subprocess.run(cmd, cwd=base_dir, check=False, capture_output=True, text=True, env=env)
+        payload = None
+        for line in reversed((result.stdout or "").splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    payload = json.loads(line)
+                    break
+                except Exception:
+                    continue
+        if isinstance(payload, dict):
+            return payload
+        return {"ok": False, "error": result.stderr.strip() or "autopatch subprocess failed"}
+    return _autopatch_inprocess(base_dir, settings, eval_short=eval_short, profile=profile)
+
+
+def _autopatch_inprocess(
+    base_dir: Path,
+    settings: dict,
+    *,
+    eval_short: dict | None,
+    profile: str,
+) -> dict[str, Any]:
+    cfg = settings.get("autopilot", {}) or {}
     triggers: list[str] = []
     if bool(cfg.get("autopatch_on_test_fail", True)):
         ok, _msg = _run_cmd(["pytest", "-q"], base_dir, ok_codes={0, 5})
@@ -491,7 +567,8 @@ def _maybe_autopatch(
         return {"ok": False, "error": "merge_failed", "triggers": triggers}
 
     _git_checkout(base_dir, original_branch)
-    return {"ok": True, "promoted": True, "branch": branch_name, "triggers": triggers}
+    requested_restart = bool((settings.get("autopilot", {}) or {}).get("restart_after_patch", False))
+    return {"ok": True, "promoted": True, "branch": branch_name, "triggers": triggers, "requested_restart": requested_restart}
 
 
 def run_autopilot_tick(
@@ -577,6 +654,15 @@ def run_autopilot_tick(
         if train_result and train_result.get("ok_train") and _cooldown_ok(float(state.get("last_eval_ts", 0.0)), eval_cooldown):
             eval_ok = bool(train_result.get("eval_ok", train_result.get("ok_eval", False)))
             improvement = train_result.get("improvement")
+            bench = None
+            if bool(autopilot_cfg.get("bench_enabled", False)):
+                bench = {
+                    "bench_ok": train_result.get("bench_ok"),
+                    "bench_tokens_per_sec": train_result.get("bench_tokens_per_sec"),
+                    "baseline_tokens_per_sec": train_result.get("baseline_tokens_per_sec"),
+                    "regression": train_result.get("regression"),
+                }
+                steps["bench"] = dict(bench)
             steps["eval_short"] = {"ok": eval_ok, "improvement": improvement}
             state["last_eval_ts"] = time.time()
             if eval_ok and improvement is not None and float(improvement) >= min_improvement:
@@ -591,6 +677,8 @@ def run_autopilot_tick(
                     "improvement": improvement,
                     "eval_ok": eval_ok,
                 }
+                if bench:
+                    eval_payload.update(bench)
                 with eval_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(eval_payload, ensure_ascii=True) + "\n")
                 steps["promote"] = promote_latest(base_dir, settings, min_improvement=min_improvement).__dict__
@@ -603,6 +691,8 @@ def run_autopilot_tick(
                 _request_reload(base_dir, adapter_path)
         else:
             steps["eval_short"] = {"ok": True, "skipped": "no_train_or_cooldown"}
+            if bool(autopilot_cfg.get("bench_enabled", False)):
+                steps["bench"] = {"ok": True, "skipped": "no_train_or_cooldown"}
             steps["promote"] = {"ok": True, "promoted": False, "skipped": "no_eval"}
 
         # autopatch (gated)
@@ -628,7 +718,11 @@ def run_autopilot_tick(
             "promoted": steps.get("promote", {}).get("promoted") if isinstance(steps.get("promote"), dict) else None,
         }
         restart_requested = False
-        if restart_after_patch and isinstance(steps.get("autopatch"), dict) and bool(steps["autopatch"].get("promoted")):
+        if isinstance(steps.get("autopatch"), dict) and bool(steps["autopatch"].get("requested_restart")):
+            _request_restart(base_dir, reason="autopatch_requested_restart")
+            steps["restart"] = {"ok": True, "requested": True, "exit_code": 23}
+            restart_requested = True
+        elif restart_after_patch and isinstance(steps.get("autopatch"), dict) and bool(steps["autopatch"].get("promoted")):
             _request_restart(base_dir, reason="autopatch_promoted")
             steps["restart"] = {"ok": True, "requested": True, "exit_code": 23}
             restart_requested = True

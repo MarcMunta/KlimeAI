@@ -14,6 +14,7 @@ def test_autopatch_requires_approval_file(tmp_path: Path, monkeypatch) -> None:
         "_profile": "autonomous_4080_hf",
         "autopilot": {
             "autopatch_enabled": True,
+            "autopatch_strategy": "inprocess",
             "autopatch_on_test_fail": True,
             "autopatch_on_doctor_fail": False,
             "autopatch_require_approval": True,
@@ -27,4 +28,3 @@ def test_autopatch_requires_approval_file(tmp_path: Path, monkeypatch) -> None:
     assert res.get("skipped") == "approval_required"
     assert "tests_failed" in (res.get("triggers") or [])
     assert Path(res.get("approval_file")).name == "APPROVE_AUTOPATCH"
-
