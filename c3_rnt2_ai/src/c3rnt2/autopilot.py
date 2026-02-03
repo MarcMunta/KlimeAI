@@ -444,7 +444,11 @@ def run_autopilot_tick(
     *,
     no_web: bool = False,
     mock: bool = False,
+    force: bool = False,
 ) -> AutopilotResult:
+    autopilot_cfg = settings.get("autopilot", {}) or {}
+    if not force and not bool(autopilot_cfg.get("enabled", False)):
+        return AutopilotResult(ok=True, steps={"skipped": "disabled"})
     state = _load_state(base_dir)
     steps: dict[str, Any] = {}
     state.setdefault("last_tick_ts", 0.0)
@@ -578,12 +582,17 @@ def run_autopilot_loop(
     interval_minutes: float | None = None,
     no_web: bool = False,
     mock: bool = False,
+    force: bool = False,
 ) -> None:
     interval = interval_minutes
     if interval is None:
         interval = float((settings.get("autopilot", {}) or {}).get("interval_minutes", settings.get("continuous", {}).get("interval_minutes", 30)))
+    if not force and not bool((settings.get("autopilot", {}) or {}).get("enabled", False)):
+        result = run_autopilot_tick(settings, base_dir, no_web=no_web, mock=mock, force=False)
+        print({"autopilot": {"ok": result.ok, "steps": result.steps, "error": result.error}})
+        return
     while True:
-        result = run_autopilot_tick(settings, base_dir, no_web=no_web, mock=mock)
+        result = run_autopilot_tick(settings, base_dir, no_web=no_web, mock=mock, force=force)
         print({"autopilot": {"ok": result.ok, "steps": result.steps, "error": result.error}})
         if once:
             break

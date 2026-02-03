@@ -32,3 +32,18 @@ def test_doctor_detects_strict_web_ingest(tmp_path: Path, monkeypatch) -> None:
     report = main_mod._run_doctor_checks(settings, tmp_path)
     assert report["ok"] is False
     assert any("ingest_web enabled but tools.web.enabled=false" in err for err in report["errors"])
+
+
+def test_doctor_detects_autopilot_nested_under_tools(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "load_inference_model", lambda _settings: object())
+    settings = {
+        "_profile": "safe_selftrain_4080_hf",
+        "agent": {"tools_enabled": list(main_mod._supported_agent_tools())},
+        "tools": {"web": {"enabled": False}, "autopilot": {"enabled": True}},
+        "continuous": {"ingest_web": False, "knowledge_path": str(tmp_path / "data" / "continuous" / "knowledge.sqlite")},
+        "core": {"backend": "hf", "hf_device": "cpu"},
+        "decode": {"max_new_tokens": 64},
+    }
+    report = main_mod._run_doctor_checks(settings, tmp_path)
+    assert report["ok"] is False
+    assert any("tools.autopilot" in err for err in report["errors"])

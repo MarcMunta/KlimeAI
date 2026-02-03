@@ -243,6 +243,11 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
     warnings: list[str] = []
     info: dict[str, object] = {}
 
+    profile_name = settings.get("_profile")
+    tools_cfg = settings.get("tools", {}) or {}
+    if profile_name == "safe_selftrain_4080_hf" and isinstance(tools_cfg, dict) and "autopilot" in tools_cfg:
+        errors.append("autopilot config must be top-level (autopilot:), not tools.autopilot")
+
     supported = _supported_agent_tools()
     tools_enabled = settings.get("agent", {}).get("tools_enabled")
     if tools_enabled is None:
@@ -323,10 +328,14 @@ def _run_doctor_deep_checks(settings: dict, base_dir: Path) -> dict:
     if not res.get("ok", False):
         errors.append("self_train_tick_failed")
 
-    auto_res = run_autopilot_tick(deep_settings, base_dir, no_web=True, mock=True)
+    auto_res = run_autopilot_tick(deep_settings, base_dir, no_web=True, mock=True, force=False)
     info["autopilot_mock_tick"] = {"ok": auto_res.ok, "steps": auto_res.steps, "error": auto_res.error}
     if not auto_res.ok and not (auto_res.error and "lock" in auto_res.error):
         errors.append("autopilot_tick_failed")
+    ap_cfg = deep_settings.get("autopilot", {}) or {}
+    if not bool(ap_cfg.get("enabled", False)) and auto_res.ok and isinstance(auto_res.steps, dict):
+        if auto_res.steps.get("skipped") != "disabled":
+            errors.append("autopilot_disabled_not_respected")
 
     strategy = str((settings.get("server", {}) or {}).get("train_strategy", "subprocess")).lower()
     if strategy == "subprocess":
@@ -932,6 +941,7 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
         interval_minutes=args.interval_minutes,
         no_web=bool(args.no_web),
         mock=bool(args.mock),
+        force=bool(args.force),
     )
 
 def cmd_bench(args: argparse.Namespace) -> None:
@@ -1084,6 +1094,7 @@ def main() -> None:
     ap.add_argument("--interval-minutes", type=float, default=None)
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--mock", action="store_true")
+    ap.add_argument("--force", action="store_true")
     ap.set_defaults(func=cmd_autopilot)
 
     learn = sub.add_parser("learn")

@@ -263,25 +263,27 @@ profiles:
     server:
       train_strategy: subprocess
       block_during_training: true
+      auto_reload_adapter: true
+      reload_interval_s: 30
     tools:
       web:
         enabled: true
-      autopilot:
-        enabled: false
-        interval_minutes: 30
-        ingest_cooldown_minutes: 10
-        train_cooldown_minutes: 60
-        eval_cooldown_minutes: 60
-        patch_cooldown_minutes: 120
-        train_max_steps: 25
-        training_jsonl_max_items: 500
-        min_improvement: 0.0
-        reuse_dataset: false
-        autopatch_enabled: false
-        autopatch_on_test_fail: true
-        autopatch_on_doctor_fail: true
-        autopatch_require_eval: true
-        todo_regex: "TODO\\((P1|PRIORITY)\\)|TODO!|TODO:HIGH|TODO:CRITICAL"
+    autopilot:
+      enabled: false
+      interval_minutes: 30
+      ingest_cooldown_minutes: 10
+      train_cooldown_minutes: 60
+      eval_cooldown_minutes: 60
+      patch_cooldown_minutes: 120
+      train_max_steps: 25
+      training_jsonl_max_items: 500
+      min_improvement: 0.0
+      reuse_dataset: false
+      autopatch_enabled: false
+      autopatch_on_test_fail: true
+      autopatch_on_doctor_fail: true
+      autopatch_require_eval: true
+      todo_regex: "TODO\\((P1|PRIORITY)\\)|TODO!|TODO:HIGH|TODO:CRITICAL"
 
   core_only:
     tokenizer:
