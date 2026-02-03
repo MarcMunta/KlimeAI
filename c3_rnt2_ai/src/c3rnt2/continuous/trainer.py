@@ -250,6 +250,7 @@ class ContinualTrainer:
                 run_id,
                 promote=promoted,
                 meta={
+                    "steps": int(step_idx),
                     "loss": new_loss,
                     "loss_holdout": new_loss,
                     "base_loss": base_loss,

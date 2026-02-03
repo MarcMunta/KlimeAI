@@ -11,6 +11,9 @@ Nota de rol:
 - El backend **HF** (Qwen2.5-8B-Instruct) usa el *tokenizer de HuggingFace*.
 - **VORTEX-Tok** es para los backends VORTEX/C3 (no se usa para HF). Bench: `python scripts/bench_tokenizer.py --profile dev_small`.
 
+## Ruta recomendada (RTX 4080 16GB)
+Ver `docs/rtx4080.md`.
+
 ## Instalacion
 ```bash
 python -m venv .venv

@@ -71,6 +71,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings(args.profile)
+    profile = settings.get("_profile") or (args.profile or "dev_small")
     core_cfg = settings.get("core", {})
     if not args.use_full_profile:
         decode_cfg_override = dict(settings.get("decode", {}) or {})

@@ -13,11 +13,17 @@ def _model(tmp_path: Path) -> vt.VortexTokModel:
 def test_vortex_tok_roundtrip_cases(tmp_path: Path) -> None:
     model = _model(tmp_path)
     cases = [
+        "",
         "hello world",
+        "ASCII: ~!@#$%^&*()_+-=[]{}|;:',.<>/?",
+        "unicode: ñ é ö 😀 — 東京",
+        "\tTabs\nNewlines\r\nWindows newlines\n\n",
+        "code:\n```py\ndef f(x):\n    return x * (x + 1) // 2\n```\n",
+        'json: {"ok": true, "text": "ñ 😀 \\\\ \\\" \\n", "n": 123}',
         "unicode: ñ é ö 😀",
         "\x00\x01\t\ncontrol-chars",
-        "a" * 5000,
-        ("abc" * 2000) + " END",
+        "a" * 10000,
+        ("abc" * 4000) + " END",
     ]
     for text in cases:
         stream = vt.encode(text, model)
@@ -30,10 +36,9 @@ def test_vortex_tok_roundtrip_cases(tmp_path: Path) -> None:
 def test_vortex_tok_fuzz_roundtrip(tmp_path: Path) -> None:
     model = _model(tmp_path)
     rng = random.Random(0)
-    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n\t-_=+()[]{}<>/\\'\".,:;!?ñéö😀"
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n\t-_=+()[]{}<>/\\'\".,:;!?ñéö😀—東京"
     for _ in range(100):
         n = rng.randint(0, 200)
         text = "".join(rng.choice(alphabet) for _ in range(n))
         stream = vt.encode(text, model)
         assert vt.decode(stream, model) == text
-

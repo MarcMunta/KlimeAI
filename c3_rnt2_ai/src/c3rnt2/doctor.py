@@ -160,10 +160,61 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         "profiles": _profile_checks(base_dir),
     }
 
+    # Tokenizer roundtrip (VORTEX-Tok).
+    try:
+        from .tokenizer.vortex_tok import load_or_create, encode, decode, metrics  # type: ignore
+
+        tok_cfg = settings.get("tokenizer", {}) or {}
+        model_path = Path(tok_cfg.get("vortex_tok_path", tok_cfg.get("vortex_model_path", base_dir / "data" / "runs" / "vortex_tok.pt")))
+        if not model_path.is_absolute():
+            model_path = base_dir / model_path
+        block_size = int(tok_cfg.get("block_size", 64))
+        tok_model = load_or_create(model_path, block_size=block_size)
+        cases = [
+            "",
+            "hello world",
+            "ASCII: ~!@#$%^&*()_+-=[]{}|;:',.<>/?",
+            "unicode: ñ é ö 😀 — 東京",
+            "\tTabs\nNewlines\r\nWindows newlines\n\n",
+            "code:\n```py\ndef f(x):\n    return x * (x + 1) // 2\n```\n",
+            'json: {"ok": true, "text": "ñ 😀 \\\\ \\\" \\n", "n": 123}',
+            "a" * 4096,
+        ]
+        start = time.time()
+        failures: list[dict[str, Any]] = []
+        for text in cases:
+            try:
+                stream = encode(text, tok_model)
+                out = decode(stream, tok_model)
+                if out != text:
+                    failures.append({"case": text[:120], "error": "mismatch"})
+            except Exception as exc:
+                failures.append({"case": text[:120], "error": str(exc)})
+        elapsed_ms = (time.time() - start) * 1000.0
+        # Aggregate metrics on a representative sample.
+        stream = encode("\n\n".join(cases), tok_model)
+        tok_metrics = metrics(stream)
+        checks["tokenizer_roundtrip_check"] = {
+            "ok": not failures,
+            "elapsed_ms": round(elapsed_ms, 3),
+            **tok_metrics,
+            "failures": failures[:3] if failures else None,
+        }
+        if failures:
+            report["deep_ok"] = False
+    except Exception as exc:
+        checks["tokenizer_roundtrip_check"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
+
     # Bench regression vs baseline (warning only; does not flip deep_ok).
     try:
         profile = str(settings.get("_profile") or "")
         backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
+        bench_thresh = settings.get("bench_thresholds", {}) or {}
+        autopilot = settings.get("autopilot", {}) or {}
+        max_regression = float(bench_thresh.get("max_regression", autopilot.get("bench_max_regression", 0.15)))
+        min_tps = bench_thresh.get("min_tokens_per_sec", autopilot.get("bench_min_tokens_per_sec"))
+        checks["bench_thresholds"] = {"min_tokens_per_sec": min_tps, "max_regression": max_regression}
         baseline_path = base_dir / "data" / "bench" / "baseline.json"
         if profile and baseline_path.exists() and tokens_per_sec is not None:
             baseline = json.loads(baseline_path.read_text(encoding="utf-8")) or {}
@@ -174,8 +225,14 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
                     regression = max(0.0, (base_tps - float(tokens_per_sec)) / base_tps)
                     checks["bench_baseline_tps"] = round(base_tps, 3)
                     checks["bench_regression"] = round(regression, 3)
-                    if regression > 0.15:
+                    if regression > max_regression:
                         checks["bench_regression_warning"] = True
+        if tokens_per_sec is not None and min_tps is not None:
+            try:
+                if float(tokens_per_sec) < float(min_tps):
+                    checks["bench_min_tps_warning"] = True
+            except Exception:
+                pass
     except Exception:
         pass
 

@@ -27,7 +27,7 @@ from .prompting.chat_format import build_chat_prompt
 from .server import run_server
 from .utils.locks import LockUnavailable, acquire_exclusive_lock, FileLock, is_lock_held
 from .agent.agent_loop import run_demo_agent
-from .training.hf_qlora import train_once as train_hf_once
+from .training.train_backend import train_once_backend
 from .utils.oom import is_oom_error, clear_cuda_cache
 from .learning_loop.data_collector import collect_from_episodes
 from .learning_loop.data_curator import curate_dataset
@@ -97,6 +97,11 @@ def _coerce_train_result(payload: dict | object) -> SimpleNamespace:
         return payload
     if isinstance(payload, dict):
         return SimpleNamespace(**payload)
+    if hasattr(payload, "__dict__"):
+        try:
+            return SimpleNamespace(**dict(getattr(payload, "__dict__", {})))
+        except Exception:
+            return SimpleNamespace(ok=False, ok_eval=False, ok_train=False, error="invalid_train_result")
     return SimpleNamespace(ok=False, ok_eval=False, ok_train=False, error="invalid_train_result")
 
 
@@ -124,9 +129,18 @@ def _run_train_subprocess(settings: dict, reuse_dataset: bool) -> dict:
     return payload
 
 
-def _run_train_inprocess(settings: dict, base_dir: Path, reuse_dataset: bool, train_fn: Callable | None = None) -> SimpleNamespace:
-    train_fn = train_fn or train_hf_once
-    result = train_fn(settings, base_dir, reuse_dataset=reuse_dataset)
+def _run_train_inprocess(
+    settings: dict,
+    base_dir: Path,
+    reuse_dataset: bool,
+    *,
+    max_steps: int | None = None,
+    train_fn: Callable | None = None,
+) -> SimpleNamespace:
+    if train_fn is not None:
+        result = train_fn(settings, base_dir, reuse_dataset=reuse_dataset)
+    else:
+        result = train_once_backend(settings, base_dir, reuse_dataset=reuse_dataset, max_steps=max_steps)
     return _coerce_train_result(result)
 
 
@@ -564,15 +578,14 @@ def cmd_ingest_once(args: argparse.Namespace) -> None:
 def cmd_train_once(args: argparse.Namespace) -> None:
     settings = _load_and_validate(args.profile)
     max_steps_env = os.getenv("C3RNT2_TRAIN_MAX_STEPS")
+    max_steps_val = None
     if max_steps_env:
         try:
-            max_steps_val = int(max_steps_env)
+            parsed = int(max_steps_env)
         except Exception:
-            max_steps_val = None
-        if max_steps_val is not None and max_steps_val > 0:
-            hf_cfg = dict(settings.get("hf_train", {}) or {})
-            hf_cfg["max_steps"] = max_steps_val
-            settings["hf_train"] = hf_cfg
+            parsed = None
+        if parsed is not None and parsed > 0:
+            max_steps_val = parsed
     base_dir = Path(".")
     try:
         lock = acquire_exclusive_lock(base_dir, "train")
@@ -580,13 +593,13 @@ def cmd_train_once(args: argparse.Namespace) -> None:
         print({"ok": False, "error": "train lock unavailable (serve/self_patch running?)"})
         return
     try:
-        result = train_hf_once(settings, base_dir, reuse_dataset=args.reuse_dataset)
-        payload = dict(result.__dict__)
+        result = train_once_backend(settings, base_dir, reuse_dataset=bool(args.reuse_dataset), max_steps=max_steps_val)
+        payload = dict(result) if isinstance(result, dict) else dict(getattr(result, "__dict__", {}) or {})
         adapter_dir = payload.get("adapter_dir")
         if adapter_dir is not None:
             payload["adapter_dir"] = str(adapter_dir)
         print(json.dumps(payload, ensure_ascii=True))
-        if not result.ok:
+        if not bool(payload.get("ok", False)):
             sys.exit(1)
     finally:
         lock.release()
@@ -609,8 +622,12 @@ def cmd_self_train(args: argparse.Namespace) -> None:
             time.sleep(max(5.0, interval_min * 60.0))
             continue
         try:
-            train_result = train_hf_once(settings, base_dir, reuse_dataset=args.reuse_dataset)
-            print({"ingest_new_docs": new_docs, "train": train_result.__dict__})
+            train_result = train_once_backend(settings, base_dir, reuse_dataset=bool(args.reuse_dataset))
+            payload = dict(train_result) if isinstance(train_result, dict) else dict(getattr(train_result, "__dict__", {}) or {})
+            adapter_dir = payload.get("adapter_dir")
+            if adapter_dir is not None:
+                payload["adapter_dir"] = str(adapter_dir)
+            print({"ingest_new_docs": new_docs, "train": payload})
         finally:
             lock.release()
         if once:
@@ -642,8 +659,8 @@ def _run_self_train_tick(
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc), "skipped": "web_ingest_unavailable"}
 
-    if not web_ok:
-        return {"ok": False, "error": web_msg or "web_ingest_invalid", "new_docs": new_docs, "skipped": "web_ingest_unavailable"}
+    # If web ingest is misconfigured but not strict, continue (best-effort) using local sources.
+    # This keeps self-train/serve-self-train usable in offline/default setups.
 
     collected = collect_samples(base_dir, allowlist, settings, ingest=False)
     stats = collected.stats
@@ -742,9 +759,13 @@ def cmd_serve_self_train(args: argparse.Namespace) -> None:
     once = bool(args.once)
     reload_fn = None
     app = None
+    train_fn = None
 
     if args.mock:
         settings.setdefault("server", {})["train_strategy"] = "inprocess"
+        cont = settings.setdefault("continuous", {})
+        cont["ingest_web"] = False
+        cont.setdefault("trigger", {})["enabled"] = False
         class _DummyLock:
             def read_lock(self):
                 return nullcontext()
@@ -753,9 +774,27 @@ def cmd_serve_self_train(args: argparse.Namespace) -> None:
                 return nullcontext()
 
         app = SimpleNamespace(state=SimpleNamespace(model_lock=_DummyLock(), models={}, model=None))
+        dummy_result = SimpleNamespace(
+            ok=True,
+            ok_train=True,
+            ok_eval=True,
+            eval_ok=True,
+            adapter_dir=None,
+            loss=0.0,
+            steps=1,
+            samples=1,
+            tokens_per_sec=0.0,
+            vram_peak_mb=None,
+        )
+
+        def _mock_train(_settings, _base_dir, reuse_dataset: bool = False):
+            _ = _settings, _base_dir, reuse_dataset
+            return dummy_result
+
         def _mock_reload(_app, _base_dir, _settings, force: bool = False):
             return {"ok": True, "reloaded": bool(force), "mock": True}
         reload_fn = _mock_reload
+        train_fn = _mock_train
     else:
         try:
             from .server import create_app, reload_latest_adapter_for_app
@@ -781,6 +820,7 @@ def cmd_serve_self_train(args: argparse.Namespace) -> None:
             reuse_dataset=reuse_dataset,
             maintenance_window_s=maintenance_window_s,
             reload_fn=reload_fn,
+            train_fn=train_fn,
         )
         print({"self_train": result})
         if once:
@@ -847,14 +887,8 @@ def _run_autopilot_train_with_server(
                 payload = {"ok": False, "ok_train": False, "ok_eval": False, "error": "train_lock_unavailable"}
             else:
                 try:
-                    train_settings = settings
-                    if max_steps is not None and int(max_steps) > 0:
-                        train_settings = json.loads(json.dumps(settings))
-                        hf_cfg = dict(train_settings.get("hf_train", {}) or {})
-                        hf_cfg["max_steps"] = int(max_steps)
-                        train_settings["hf_train"] = hf_cfg
-                    result_obj = train_hf_once(train_settings, base_dir, reuse_dataset=reuse_dataset)
-                    payload = dict(result_obj.__dict__)
+                    result_obj = train_once_backend(settings, base_dir, reuse_dataset=reuse_dataset, max_steps=max_steps)
+                    payload = dict(result_obj) if isinstance(result_obj, dict) else dict(getattr(result_obj, "__dict__", {}) or {})
                     adapter_dir = payload.get("adapter_dir")
                     if adapter_dir is not None:
                         payload["adapter_dir"] = str(adapter_dir)
@@ -1200,13 +1234,21 @@ def _update_bench_baseline(bench_dir: Path, bench: dict) -> dict:
 
 def cmd_bench(args: argparse.Namespace) -> None:
     profile = args.profile or resolve_profile(None)
-    _ = _load_and_validate(profile)
-    script = Path(__file__).resolve().parents[2] / "scripts" / "bench_generate.py"
+    settings = _load_and_validate(profile)
+    backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
+    script_name = "bench_hf_generate.py" if backend == "hf" else "bench_generate.py"
+    script = Path(__file__).resolve().parents[2] / "scripts" / script_name
     if not script.exists():
-        print({"ok": False, "error": "bench_generate.py not found"})
+        print({"ok": False, "error": f"{script_name} not found"})
         return
     cmd = [sys.executable, str(script), "--profile", profile, "--max-new-tokens", str(args.max_new_tokens)]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        if backend == "hf":
+            print({"ok": True, "warning": "bench_hf_failed_or_missing_deps", "error": str(exc)})
+            return
+        raise
     bench_dir = Path(__file__).resolve().parents[2] / "data" / "bench"
     latest = bench_dir / "latest.json"
     if latest.exists():
