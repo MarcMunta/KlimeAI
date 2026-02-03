@@ -129,7 +129,19 @@ python -m c3rnt2 serve-self-train --profile safe_selftrain_4080_hf --host 0.0.0.
 ```
 Comando recomendado (modo continuo seguro):
 ```bash
-python -m c3rnt2 serve-self-train --profile safe_selftrain_4080_hf
+python -m c3rnt2 serve-autopilot --profile safe_selftrain_4080_hf --host 0.0.0.0 --port 8000
+```
+
+Modo autonomo (internet + self-train + autopatch + reinicio):
+```bash
+# 1) Smoke test
+python -m c3rnt2 doctor --deep --profile autonomous_4080_hf
+
+# 2) Gate de aprobacion para autopatch (sin este archivo NO se aplican/mergean parches)
+type NUL > data\\APPROVE_AUTOPATCH
+
+# 3) Runner que reinicia automaticamente si autopilot pide restart (exit code 23)
+python scripts\\run_daemon.py --profile autonomous_4080_hf --host 0.0.0.0 --port 8000
 ```
 Para activar RAG en el servidor:
 ```bash
@@ -144,6 +156,8 @@ rag:
 ```bash
 python -m c3rnt2 doctor --profile rtx4080_16gb
 python -m c3rnt2 doctor --profile safe_selftrain_4080
+python -m c3rnt2 doctor --profile safe_selftrain_4080_hf --deep
+python -m c3rnt2 doctor --profile autonomous_4080_hf --deep
 ```
 
 ## Web seguro (allowlist)

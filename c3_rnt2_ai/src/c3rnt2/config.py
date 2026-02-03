@@ -299,6 +299,8 @@ def normalize_settings(settings: dict) -> dict:
     autopilot.setdefault("autopatch_on_test_fail", True)
     autopilot.setdefault("autopatch_on_doctor_fail", True)
     autopilot.setdefault("autopatch_require_eval", True)
+    autopilot.setdefault("autopatch_require_approval", False)
+    autopilot.setdefault("approval_file", "data/APPROVE_AUTOPATCH")
     autopilot.setdefault("restart_after_patch", False)
     autopilot.setdefault("todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL")
     normalized["autopilot"] = autopilot

@@ -383,6 +383,20 @@ def _maybe_autopatch(
     if not bool((settings.get("self_patch", {}) or {}).get("enabled", False)):
         return {"ok": True, "skipped": "self_patch_disabled", "triggers": triggers}
 
+    if bool(cfg.get("autopatch_require_approval", False)):
+        approval_file = cfg.get("approval_file", "data/APPROVE_AUTOPATCH")
+        ap_path = Path(str(approval_file))
+        if not ap_path.is_absolute():
+            ap_path = base_dir / ap_path
+        if not ap_path.exists():
+            return {
+                "ok": True,
+                "skipped": "approval_required",
+                "triggers": triggers,
+                "approval_file": str(ap_path),
+                "required": True,
+            }
+
     if not (base_dir / ".git").exists():
         return {"ok": False, "error": "git_repo_required", "triggers": triggers}
 

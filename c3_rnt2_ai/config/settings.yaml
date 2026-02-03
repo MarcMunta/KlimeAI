@@ -290,6 +290,26 @@ profiles:
       autopatch_require_eval: true
       todo_regex: "TODO\\((P1|PRIORITY)\\)|TODO!|TODO:HIGH|TODO:CRITICAL"
 
+  autonomous_4080_hf:
+    # Full autonomous (internet + self-train + autopatch) for 4080 16GB.
+    # Requires explicit approval file to apply/merge patches.
+    base_profile: safe_selftrain_4080_hf
+    continuous:
+      web_discovery:
+        enabled: true
+        seed_queries:
+          - "Qwen2.5 finetune qlora tips"
+          - "FastAPI streaming SSE best practices"
+          - "PyTorch CUDA OOM mitigation"
+    autopilot:
+      enabled: true
+      autopatch_enabled: true
+      restart_after_patch: true
+      autopatch_require_approval: true
+      approval_file: data/APPROVE_AUTOPATCH
+    self_patch:
+      enabled: true
+
   core_only:
     tokenizer:
       rnt2_model_path: data/runs/rnt2_dev.pt
