@@ -36,6 +36,7 @@ from .learning_loop.evaluator import evaluate_adapter, log_eval
 from .learning_loop.promoter import promote_latest
 from .agent.runner import run_agent
 from .runtime.vram_governor import decide_max_new_tokens
+from .autopilot import run_autopilot_loop, run_autopilot_tick
 
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
@@ -322,6 +323,11 @@ def _run_doctor_deep_checks(settings: dict, base_dir: Path) -> dict:
     if not res.get("ok", False):
         errors.append("self_train_tick_failed")
 
+    auto_res = run_autopilot_tick(deep_settings, base_dir, no_web=True, mock=True)
+    info["autopilot_mock_tick"] = {"ok": auto_res.ok, "steps": auto_res.steps, "error": auto_res.error}
+    if not auto_res.ok and not (auto_res.error and "lock" in auto_res.error):
+        errors.append("autopilot_tick_failed")
+
     strategy = str((settings.get("server", {}) or {}).get("train_strategy", "subprocess")).lower()
     if strategy == "subprocess":
         try:
@@ -517,6 +523,16 @@ def cmd_ingest_once(args: argparse.Namespace) -> None:
 
 def cmd_train_once(args: argparse.Namespace) -> None:
     settings = _load_and_validate(args.profile)
+    max_steps_env = os.getenv("C3RNT2_TRAIN_MAX_STEPS")
+    if max_steps_env:
+        try:
+            max_steps_val = int(max_steps_env)
+        except Exception:
+            max_steps_val = None
+        if max_steps_val is not None and max_steps_val > 0:
+            hf_cfg = dict(settings.get("hf_train", {}) or {})
+            hf_cfg["max_steps"] = max_steps_val
+            settings["hf_train"] = hf_cfg
     base_dir = Path(".")
     try:
         lock = acquire_exclusive_lock(base_dir, "train")
@@ -905,6 +921,19 @@ def cmd_self_improve(args: argparse.Namespace) -> None:
     args.goal = args.goal or "self-improve"
     cmd_self_patch(args)
 
+
+def cmd_autopilot(args: argparse.Namespace) -> None:
+    settings = _load_and_validate(args.profile)
+    base_dir = Path(".")
+    run_autopilot_loop(
+        settings,
+        base_dir,
+        once=bool(args.once),
+        interval_minutes=args.interval_minutes,
+        no_web=bool(args.no_web),
+        mock=bool(args.mock),
+    )
+
 def cmd_bench(args: argparse.Namespace) -> None:
     profile = args.profile or resolve_profile(None)
     _ = _load_and_validate(profile)
@@ -1048,6 +1077,14 @@ def main() -> None:
     si.add_argument("--diff-file", default=None)
     si.add_argument("--no-bench", action="store_true")
     si.set_defaults(func=cmd_self_improve)
+
+    ap = sub.add_parser("autopilot")
+    ap.add_argument("--profile", default=None)
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--interval-minutes", type=float, default=None)
+    ap.add_argument("--no-web", action="store_true")
+    ap.add_argument("--mock", action="store_true")
+    ap.set_defaults(func=cmd_autopilot)
 
     learn = sub.add_parser("learn")
     learn_sub = learn.add_subparsers(dest="learn_command")

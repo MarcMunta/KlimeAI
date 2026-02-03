@@ -39,6 +39,7 @@ def promote_latest(base_dir: Path, settings: dict, min_improvement: float | None
 
     improvement = latest.get("improvement")
     adapter_path = latest.get("adapter_path")
+    eval_ok = latest.get("eval_ok")
     threshold = float(min_improvement if min_improvement is not None else learning.get("promote_min_improvement", 0.0))
     registry_dir = Path(settings.get("hf_train", {}).get("registry_dir", "data/registry/hf_train"))
     if not registry_dir.is_absolute():
@@ -48,6 +49,8 @@ def promote_latest(base_dir: Path, settings: dict, min_improvement: float | None
 
     if improvement is None or adapter_path is None:
         return PromoteResult(ok=False, promoted=False, adapter_path=adapter_path, message="missing_improvement")
+    if eval_ok is False:
+        return PromoteResult(ok=True, promoted=False, adapter_path=adapter_path, message="eval_not_ok")
 
     if float(improvement) >= threshold:
         registry = {}

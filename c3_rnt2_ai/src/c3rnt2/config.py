@@ -277,6 +277,18 @@ def normalize_settings(settings: dict) -> dict:
             cont["max_steps"] = cont.get("max_steps_per_tick")
         normalized["continuous"] = cont
 
+    autopilot = normalized.get("autopilot", {}) or {}
+    autopilot.setdefault("enabled", False)
+    autopilot.setdefault("interval_minutes", cont.get("interval_minutes", 30) if cont else 30)
+    autopilot.setdefault("ingest_cooldown_minutes", 10)
+    autopilot.setdefault("train_cooldown_minutes", 60)
+    autopilot.setdefault("eval_cooldown_minutes", 60)
+    autopilot.setdefault("patch_cooldown_minutes", 120)
+    autopilot.setdefault("train_max_steps", hf_train.get("max_steps", 50))
+    autopilot.setdefault("min_improvement", hf_eval.get("min_improvement", 0.0))
+    autopilot.setdefault("reuse_dataset", False)
+    normalized["autopilot"] = autopilot
+
     if lava:
         normalized["lava"] = lava
 

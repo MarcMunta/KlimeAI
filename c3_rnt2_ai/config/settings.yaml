@@ -262,6 +262,16 @@ profiles:
     tools:
       web:
         enabled: true
+    autopilot:
+      enabled: false
+      interval_minutes: 30
+      ingest_cooldown_minutes: 10
+      train_cooldown_minutes: 60
+      eval_cooldown_minutes: 60
+      patch_cooldown_minutes: 120
+      train_max_steps: 25
+      min_improvement: 0.0
+      reuse_dataset: false
 
   core_only:
     tokenizer:
