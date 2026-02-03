@@ -212,6 +212,10 @@ profiles:
     server:
       block_during_training: true
       maintenance_window_s: 10
+      train_strategy: subprocess
+    tools:
+      web:
+        enabled: true
     hf_train:
       enabled: true
       model_name: "Qwen/Qwen2.5-8B-Instruct"
@@ -245,6 +249,19 @@ profiles:
         episode: 1.2
         web: 0.8
         logs: 0.8
+
+  safe_selftrain_4080_hf:
+    # HF Qwen-8B self-train (safe defaults for 16GB)
+    base_profile: qwen8b_train
+    core:
+      backend: hf
+      hf_model: "Qwen/Qwen2.5-8B-Instruct"
+    server:
+      train_strategy: subprocess
+      block_during_training: true
+    tools:
+      web:
+        enabled: true
 
   core_only:
     tokenizer:
@@ -598,6 +615,7 @@ profiles:
       pinned_memory: true
 
   safe_selftrain_4080:
+    # Vortex continuous self-train (core trainer), not HF
     base_profile: rtx4080_16gb_vortexx
     server:
       block_during_training: true

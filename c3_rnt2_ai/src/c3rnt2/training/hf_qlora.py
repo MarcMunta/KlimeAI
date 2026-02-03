@@ -21,6 +21,8 @@ from ..utils.oom import is_oom_error, clear_cuda_cache
 @dataclass
 class HfTrainResult:
     ok: bool
+    ok_train: bool
+    ok_eval: bool
     run_id: str
     adapter_dir: Path | None
     loss: float | None
@@ -28,6 +30,9 @@ class HfTrainResult:
     samples: int
     tokens_per_sec: float | None
     vram_peak_mb: float | None
+    eval_ok: bool | None = None
+    improvement: float | None = None
+    repeat_ratio: float | None = None
     error: str | None = None
 
 
@@ -440,13 +445,13 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     cfg = settings.get("hf_train", {}) or {}
     model_name = cfg.get("model_name") or settings.get("core", {}).get("hf_model")
     if not model_name:
-        return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="model_name missing")
+        return HfTrainResult(ok=False, ok_train=False, ok_eval=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="model_name missing")
 
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig  # type: ignore
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel  # type: ignore
     except Exception as exc:
-        return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error=f"hf deps missing: {exc}")
+        return HfTrainResult(ok=False, ok_train=False, ok_eval=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error=f"hf deps missing: {exc}")
 
     reg_dir = _resolve_registry_dir(base_dir, settings)
     state_path = _resolve_state_path(base_dir, settings)
@@ -476,7 +481,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     has_feedback_data = _has_nonempty_jsonl(feedback_path)
     has_training_data = _has_nonempty_jsonl(training_path)
     if not chunks and not reuse_dataset and not (has_episode_data or has_chat_data or has_feedback_data or has_training_data):
-        return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="no_samples")
+        return HfTrainResult(ok=False, ok_train=False, ok_eval=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="no_samples")
 
     if reuse_dataset and dataset_path.exists():
         samples = _load_dataset(dataset_path)
@@ -503,7 +508,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         samples = _load_dataset(dataset_path)
 
     if not samples:
-        return HfTrainResult(ok=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="empty_dataset")
+        return HfTrainResult(ok=False, ok_train=False, ok_eval=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="empty_dataset")
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
     adapter_dir = reg_dir / run_id / "adapter"
@@ -635,6 +640,8 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         if is_oom_error(exc):
             return HfTrainResult(
                 ok=False,
+                ok_train=False,
+                ok_eval=False,
                 run_id="",
                 adapter_dir=None,
                 loss=None,
@@ -662,21 +669,23 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     improvement = None
     eval_ok = True
     repeat_ratio = None
+    eval_error = None
+    max_repeat = None
+    max_seq_len = int(cfg.get("max_seq_len", 1024))
     min_improve = None
     max_regress = None
-    max_repeat = None
     if eval_enabled and base_eval_samples:
-        adapter_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=max_length)
-        if base_loss is not None and adapter_loss is not None:
-            improvement = base_loss - adapter_loss
-            min_improve = float(eval_cfg.get("min_improvement", settings.get("continuous", {}).get("eval", {}).get("min_improvement", 0.0)))
-            max_regress = float(eval_cfg.get("max_regression", settings.get("continuous", {}).get("eval", {}).get("max_regression", 0.0)))
-            eval_ok = improvement >= min_improve and improvement >= -max_regress
-        if hasattr(model, "generate"):
-            prompt_text = format_chat_sample(base_eval_samples[0], backend="hf", tokenizer=tokenizer, default_system=default_system)
-            try:
+        try:
+            adapter_loss = _eval_loss(model, tokenizer, base_eval_samples, max_length=max_seq_len)
+            if base_loss is not None and adapter_loss is not None:
+                improvement = base_loss - adapter_loss
+                min_improve = float(eval_cfg.get("min_improvement", settings.get("continuous", {}).get("eval", {}).get("min_improvement", 0.0)))
+                max_regress = float(eval_cfg.get("max_regression", settings.get("continuous", {}).get("eval", {}).get("max_regression", 0.0)))
+                eval_ok = improvement >= min_improve and improvement >= -max_regress
+            if hasattr(model, "generate"):
+                prompt_text = format_chat_sample(base_eval_samples[0], backend="hf", tokenizer=tokenizer, default_system=default_system)
                 gen_ids = model.generate(
-                    input_ids=tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(model_device),
+                    input_ids=tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(model.device),
                     max_new_tokens=int(eval_cfg.get("gen_max_new_tokens", 64)),
                     do_sample=False,
                 )
@@ -685,37 +694,49 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 max_repeat = float(eval_cfg.get("max_repeat_ratio", 0.9))
                 if repeat_ratio > max_repeat:
                     eval_ok = False
-            except Exception:
-                pass
-    eval_meta = {
-        "enabled": eval_enabled,
-        "samples": len(base_eval_samples),
-        "base_loss": base_loss,
-        "adapter_loss": adapter_loss,
-        "improvement": improvement,
-        "min_improvement": min_improve,
-        "max_regression": max_regress,
-        "repeat_ratio": repeat_ratio,
-        "max_repeat_ratio": max_repeat,
-        "eval_ok": eval_ok,
-    }
-    meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok, "eval": eval_meta})
-    (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
+        except Exception as exc:
+            eval_ok = False
+            eval_error = str(exc)
+    post_error = None
+    try:
+        eval_meta = {
+            "enabled": eval_enabled,
+            "samples": len(base_eval_samples),
+            "base_loss": base_loss,
+            "adapter_loss": adapter_loss,
+            "improvement": improvement,
+            "min_improvement": min_improve,
+            "max_regression": max_regress,
+            "repeat_ratio": repeat_ratio,
+            "max_repeat_ratio": max_repeat,
+            "eval_ok": eval_ok,
+            "error": eval_error,
+        }
+        meta.update({"base_loss": base_loss, "adapter_loss": adapter_loss, "improvement": improvement, "eval_ok": eval_ok, "eval": eval_meta})
+        (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
 
-    state.update({"last_ts": time.time(), "last_run_id": run_id})
-    _save_state(state_path, state)
+        state.update({"last_ts": time.time(), "last_run_id": run_id})
+        _save_state(state_path, state)
 
-    registry_path = reg_dir / "registry.json"
-    if eval_ok:
-        registry = {"current_adapter": str(adapter_dir), "last_run_id": run_id, "ts": time.time()}
-        registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
-    else:
-        candidate_path = reg_dir / "candidates.jsonl"
-        with candidate_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"run_id": run_id, "adapter": str(adapter_dir), "improvement": improvement, "ts": time.time()}, ensure_ascii=True) + "\n")
+        registry_path = reg_dir / "registry.json"
+        if eval_ok:
+            registry = {"current_adapter": str(adapter_dir), "last_run_id": run_id, "ts": time.time()}
+            registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+        else:
+            candidate_path = reg_dir / "candidates.jsonl"
+            with candidate_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"run_id": run_id, "adapter": str(adapter_dir), "improvement": improvement, "ts": time.time()}, ensure_ascii=True) + "\n")
+    except Exception as exc:
+        post_error = str(exc)
 
+    ok_train = True
+    ok_eval = bool(eval_ok) if eval_enabled else True
+    if post_error:
+        ok_eval = False
     return HfTrainResult(
-        ok=True,
+        ok=bool(ok_train and ok_eval and post_error is None),
+        ok_train=ok_train,
+        ok_eval=ok_eval,
         run_id=run_id,
         adapter_dir=adapter_dir,
         loss=avg_loss,
@@ -723,6 +744,10 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         samples=len(samples),
         tokens_per_sec=tokens_per_sec,
         vram_peak_mb=vram_peak,
+        eval_ok=eval_ok,
+        improvement=improvement,
+        repeat_ratio=repeat_ratio,
+        error=post_error or eval_error,
     )
 
 

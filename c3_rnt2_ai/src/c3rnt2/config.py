@@ -153,6 +153,7 @@ def normalize_settings(settings: dict) -> dict:
     server_cfg.setdefault("reload_interval_s", 60)
     server_cfg.setdefault("maintenance_window_s", 10)
     server_cfg.setdefault("block_during_training", False)
+    server_cfg.setdefault("train_strategy", "subprocess")
     normalized["server"] = server_cfg
 
     knowledge = normalized.get("knowledge", {}) or {}

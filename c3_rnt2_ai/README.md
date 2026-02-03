@@ -124,11 +124,12 @@ RTX 4080 + Qwen-8B (serve + self-train):
 ```bash
 python -m c3rnt2 doctor --deep --profile rtx4080_16gb
 python -m c3rnt2 serve --profile rtx4080_16gb
-python -m c3rnt2 serve-self-train --profile qwen8b_train --host 0.0.0.0 --port 8000
+python -m c3rnt2 train-once --profile safe_selftrain_4080_hf
+python -m c3rnt2 serve-self-train --profile safe_selftrain_4080_hf --host 0.0.0.0 --port 8000
 ```
 Comando recomendado (modo continuo seguro):
 ```bash
-python -m c3rnt2 serve-self-train --profile qwen8b_train
+python -m c3rnt2 serve-self-train --profile safe_selftrain_4080_hf
 ```
 Para activar RAG en el servidor:
 ```bash

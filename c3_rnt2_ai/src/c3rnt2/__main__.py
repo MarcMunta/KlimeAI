@@ -91,6 +91,71 @@ def _check_web_ingest(settings: dict, allowlist: list[str]) -> tuple[bool, str |
     return True, None, False
 
 
+def _coerce_train_result(payload: dict | object) -> SimpleNamespace:
+    if isinstance(payload, SimpleNamespace):
+        return payload
+    if isinstance(payload, dict):
+        return SimpleNamespace(**payload)
+    return SimpleNamespace(ok=False, ok_eval=False, ok_train=False, error="invalid_train_result")
+
+
+def _run_train_subprocess(settings: dict, reuse_dataset: bool) -> dict:
+    profile = settings.get("_profile") or resolve_profile(None)
+    cmd = [sys.executable, "-m", "c3rnt2", "train-once", "--profile", str(profile)]
+    if reuse_dataset:
+        cmd.append("--reuse-dataset")
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {"ok": False, "ok_train": False, "ok_eval": False, "error": result.stderr.strip() or "train subprocess failed"}
+    payload = None
+    for line in reversed(result.stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                payload = json.loads(line)
+                break
+            except Exception:
+                continue
+    if payload is None:
+        return {"ok": False, "ok_train": False, "ok_eval": False, "error": "train subprocess output not parseable"}
+    return payload
+
+
+def _run_train_inprocess(settings: dict, base_dir: Path, reuse_dataset: bool, train_fn: Callable | None = None) -> SimpleNamespace:
+    train_fn = train_fn or train_hf_once
+    result = train_fn(settings, base_dir, reuse_dataset=reuse_dataset)
+    return _coerce_train_result(result)
+
+
+def _unload_models_for_train(app: object) -> None:
+    state = getattr(app, "state", None)
+    if state is None:
+        return
+    try:
+        state.model = None
+        state.models = {}
+    except Exception:
+        pass
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _reload_models_for_app(app: object, settings: dict) -> None:
+    state = getattr(app, "state", None)
+    if state is None:
+        return
+    model = load_inference_model(settings)
+    backend = str(settings.get("core", {}).get("backend", "vortex")).lower()
+    label = "hf" if backend == "hf" else "core"
+    state.model = model
+    state.models = {label: model}
+
+
 def _self_patch_queue_dir(base_dir: Path, settings: dict) -> Path:
     queue_dir = settings.get("self_patch", {}).get("queue_dir", "data/self_patch/queue")
     qpath = Path(queue_dir)
@@ -233,6 +298,43 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
     return {"ok": not errors, "errors": errors, "warnings": warnings, "info": info}
 
 
+def _run_doctor_deep_checks(settings: dict, base_dir: Path) -> dict:
+    errors: list[str] = []
+    info: dict[str, object] = {}
+    deep_settings = json.loads(json.dumps(settings))
+    cont = deep_settings.setdefault("continuous", {})
+    cont["ingest_web"] = False
+    cont.setdefault("trigger", {})["enabled"] = False
+    server_cfg = deep_settings.setdefault("server", {})
+    server_cfg["train_strategy"] = "inprocess"
+    app = SimpleNamespace(state=SimpleNamespace())
+    dummy_result = SimpleNamespace(ok=True, ok_train=True, ok_eval=True, loss=0.0, steps=1, samples=1, tokens_per_sec=1.0, vram_peak_mb=None)
+    res = _run_self_train_tick(
+        app,
+        deep_settings,
+        base_dir,
+        reuse_dataset=True,
+        maintenance_window_s=0.0,
+        reload_fn=None,
+        train_fn=lambda *_args, **_kwargs: dummy_result,
+    )
+    info["self_train_mock_tick"] = res
+    if not res.get("ok", False):
+        errors.append("self_train_tick_failed")
+
+    strategy = str((settings.get("server", {}) or {}).get("train_strategy", "subprocess")).lower()
+    if strategy == "subprocess":
+        try:
+            __import__("c3rnt2.__main__")
+            info["train_strategy_check"] = "subprocess_import_ok"
+        except Exception as exc:
+            errors.append(f"train_strategy_subprocess_import_failed: {exc}")
+    else:
+        info["train_strategy_check"] = f"{strategy}_ok"
+
+    return {"ok": not errors, "errors": errors, "info": info}
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     info = detect_device()
     print(
@@ -276,6 +378,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             print({"deep": deep_result})
         except Exception as exc:
             print({"deep": {"deep_ok": False, "error": str(exc)}})
+            sys.exit(1)
+        extra = _run_doctor_deep_checks(settings, base_dir)
+        print({"deep_extra": extra})
+        if not extra.get("ok", False):
             sys.exit(1)
 
 
@@ -419,7 +525,11 @@ def cmd_train_once(args: argparse.Namespace) -> None:
         return
     try:
         result = train_hf_once(settings, base_dir, reuse_dataset=args.reuse_dataset)
-        print(result.__dict__)
+        payload = dict(result.__dict__)
+        adapter_dir = payload.get("adapter_dir")
+        if adapter_dir is not None:
+            payload["adapter_dir"] = str(adapter_dir)
+        print(json.dumps(payload, ensure_ascii=True))
         if not result.ok:
             sys.exit(1)
     finally:
@@ -460,6 +570,7 @@ def _run_self_train_tick(
     reuse_dataset: bool,
     maintenance_window_s: float,
     reload_fn: Callable | None = None,
+    train_fn: Callable | None = None,
 ) -> dict:
     allowlist = _resolve_allowlist(settings)
     cont_cfg = settings.get("continuous", {}) or {}
@@ -491,6 +602,7 @@ def _run_self_train_tick(
 
     server_cfg = settings.get("server", {}) or {}
     block_during_training = bool(server_cfg.get("block_during_training", False))
+    train_strategy = str(server_cfg.get("train_strategy", "subprocess")).lower()
     lock_path = base_dir / "data" / "locks" / "train.lock"
     lock = FileLock(lock_path)
     try:
@@ -504,7 +616,14 @@ def _run_self_train_tick(
         if maintenance_window_s and maintenance_window_s > 0 and not block_during_training:
             state.maintenance_until = time.time() + float(maintenance_window_s)
         try:
-            result = train_hf_once(settings, base_dir, reuse_dataset=reuse_dataset)
+            if train_strategy == "subprocess":
+                result_dict = _run_train_subprocess(settings, reuse_dataset=reuse_dataset)
+                result = _coerce_train_result(result_dict)
+            elif train_strategy == "unload_reload":
+                _unload_models_for_train(app)
+                result = _run_train_inprocess(settings, base_dir, reuse_dataset, train_fn=train_fn)
+            else:
+                result = _run_train_inprocess(settings, base_dir, reuse_dataset, train_fn=train_fn)
         except Exception as exc:
             result = None
             error = str(exc)
@@ -520,8 +639,13 @@ def _run_self_train_tick(
         lock.release()
     if error:
         return {"ok": False, "error": error, "new_docs": new_docs, "stats": stats.__dict__}
+    if train_strategy == "unload_reload":
+        try:
+            _reload_models_for_app(app, settings)
+        except Exception as exc:
+            return {"ok": False, "error": f"reload_model_failed: {exc}", "new_docs": new_docs, "stats": stats.__dict__}
     reload_result = None
-    if reload_fn is not None and result and result.ok:
+    if reload_fn is not None and result and bool(getattr(result, "ok_eval", getattr(result, "eval_ok", getattr(result, "ok", False)))):
         try:
             reload_result = reload_fn(app, base_dir, settings, force=True)
         except Exception as exc:
@@ -533,6 +657,7 @@ def _run_self_train_tick(
         "loss": getattr(result, "loss", None) if result else None,
         "tokens_per_sec": getattr(result, "tokens_per_sec", None) if result else None,
         "vram_peak_mb": getattr(result, "vram_peak_mb", None) if result else None,
+        "eval_ok": getattr(result, "eval_ok", None) if result else None,
     }
     print({"self_train_metrics": metrics})
     return {"ok": True, "new_docs": new_docs, "train": result.__dict__ if result else None, "reload": reload_result, "stats": stats.__dict__}
@@ -552,6 +677,7 @@ def cmd_serve_self_train(args: argparse.Namespace) -> None:
     app = None
 
     if args.mock:
+        settings.setdefault("server", {})["train_strategy"] = "inprocess"
         class _DummyLock:
             def read_lock(self):
                 return nullcontext()
