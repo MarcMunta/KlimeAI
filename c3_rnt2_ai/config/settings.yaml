@@ -194,6 +194,10 @@ profiles:
       max_new_tokens: 128
     runtime:
       paged_lm_head: false
+      # gpu_decompress uses CPU decompress + H2D pipeline; keep "none" unless you know why.
+      gpu_decompress: none
+      # kv_quant=2bit is experimental; requires kv_quant_2bit_experimental + i_know_what_im_doing.
+      i_know_what_im_doing: false
 
   rtx4080_16gb:
     # RTX 4080 16GB + Ryzen 7800X3D (HF Qwen-8B)
@@ -262,16 +266,22 @@ profiles:
     tools:
       web:
         enabled: true
-    autopilot:
-      enabled: false
-      interval_minutes: 30
-      ingest_cooldown_minutes: 10
-      train_cooldown_minutes: 60
-      eval_cooldown_minutes: 60
-      patch_cooldown_minutes: 120
-      train_max_steps: 25
-      min_improvement: 0.0
-      reuse_dataset: false
+      autopilot:
+        enabled: false
+        interval_minutes: 30
+        ingest_cooldown_minutes: 10
+        train_cooldown_minutes: 60
+        eval_cooldown_minutes: 60
+        patch_cooldown_minutes: 120
+        train_max_steps: 25
+        training_jsonl_max_items: 500
+        min_improvement: 0.0
+        reuse_dataset: false
+        autopatch_enabled: false
+        autopatch_on_test_fail: true
+        autopatch_on_doctor_fail: true
+        autopatch_require_eval: true
+        todo_regex: "TODO\\((P1|PRIORITY)\\)|TODO!|TODO:HIGH|TODO:CRITICAL"
 
   core_only:
     tokenizer:
@@ -623,6 +633,10 @@ profiles:
       prefetch_depth: 4
       compression: zstd
       pinned_memory: true
+      # gpu_decompress uses CPU decompress + H2D pipeline; keep "none" unless you know why.
+      gpu_decompress: none
+      # kv_quant=2bit is experimental; requires kv_quant_2bit_experimental + i_know_what_im_doing.
+      i_know_what_im_doing: false
 
   safe_selftrain_4080:
     # Vortex continuous self-train (core trainer), not HF

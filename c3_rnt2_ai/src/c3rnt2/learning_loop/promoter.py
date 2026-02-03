@@ -14,6 +14,13 @@ class PromoteResult:
     message: str
 
 
+@dataclass(frozen=True)
+class PromotionPolicy:
+    min_improvement: float
+    require_eval_ok: bool = True
+    require_bench_ok: bool = True
+
+
 def _load_latest_eval(path: Path) -> dict | None:
     if not path.exists():
         return None
@@ -40,7 +47,10 @@ def promote_latest(base_dir: Path, settings: dict, min_improvement: float | None
     improvement = latest.get("improvement")
     adapter_path = latest.get("adapter_path")
     eval_ok = latest.get("eval_ok")
+    bench_ok = latest.get("bench_ok")
+    regression = latest.get("regression")
     threshold = float(min_improvement if min_improvement is not None else learning.get("promote_min_improvement", 0.0))
+    policy = PromotionPolicy(min_improvement=threshold, require_eval_ok=True, require_bench_ok=True)
     registry_dir = Path(settings.get("hf_train", {}).get("registry_dir", "data/registry/hf_train"))
     if not registry_dir.is_absolute():
         registry_dir = base_dir / registry_dir
@@ -49,10 +59,35 @@ def promote_latest(base_dir: Path, settings: dict, min_improvement: float | None
 
     if improvement is None or adapter_path is None:
         return PromoteResult(ok=False, promoted=False, adapter_path=adapter_path, message="missing_improvement")
-    if eval_ok is False:
+    if policy.require_eval_ok and eval_ok is False:
+        # rollback to last good if available
+        if promoted_path.exists():
+            try:
+                payload = json.loads(promoted_path.read_text(encoding="utf-8"))
+                last = payload.get("adapter_path")
+                if last:
+                    registry = {"current_adapter": last, "ts": time.time()}
+                    registry_path.parent.mkdir(parents=True, exist_ok=True)
+                    registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+                    return PromoteResult(ok=True, promoted=False, adapter_path=last, message="rolled_back")
+            except Exception:
+                pass
         return PromoteResult(ok=True, promoted=False, adapter_path=adapter_path, message="eval_not_ok")
+    if policy.require_bench_ok and (bench_ok is False or regression is True):
+        if promoted_path.exists():
+            try:
+                payload = json.loads(promoted_path.read_text(encoding="utf-8"))
+                last = payload.get("adapter_path")
+                if last:
+                    registry = {"current_adapter": last, "ts": time.time()}
+                    registry_path.parent.mkdir(parents=True, exist_ok=True)
+                    registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+                    return PromoteResult(ok=True, promoted=False, adapter_path=last, message="rolled_back")
+            except Exception:
+                pass
+        return PromoteResult(ok=True, promoted=False, adapter_path=adapter_path, message="bench_regression")
 
-    if float(improvement) >= threshold:
+    if float(improvement) >= policy.min_improvement:
         registry = {}
         if registry_path.exists():
             try:

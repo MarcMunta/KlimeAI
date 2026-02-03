@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from typing import Any
 
 from .continuous.dataset import ingest_sources
 from .continuous.knowledge_store import KnowledgeStore, EmbeddingBackend
+from .training.dataset_builder import build_sft_dataset
 from .learning_loop.promoter import promote_latest
 from .self_patch.policy import policy_from_settings, validate_patch
 from .tools.web_ingest import ingest_urls
@@ -105,6 +107,98 @@ def _ingest_web(base_dir: Path, settings: dict, state: dict) -> dict[str, Any]:
     return {"ok": True, "ingested": ingested, "items": len(items)}
 
 
+def _append_training_from_web(base_dir: Path, state: dict, max_items: int) -> dict[str, Any]:
+    ingest_path = base_dir / "data" / "ingest" / "web.jsonl"
+    if not ingest_path.exists():
+        return {"ok": True, "skipped": "no_web_ingest"}
+    out_path = base_dir / "data" / "episodes" / "training.jsonl"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    meta = state.setdefault("training_from_web", {})
+    offset = int(meta.get("offset", 0))
+    seen = set(meta.get("seen_hashes", []))
+    if ingest_path.stat().st_size < offset:
+        offset = 0
+    added = 0
+    with ingest_path.open("rb") as handle, out_path.open("a", encoding="utf-8") as out:
+        handle.seek(offset)
+        for raw_line in handle:
+            offset += len(raw_line)
+            if max_items and added >= max_items:
+                break
+            try:
+                payload = json.loads(raw_line.decode("utf-8", errors="ignore"))
+            except Exception:
+                continue
+            text = str(payload.get("text", "")).strip()
+            if not text:
+                continue
+            source_ref = str(payload.get("source_ref", payload.get("url", ""))).strip()
+            digest = hashlib.sha256(f"{source_ref}\n{text}".encode("utf-8")).hexdigest()
+            if digest in seen:
+                continue
+            record = {
+                "messages": [{"role": "user", "content": "Read docs"}],
+                "response": text,
+                "source_ref": source_ref,
+                "ts": time.time(),
+            }
+            out.write(json.dumps(record, ensure_ascii=True) + "\n")
+            seen.add(digest)
+            added += 1
+    meta["offset"] = offset
+    if len(seen) > 5000:
+        meta["seen_hashes"] = list(seen)[-5000:]
+    else:
+        meta["seen_hashes"] = list(seen)
+    return {"ok": True, "written": added}
+
+
+def _build_sft_dataset(base_dir: Path, settings: dict) -> dict[str, Any]:
+    cfg = settings.get("hf_train", {}) or {}
+    cont = settings.get("continuous", {}) or {}
+    knowledge_path = Path(cont.get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
+    knowledge_cfg = settings.get("knowledge", {}) or {}
+    embed_backend = knowledge_cfg.get("embedding_backend", "auto")
+    embed_model = knowledge_cfg.get("embedding_model")
+    embedder = EmbeddingBackend(backend=str(embed_backend), model_name=embed_model) if embed_model else embed_backend
+    store = KnowledgeStore(
+        knowledge_path,
+        embedding_backend=embedder,
+        index_backend=knowledge_cfg.get("index_backend", "auto"),
+    )
+    max_samples = int(cfg.get("max_samples", 128))
+    min_quality = float(cfg.get("min_quality", 0.0))
+    chunks = store.sample_chunks(limit=max_samples, min_quality=min_quality)
+    system_prompt = cfg.get("default_system") or settings.get("core", {}).get("hf_system_prompt") or "You are a helpful coding assistant."
+    dataset_path = Path(cfg.get("dataset_path", base_dir / "data" / "registry" / "hf_train" / "sft_samples.jsonl"))
+    if not dataset_path.is_absolute():
+        dataset_path = base_dir / dataset_path
+    episodes_path = base_dir / "data" / "episodes" / "agent.jsonl"
+    chat_path = base_dir / "data" / "episodes" / "chat.jsonl"
+    feedback_path = base_dir / "data" / "episodes" / "feedback.jsonl"
+    training_path = base_dir / "data" / "episodes" / "training.jsonl"
+    queue_dir = settings.get("self_patch", {}).get("queue_dir", "data/self_patch/queue")
+    queue_path = Path(queue_dir)
+    if not queue_path.is_absolute():
+        queue_path = base_dir / queue_path
+    stats = build_sft_dataset(
+        chunks=chunks,
+        episodes_path=episodes_path,
+        output_path=dataset_path,
+        system_prompt=system_prompt,
+        queue_dir=queue_path,
+        chat_path=chat_path,
+        feedback_path=feedback_path,
+        training_path=training_path,
+        include_soft_feedback=bool(cfg.get("include_soft_feedback", True)),
+        min_chars=int(cfg.get("min_chars", 40)),
+        max_repeat_ratio=float(cfg.get("max_repeat_ratio", 0.8)),
+        semantic_dedup_threshold=float(cfg.get("semantic_dedup_threshold", 0.97)),
+        embedding_backend=embedder if isinstance(embedder, EmbeddingBackend) else None,
+    )
+    return {"ok": True, "stats": stats.__dict__, "dataset_path": str(dataset_path)}
+
+
 def _train_subprocess(profile: str, reuse_dataset: bool, max_steps: int | None) -> dict:
     cmd = [sys.executable, "-m", "c3rnt2", "train-once", "--profile", profile]
     if reuse_dataset:
@@ -141,6 +235,15 @@ def _export_adapter_marker(base_dir: Path, adapter_path: str | None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     marker = out_dir / "adapter_current.pt"
     marker.write_text(str(adapter_path), encoding="utf-8")
+
+
+def _request_reload(base_dir: Path, adapter_path: str | None) -> None:
+    if not adapter_path:
+        return
+    path = base_dir / "data" / "state" / "reload.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"ts": time.time(), "adapter_path": str(adapter_path), "requested_by": "autopilot"}
+    path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
 
 def _run_cmd(cmd: list[str], base_dir: Path, env: dict | None = None, ok_codes: set[int] | None = None) -> tuple[bool, str]:
@@ -218,6 +321,12 @@ def _maybe_autopatch(
         ok, _msg = _run_cmd(["pytest", "-q"], base_dir, ok_codes={0, 5})
         if not ok:
             triggers.append("tests_failed")
+    if bool(cfg.get("autopatch_on_doctor_fail", True)):
+        env = dict(os.environ)
+        env["C3RNT2_NO_NET"] = "1"
+        ok_doc, _msg_doc = _run_cmd([sys.executable, "-m", "c3rnt2", "doctor", "--deep", "--profile", profile], base_dir, env=env)
+        if not ok_doc:
+            triggers.append("doctor_failed")
     todo_pattern = cfg.get("todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL")
     allowed = list((settings.get("self_patch", {}) or {}).get("allowed_paths", ["src/", "tests/"]))
     if todo_pattern:
@@ -304,6 +413,12 @@ def _maybe_autopatch(
         _git_checkout(base_dir, original_branch)
         return {"ok": False, "error": "doctor_failed", "triggers": triggers}
 
+    if bool(cfg.get("autopatch_require_eval", True)):
+        ok_eval, _msg_eval = _run_cmd([sys.executable, "-m", "c3rnt2", "eval", "--profile", profile], base_dir, env=env)
+        if not ok_eval:
+            _git_checkout(base_dir, original_branch)
+            return {"ok": False, "error": "eval_short_failed", "triggers": triggers}
+
     ok_checkout, _msg_checkout = _git_checkout(base_dir, "main")
     if not ok_checkout:
         _git_checkout(base_dir, original_branch)
@@ -352,6 +467,7 @@ def run_autopilot_tick(
         patch_cooldown = float(autopilot_cfg.get("patch_cooldown_minutes", 120))
         reuse_dataset = bool(autopilot_cfg.get("reuse_dataset", False))
         max_steps = autopilot_cfg.get("train_max_steps")
+        training_jsonl_max = int(autopilot_cfg.get("training_jsonl_max_items", 500))
         min_improvement = float(autopilot_cfg.get("min_improvement", settings.get("hf_train", {}).get("eval", {}).get("min_improvement", 0.0)))
 
         # ingest (web + logs/episodes)
@@ -375,6 +491,12 @@ def run_autopilot_tick(
         else:
             steps["ingest_sources"] = {"ok": True, "new_docs": new_docs}
 
+        steps["training_jsonl"] = _append_training_from_web(base_dir, state, training_jsonl_max)
+        try:
+            steps["dataset_builder"] = _build_sft_dataset(base_dir, settings)
+        except Exception as exc:
+            steps["dataset_builder"] = {"ok": False, "error": str(exc)}
+
         # training
         train_result = None
         if not mock and _cooldown_ok(float(state.get("last_train_ts", 0.0)), train_cooldown):
@@ -395,11 +517,27 @@ def run_autopilot_tick(
             steps["eval_short"] = {"ok": eval_ok, "improvement": improvement}
             state["last_eval_ts"] = time.time()
             if eval_ok and improvement is not None and float(improvement) >= min_improvement:
+                eval_path = Path((settings.get("learning", {}) or {}).get("evals_path", base_dir / "data" / "learning" / "evals.jsonl"))
+                if not eval_path.is_absolute():
+                    eval_path = base_dir / eval_path
+                eval_path.parent.mkdir(parents=True, exist_ok=True)
+                eval_payload = {
+                    "ts": time.time(),
+                    "ok": True,
+                    "adapter_path": train_result.get("adapter_dir"),
+                    "improvement": improvement,
+                    "eval_ok": eval_ok,
+                }
+                with eval_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(eval_payload, ensure_ascii=True) + "\n")
                 steps["promote"] = promote_latest(base_dir, settings, min_improvement=min_improvement).__dict__
             else:
                 steps["promote"] = {"ok": True, "promoted": False, "reason": "eval_not_ok_or_no_improvement"}
             if eval_ok:
                 _export_adapter_marker(base_dir, train_result.get("adapter_dir"))
+            if isinstance(steps.get("promote"), dict) and steps["promote"].get("promoted"):
+                adapter_path = steps["promote"].get("adapter_path") or train_result.get("adapter_dir")
+                _request_reload(base_dir, adapter_path)
         else:
             steps["eval_short"] = {"ok": True, "skipped": "no_train_or_cooldown"}
             steps["promote"] = {"ok": True, "promoted": False, "skipped": "no_eval"}
@@ -420,7 +558,13 @@ def run_autopilot_tick(
 
         state["last_tick_ts"] = time.time()
         _save_state(base_dir, state)
-        _log_event(base_dir, {"ok": True, "steps": steps})
+        summary = {
+            "vram_peak_mb": train_result.get("vram_peak_mb") if train_result else None,
+            "tokens_per_sec": train_result.get("tokens_per_sec") if train_result else None,
+            "eval_ok": steps.get("eval_short", {}).get("ok") if isinstance(steps.get("eval_short"), dict) else None,
+            "promoted": steps.get("promote", {}).get("promoted") if isinstance(steps.get("promote"), dict) else None,
+        }
+        _log_event(base_dir, {"ok": True, "steps": steps, "summary": summary})
         return AutopilotResult(ok=True, steps=steps)
     finally:
         lock.release()

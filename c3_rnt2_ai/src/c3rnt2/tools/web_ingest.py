@@ -240,10 +240,9 @@ def ingest_urls(
             )
 
     if items:
-        out_dir = base_dir / "data" / "ingest" / "web"
+        out_dir = base_dir / "data" / "ingest"
         out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"{stamp}.jsonl"
+        out_path = out_dir / "web.jsonl"
         with out_path.open("a", encoding="utf-8") as handle:
             for item in items:
                 handle.write(

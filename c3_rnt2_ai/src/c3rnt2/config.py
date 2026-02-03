@@ -82,6 +82,7 @@ def normalize_settings(settings: dict) -> dict:
                 runtime["kv_quant"] = "none"
     runtime.setdefault("kv_quant", "none")
     runtime.setdefault("kv_quant_2bit_experimental", False)
+    runtime.setdefault("i_know_what_im_doing", False)
     runtime.setdefault("gpu_decompress", "none")
     normalized["runtime"] = runtime
 
@@ -285,8 +286,14 @@ def normalize_settings(settings: dict) -> dict:
     autopilot.setdefault("eval_cooldown_minutes", 60)
     autopilot.setdefault("patch_cooldown_minutes", 120)
     autopilot.setdefault("train_max_steps", hf_train.get("max_steps", 50))
+    autopilot.setdefault("training_jsonl_max_items", 500)
     autopilot.setdefault("min_improvement", hf_eval.get("min_improvement", 0.0))
     autopilot.setdefault("reuse_dataset", False)
+    autopilot.setdefault("autopatch_enabled", False)
+    autopilot.setdefault("autopatch_on_test_fail", True)
+    autopilot.setdefault("autopatch_on_doctor_fail", True)
+    autopilot.setdefault("autopatch_require_eval", True)
+    autopilot.setdefault("todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL")
     normalized["autopilot"] = autopilot
 
     if lava:
@@ -343,11 +350,14 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     kv_quant = str(runtime.get("kv_quant", "none")).lower()
     if kv_quant not in {"none", "int8", "2bit"}:
         errors.append("runtime.kv_quant must be one of none|int8|2bit")
-    if kv_quant == "2bit" and not bool(runtime.get("kv_quant_2bit_experimental", False)):
-        errors.append("runtime.kv_quant=2bit requires runtime.kv_quant_2bit_experimental=true")
+    if kv_quant == "2bit":
+        if not bool(runtime.get("kv_quant_2bit_experimental", False)):
+            errors.append("runtime.kv_quant=2bit is experimental; set runtime.kv_quant_2bit_experimental=true")
+        if not bool(runtime.get("i_know_what_im_doing", False)):
+            errors.append("runtime.kv_quant=2bit requires runtime.i_know_what_im_doing=true")
     gpu_decompress = str(runtime.get("gpu_decompress", "none")).lower()
     if gpu_decompress not in {"none", "triton"}:
-        errors.append("runtime.gpu_decompress must be none or triton")
+        errors.append("runtime.gpu_decompress must be none or triton (CPU decompress + H2D pipeline)")
 
     if web_cfg:
         if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_domains"):
