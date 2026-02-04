@@ -252,8 +252,11 @@ def _maybe_load_adapter(model: CoreTransformer, settings: dict, base_dir: Path) 
 def _load_backend_model(settings: dict, base_dir: Path, backend: str):
     local = deepcopy(settings)
     core = local.get("core", {}) or {}
-    if backend == "hf":
+    backend_l = str(backend or "").lower()
+    if backend_l in {"hf", "transformers"}:
         core["backend"] = "hf"
+    elif backend_l in {"llama_cpp", "llamacpp", "llama.cpp"}:
+        core["backend"] = "llama_cpp"
     else:
         core["backend"] = "vortex"
     local["core"] = core
@@ -266,14 +269,55 @@ def _load_backend_model(settings: dict, base_dir: Path, backend: str):
     return model
 
 
-def _resolve_fallback_backend(settings: dict, current: str) -> str | None:
+def _normalize_backend_label(value: object) -> str:
+    name = str(value or "").strip().lower()
+    if name in {"vortex", "core"}:
+        return "core"
+    if name in {"hf", "transformers"}:
+        return "hf"
+    if name in {"llama_cpp", "llama.cpp", "llamacpp"}:
+        return "llama_cpp"
+    return name
+
+
+def _llama_cpp_ready(settings: dict, base_dir: Path) -> bool:
     core = settings.get("core", {}) or {}
-    fallback = core.get("backend_fallback") or core.get("hf_fallback")
-    if fallback:
-        fb = str(fallback).lower()
-        if fb != current:
-            return fb
-    if current != "hf" and core.get("hf_model"):
+    model_path = core.get("llama_cpp_model_path")
+    if not model_path:
+        return False
+    path = Path(str(model_path))
+    if not path.is_absolute():
+        path = base_dir / path
+    if not path.exists():
+        return False
+    try:
+        __import__("llama_cpp")
+    except Exception:
+        return False
+    return True
+
+
+def _resolve_fallback_backend(settings: dict, current: str, base_dir: Path) -> str | None:
+    core = settings.get("core", {}) or {}
+    cur = _normalize_backend_label(current)
+
+    fallback = None
+    if cur == "hf" and core.get("hf_fallback") is not None:
+        fallback = core.get("hf_fallback")
+    if fallback is None:
+        fallback = core.get("backend_fallback")
+    if fallback is None and cur != "hf":
+        fallback = core.get("hf_fallback")
+
+    if fallback is not None:
+        fb = _normalize_backend_label(fallback)
+        if fb != cur:
+            if fb == "llama_cpp" and not _llama_cpp_ready(settings, base_dir):
+                fb = ""
+            if fb:
+                return fb
+
+    if cur != "hf" and core.get("hf_model"):
         return "hf"
     return None
 
@@ -805,7 +849,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             decision = router.decide(feats)
             chosen_backend = decision.backend
         if training_active and not block_during_training:
-            fb = _resolve_fallback_backend(settings, chosen_backend)
+            fb = _resolve_fallback_backend(settings, chosen_backend, base_dir)
             if fb:
                 chosen_backend = fb
         selected_model = models.get(chosen_backend, model)
@@ -875,7 +919,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                     except RuntimeError as exc:
                         if is_oom_error(exc):
                             clear_cuda_cache()
-                            fb = _resolve_fallback_backend(settings, chosen_backend)
+                            fb = _resolve_fallback_backend(settings, chosen_backend, base_dir)
                             if fb:
                                 fb_model = _get_or_load_backend(models, settings, base_dir, fb)
                                 if fb_model is not None:
@@ -1024,7 +1068,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                     except RuntimeError as exc:
                         if is_oom_error(exc):
                             clear_cuda_cache()
-                            fb = _resolve_fallback_backend(settings, current_backend)
+                            fb = _resolve_fallback_backend(settings, current_backend, base_dir)
                             if fb:
                                 fb_model = _get_or_load_backend(models, settings, base_dir, fb)
                                 if fb_model is not None:
@@ -1236,7 +1280,11 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
     model_lock = threading.Lock()
     episode_lock = threading.Lock()
     episode_index = EpisodeIndex(base_dir / "data" / "episodes" / "index.sqlite")
-    fallback_backend = _resolve_fallback_backend(settings, str(settings.get("core", {}).get("backend", "vortex")).lower())
+    fallback_backend = _resolve_fallback_backend(
+        settings,
+        str(settings.get("core", {}).get("backend", "vortex")).lower(),
+        base_dir,
+    )
     fallback_model = None
     adapters_registry = ExpertRegistry.from_settings(settings, base_dir=base_dir)
     adapters_router = ExpertRouter.from_settings(settings)

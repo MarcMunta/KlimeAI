@@ -441,18 +441,15 @@ def _promotion_gating_wiring_check(base_dir: Path) -> dict[str, Any]:
 
 
 def _security_deep_check(settings: dict, base_dir: Path) -> dict[str, Any]:
-    security = settings.get("security", {}) or {}
-    web_sec = (security.get("web", {}) or {}) if isinstance(security, dict) else {}
+    from .config import resolve_web_allowlist, resolve_web_strict
+
     tools_web = settings.get("tools", {}).get("web", {}) or {}
     cont = settings.get("continuous", {}) or {}
 
-    strict = bool(web_sec.get("strict", True))
+    strict = bool(resolve_web_strict(settings))
     web_enabled = bool(tools_web.get("enabled", False))
     ingest_web = bool(cont.get("ingest_web", False))
-    allowlist = tools_web.get("allow_domains")
-    if not allowlist:
-        allowlist = (settings.get("agent", {}) or {}).get("web_allowlist", [])
-    allowlist = list(allowlist) if allowlist else []
+    allowlist = resolve_web_allowlist(settings)
 
     errors: list[str] = []
     if (web_enabled or ingest_web) and not strict:
@@ -542,6 +539,117 @@ def _bench_minimal_check(settings: dict, base_dir: Path) -> dict[str, Any]:
     return {"ok": bool(report.get("ok", False)), "backend": report.get("backend"), "tokens_per_sec": report.get("tokens_per_sec"), "json_out": str(out_path)}
 
 
+def _deep_check_120b_like_profile(settings: dict, base_dir: Path, *, mock: bool) -> dict[str, Any]:
+    profile = str(settings.get("_profile") or "")
+    if profile != "rtx4080_16gb_120b_like":
+        return {"ok": True, "skipped": "not_120b_like"}
+
+    errors: list[str] = []
+    info: dict[str, Any] = {}
+
+    thresholds = settings.get("bench_thresholds", {}) or {}
+    required = ("min_tokens_per_sec", "max_regression", "max_vram_peak_mb", "required_ctx")
+    missing = [key for key in required if thresholds.get(key) is None]
+    if missing:
+        errors.append(f"bench_thresholds_missing:{','.join(missing)}")
+    else:
+        try:
+            info["bench_thresholds"] = {
+                "min_tokens_per_sec": float(thresholds.get("min_tokens_per_sec")),
+                "max_regression": float(thresholds.get("max_regression")),
+                "max_vram_peak_mb": float(thresholds.get("max_vram_peak_mb")),
+                "required_ctx": int(thresholds.get("required_ctx")),
+            }
+        except Exception:
+            errors.append("bench_thresholds_invalid_types")
+
+    def _check_router(section: str) -> dict[str, Any]:
+        cfg = settings.get(section, {}) or {}
+        enabled = bool(cfg.get("enabled", False))
+        router_cfg = cfg.get("router", {}) or {}
+        try:
+            top_k = int(router_cfg.get("top_k", 1) or 1)
+        except Exception:
+            top_k = 0
+        try:
+            max_loaded = int(cfg.get("max_loaded", 0) or 0)
+        except Exception:
+            max_loaded = 0
+        mode = str(router_cfg.get("mode", "") or "").strip().lower()
+        mix_mode = str(router_cfg.get("mix_mode", "single") or "single").strip().lower()
+        section_errors: list[str] = []
+        if not enabled:
+            section_errors.append("disabled")
+        if top_k < 1:
+            section_errors.append("top_k_lt_1")
+        if enabled and max_loaded < top_k:
+            section_errors.append("max_loaded_lt_top_k")
+        if top_k > 1 and mix_mode != "weighted":
+            section_errors.append("mix_mode_not_weighted_for_topk")
+        if mode and mode != "hybrid":
+            section_errors.append("router_mode_not_hybrid")
+        return {
+            "ok": not section_errors,
+            "enabled": enabled,
+            "top_k": top_k,
+            "max_loaded": max_loaded,
+            "mode": mode or None,
+            "mix_mode": mix_mode,
+            "errors": section_errors or None,
+        }
+
+    adapters_chk = _check_router("adapters")
+    experts_chk = _check_router("experts")
+    info["adapters"] = adapters_chk
+    info["experts"] = experts_chk
+    if not bool(adapters_chk.get("ok", False)):
+        errors.append("adapters_router_invalid")
+    if not bool(experts_chk.get("ok", False)):
+        errors.append("experts_router_invalid")
+
+    if mock:
+        try:
+            from .bench import BenchArgs, run_bench
+            from .promotion.gating import DEFAULT_BENCH_PROMPT
+
+            required_ctx = (thresholds.get("required_ctx") if isinstance(thresholds, dict) else None) or (settings.get("bench", {}) or {}).get("required_ctx")
+            try:
+                ctx = int(required_ctx) if required_ctx is not None else None
+            except Exception:
+                ctx = None
+            out_path = base_dir / "data" / "bench" / "doctor_120b_like_mock.json"
+            bench_report = run_bench(
+                settings,
+                base_dir=base_dir,
+                args=BenchArgs(
+                    profile=profile,
+                    prompt=DEFAULT_BENCH_PROMPT,
+                    prompt_file=None,
+                    ctx=ctx,
+                    max_new=16,
+                    warmup=0,
+                    repeat=1,
+                    seed=0,
+                    json_out=out_path,
+                    jsonl_out=None,
+                    mock=True,
+                ),
+            )
+            info["bench_mock"] = {
+                "ok": bool(bench_report.get("ok", False)),
+                "backend": bench_report.get("backend"),
+                "tokens_per_sec": bench_report.get("tokens_per_sec"),
+                "json_out": str(out_path),
+            }
+            if not bool(bench_report.get("ok", False)):
+                errors.append("bench_mock_failed")
+        except Exception as exc:
+            info["bench_mock"] = {"ok": False, "error": str(exc)}
+            errors.append("bench_mock_failed")
+
+    return {"ok": not errors, "errors": errors or None, "info": info}
+
+
 def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> dict[str, Any]:
     info = detect_device()
     report: dict[str, Any] = {"deep_ok": True, "ts": time.time()}
@@ -562,6 +670,14 @@ def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> di
             checks["llama_cpp_backend"] = _llama_cpp_backend_check(settings, base_dir)
             if not bool(checks["llama_cpp_backend"].get("ok", False)):
                 report["deep_ok"] = False
+
+    try:
+        checks["profile_120b_like"] = _deep_check_120b_like_profile(settings, base_dir, mock=mock)
+        if not bool(checks["profile_120b_like"].get("ok", False)):
+            report["deep_ok"] = False
+    except Exception as exc:
+        checks["profile_120b_like"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
 
     try:
         checks["tokenizer_roundtrip"] = _tokenizer_roundtrip_strict(settings, base_dir)

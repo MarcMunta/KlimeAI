@@ -36,13 +36,13 @@ def resolve_bench_thresholds(settings: dict) -> dict[str, Any]:
     except Exception:
         min_tps = 0.0
 
-    required_ctx = bench_cfg.get("required_ctx")
+    required_ctx = bench_cfg.get("required_ctx", bench_thresholds.get("required_ctx"))
     try:
         required_ctx = int(required_ctx) if required_ctx is not None else None
     except Exception:
         required_ctx = None
 
-    max_vram = bench_cfg.get("max_vram_peak_mb")
+    max_vram = bench_cfg.get("max_vram_peak_mb", bench_thresholds.get("max_vram_peak_mb"))
     try:
         max_vram = float(max_vram) if max_vram is not None else None
     except Exception:
@@ -155,4 +155,3 @@ def run_bench_minimal(profile: str, base_dir: Path, *, max_new_tokens: int = 64)
         jsonl_out=None,
     )
     return run_bench(settings, base_dir=base_dir, args=args)
-

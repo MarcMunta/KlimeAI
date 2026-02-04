@@ -1435,6 +1435,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
             seed=int(getattr(args, "seed", 0) or 0),
             json_out=json_out,
             jsonl_out=jsonl_out,
+            mock=bool(getattr(args, "mock", False)),
         ),
     )
     print(json.dumps(report, ensure_ascii=True))
@@ -1508,6 +1509,7 @@ def main() -> None:
     bench.add_argument("--repeat", type=int, default=3)
     bench.add_argument("--warmup", type=int, default=1)
     bench.add_argument("--seed", type=int, default=0)
+    bench.add_argument("--mock", action="store_true")
     bench.add_argument("--json-out", default="data/bench/last.json")
     bench.add_argument("--jsonl-out", default=None)
     bench.set_defaults(func=cmd_bench)

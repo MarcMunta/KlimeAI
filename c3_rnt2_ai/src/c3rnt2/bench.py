@@ -29,6 +29,125 @@ class BenchArgs:
     seed: int
     json_out: Path
     jsonl_out: Path | None = None
+    mock: bool = False
+
+
+def _resolve_stream_topk(settings: dict) -> int | bool:
+    runtime = settings.get("runtime", {}) or {}
+    raw = runtime.get("paged_lm_head_stream_topk")
+    if raw is None or raw is False:
+        return False
+    try:
+        val = int(raw)
+    except Exception:
+        return True
+    return int(val) if val > 0 else False
+
+
+def _normalize_weights(scores: list[float]) -> list[float]:
+    vals = []
+    for item in scores:
+        try:
+            vals.append(max(0.0, float(item)))
+        except Exception:
+            vals.append(0.0)
+    total = float(sum(vals))
+    if total <= 1e-12:
+        return [1.0 / float(len(scores)) for _ in scores]
+    return [float(v) / total for v in vals]
+
+
+def _resolve_mix_mode(settings: dict) -> str:
+    for section in ("experts", "adapters"):
+        cfg = settings.get(section, {}) or {}
+        router_cfg = cfg.get("router", {}) or {}
+        mode = router_cfg.get("mix_mode")
+        if mode:
+            return str(mode).strip().lower()
+    return "single"
+
+
+def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, prompt: str) -> tuple[list[str], float | None, str | None]:
+    """Best-effort: load+activate adapters for HF bench, returning (selected_names, load_ms, active_adapter_name)."""
+    if not bool(getattr(model, "is_hf", False)):
+        return [], None, None
+
+    registry = None
+    router = None
+    for section in ("experts", "adapters"):
+        try:
+            if section == "experts":
+                from .experts.registry import ExpertRegistry as _Registry  # type: ignore
+                from .experts.router import ExpertRouter as _Router  # type: ignore
+            else:
+                from .adapters.registry import AdapterRegistry as _Registry  # type: ignore
+                from .adapters.router import AdapterRouter as _Router  # type: ignore
+            registry = _Registry.from_settings(settings, base_dir=base_dir)
+            if bool(getattr(registry, "enabled", False)):
+                router = _Router.from_settings(settings)
+                break
+        except Exception:
+            registry = None
+            router = None
+            continue
+    if registry is None or router is None:
+        return [], None, None
+
+    decision = router.select(prompt or "", registry.names, top_k=None)
+    selected: list[str] = []
+    if decision.selected_adapters:
+        selected = [str(x).strip() for x in decision.selected_adapters if str(x).strip()]
+    elif decision.selected_adapter:
+        selected = [str(decision.selected_adapter).strip()]
+    selected = [name for name in selected if name]
+    if not selected:
+        return [], None, None
+
+    if not hasattr(model, "add_adapter"):
+        return [], None, getattr(model, "active_adapter_name", None)
+
+    mix_mode = _resolve_mix_mode(settings)
+    start = time.perf_counter()
+    loaded: list[str] = []
+    try:
+        try:
+            setattr(model, "adapter_max_loaded", int(registry.max_loaded))
+        except Exception:
+            pass
+
+        for name in selected:
+            path = registry.get_path(name)
+            if not path:
+                continue
+            if not Path(path).exists():
+                continue
+            try:
+                model.add_adapter(name, path)
+                loaded.append(name)
+            except Exception:
+                continue
+
+        if not loaded:
+            return [], round((time.perf_counter() - start) * 1000.0, 3), getattr(model, "active_adapter_name", None)
+
+        # Activate selection (single or weighted mix).
+        if mix_mode == "weighted" and len(loaded) > 1 and hasattr(model, "set_weighted_adapters"):
+            scores = decision.scores if isinstance(decision.scores, list) and len(decision.scores) == len(loaded) else None
+            weights = _normalize_weights(scores) if scores else [1.0 / float(len(loaded)) for _ in loaded]
+            adapter_weights = {name: float(weight) for name, weight in zip(loaded, weights)}
+            try:
+                _ = bool(model.set_weighted_adapters(adapter_weights))
+            except Exception:
+                pass
+        else:
+            if hasattr(model, "set_adapter"):
+                try:
+                    model.set_adapter(loaded[0])
+                except Exception:
+                    pass
+    finally:
+        elapsed_ms = round((time.perf_counter() - start) * 1000.0, 3)
+    return loaded, float(elapsed_ms), getattr(model, "active_adapter_name", None)
 
 
 def _rss_mb() -> float | None:
@@ -140,9 +259,77 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
 
     core_cfg = settings.get("core", {}) or {}
     backend = str(core_cfg.get("backend", "vortex")).lower()
-    model = load_inference_model(settings)
+    stream_topk = _resolve_stream_topk(settings)
 
     prompt_text = str(args.prompt or "")
+    adapter_load_ms = None
+    active_adapters: list[str] = []
+    adapter_active = None
+
+    if bool(getattr(args, "mock", False)):
+        ctx_len_prompt = len(prompt_text.split()) if prompt_text else 0
+        ctx_len_total = int(ctx_len_prompt + args.max_new)
+        tokens_per_sec_steady = 12.0
+        steady_tokens = int(max(1, int(args.repeat)) * int(args.max_new))
+        steady_total_s = float(steady_tokens) / max(1e-9, float(tokens_per_sec_steady))
+        report: dict[str, Any] = {
+            "ok": True,
+            "ts": time.time(),
+            "profile": str(args.profile),
+            "backend": backend,
+            "seed": int(args.seed),
+            "repeat": int(args.repeat),
+            "warmup": int(args.warmup),
+            "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+            "ctx": int(args.ctx) if args.ctx is not None else None,
+            "ctx_target": int(args.ctx) if args.ctx is not None else None,
+            "ctx_len_prompt": int(ctx_len_prompt),
+            "ctx_len_total": int(ctx_len_total),
+            "max_new": int(args.max_new),
+            "max_new_tokens": int(args.max_new),
+            "tokens_per_sec_warmup": None,
+            "tokens_per_sec_steady": round(float(tokens_per_sec_steady), 6),
+            "tokens_per_sec": round(float(tokens_per_sec_steady), 6),
+            "latency_ms_total": round(float(steady_total_s) * 1000.0, 3),
+            "latency_ms_per_token": round(float(steady_total_s) * 1000.0 / max(1, steady_tokens), 6),
+            "latency_p50_ms": None,
+            "latency_p95_ms": None,
+            "vram_peak_mb": None,
+            "vram_peak_mb_allocated": None,
+            "vram_peak_mb_reserved": None,
+            "ram_rss_mb": round(float(_rss_mb() or 0.0), 3) if _rss_mb() is not None else None,
+            "ram_peak_mb": round(float(_rss_mb() or 0.0), 3) if _rss_mb() is not None else None,
+            "cache_hit_rate": None,
+            "bytes_prefetched": None,
+            "page_faults": None,
+            "page_faults_reason": "mock",
+            "paging": {"before": None, "after": None},
+            "active_adapters": [],
+            "adapter_load_ms": None,
+            "adapter_active": None,
+            "stream_topk": stream_topk,
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+        latest_path = base_dir / "data" / "bench" / "latest.json"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+        if args.jsonl_out is not None:
+            args.jsonl_out.parent.mkdir(parents=True, exist_ok=True)
+            with args.jsonl_out.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(report, ensure_ascii=True) + "\n")
+        return report
+
+    model = load_inference_model(settings)
+    backend_used = backend
+    if bool(getattr(model, "is_hf", False)):
+        backend_used = "hf"
+    elif bool(getattr(model, "is_llama_cpp", False)):
+        backend_used = "llama_cpp"
+    try:
+        active_adapters, adapter_load_ms, adapter_active = _maybe_prepare_hf_adapters(model, settings, base_dir, prompt_text)
+    except Exception:
+        active_adapters, adapter_load_ms, adapter_active = [], None, getattr(model, "active_adapter_name", None)
     ctx_len_prompt = _ctx_len(model, prompt_text)
     if args.ctx and args.ctx > 0:
         candidate = _prompt_for_ctx(model, int(args.ctx))
@@ -210,7 +397,8 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "ok": True,
         "ts": time.time(),
         "profile": str(args.profile),
-        "backend": backend,
+        "backend": backend_used,
+        "stream_topk": stream_topk,
         "seed": int(args.seed),
         "repeat": int(args.repeat),
         "warmup": int(args.warmup),
@@ -233,6 +421,9 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "vram_peak_mb_reserved": round(float(vram_peak_reserved_mb), 3) if vram_peak_reserved_mb is not None else None,
         "ram_rss_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
         "ram_peak_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
+        "active_adapters": list(active_adapters),
+        "adapter_load_ms": round(float(adapter_load_ms), 3) if adapter_load_ms is not None else None,
+        "adapter_active": adapter_active,
         # Paging counters (required keys, null if not applicable).
         "cache_hit_rate": paging_after.get("cache_hit_rate"),
         "bytes_prefetched": paging_after.get("bytes_prefetched"),

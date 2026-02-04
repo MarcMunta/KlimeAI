@@ -57,9 +57,9 @@ def _load_bench_baseline(reg_dir: Path) -> float | None:
         return None
 
 
-def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> float | None:
+def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> tuple[float | None, float | None]:
     if not hasattr(model, "generate") or tokenizer is None:
-        return None
+        return None, None
     prompts = [
         "Explain what a context manager is in Python and give a short example.",
         "In PyTorch, what does torch.no_grad() do and when should you use it?",
@@ -69,6 +69,11 @@ def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> fl
     try:
         device = getattr(model, "device", None)
         total_new = 0
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
         start = time.time()
         with torch.inference_mode():
             for prompt in prompts:
@@ -79,15 +84,21 @@ def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> fl
                     total_new += max(0, int(out_ids.shape[1]) - int(input_ids.shape[1]))
                 except Exception:
                     total_new += int(max_new_tokens)
+        vram_peak = None
         if torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
             except Exception:
                 pass
+            try:
+                vram_peak = float(torch.cuda.max_memory_allocated() / (1024**2))
+            except Exception:
+                vram_peak = None
         elapsed = max(1e-6, time.time() - start)
-        return float(total_new) / elapsed if total_new > 0 else 0.0
+        tps = float(total_new) / elapsed if total_new > 0 else 0.0
+        return tps, vram_peak
     except Exception:
-        return None
+        return None, None
 
 
 class SFTDataset(Dataset):
@@ -730,6 +741,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     max_regress = None
     bench_ok = None
     bench_tps = None
+    bench_vram_peak_mb = None
     baseline_tps = None
     bench_regression = None
     bench_reason = None
@@ -763,14 +775,18 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     if bench_enabled and hasattr(model, "generate"):
         try:
             baseline_tps = _load_bench_baseline(reg_dir)
-            bench_tps = _bench_short(model, tokenizer, max_new_tokens=int(autopilot_cfg.get("bench_max_new_tokens", 64)))
+            bench_tps, bench_vram_peak_mb = _bench_short(
+                model,
+                tokenizer,
+                max_new_tokens=int(autopilot_cfg.get("bench_max_new_tokens", 64)),
+            )
             thresholds = resolve_bench_thresholds(settings)
             if bench_tps is None:
                 bench_ok = None
                 bench_reason = "bench_unavailable"
             else:
                 baseline_metrics = {"tokens_per_sec": baseline_tps} if baseline_tps is not None else None
-                verdict = bench_gate({"tokens_per_sec": bench_tps}, baseline_metrics, thresholds)
+                verdict = bench_gate({"tokens_per_sec": bench_tps, "vram_peak_mb": bench_vram_peak_mb}, baseline_metrics, thresholds)
                 bench_ok = bool(verdict.get("ok", False))
                 bench_regression = verdict.get("regression")
                 bench_reason = verdict.get("reason") or ("ok" if bench_ok else "bench_failed")
@@ -792,12 +808,13 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
             "repeat_ratio": repeat_ratio,
             "max_repeat_ratio": max_repeat,
             "eval_ok": eval_ok,
-            "bench_ok": bench_ok,
-            "bench_tokens_per_sec": bench_tps,
-            "baseline_tokens_per_sec": baseline_tps,
-            "regression": bench_regression,
-            "promote_ok": promote_ok,
-            "error": eval_error,
+                "bench_ok": bench_ok,
+                "bench_tokens_per_sec": bench_tps,
+                "bench_vram_peak_mb": bench_vram_peak_mb,
+                "baseline_tokens_per_sec": baseline_tps,
+                "regression": bench_regression,
+                "promote_ok": promote_ok,
+                "error": eval_error,
         }
         meta.update(
             {
@@ -807,6 +824,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 "eval_ok": eval_ok,
                 "bench_ok": bench_ok,
                 "bench_tokens_per_sec": bench_tps,
+                "bench_vram_peak_mb": bench_vram_peak_mb,
                 "baseline_tokens_per_sec": baseline_tps,
                 "regression": bench_regression,
                 "promote_ok": promote_ok,
@@ -849,6 +867,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                             "eval_ok": eval_ok,
                             "bench_ok": bench_ok,
                             "regression": bench_regression,
+                            "bench_vram_peak_mb": bench_vram_peak_mb,
                             "ts": time.time(),
                         },
                         ensure_ascii=True,
@@ -873,6 +892,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 "bench_enabled": bool(bench_enabled),
                 "require_bench_ok": bool(require_bench_ok),
                 "bench_tokens_per_sec": bench_tps,
+                "bench_vram_peak_mb": bench_vram_peak_mb,
                 "baseline_tokens_per_sec": baseline_tps,
                 "regression": bench_regression,
             },

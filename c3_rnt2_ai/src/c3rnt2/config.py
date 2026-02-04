@@ -184,6 +184,7 @@ def normalize_settings(settings: dict) -> dict:
 
     adapters = normalized.get("adapters", {}) or {}
     adapters.setdefault("enabled", False)
+    adapters.setdefault("allow_empty", False)
     adapters.setdefault("paths", {})
     adapters.setdefault("max_loaded", 0)
     adapters.setdefault("default", None)
@@ -540,7 +541,8 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
 
     if adapters_cfg and bool(adapters_cfg.get("enabled", False)):
         paths = adapters_cfg.get("paths", {}) or {}
-        if not paths:
+        allow_empty = bool(adapters_cfg.get("allow_empty", False))
+        if not paths and not allow_empty:
             errors.append("adapters.paths must not be empty when adapters.enabled is true")
         router_cfg = adapters_cfg.get("router", {}) or {}
         keyword_map = router_cfg.get("keyword_map", {}) or {}
