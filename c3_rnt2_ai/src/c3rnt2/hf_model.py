@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -55,11 +56,13 @@ class HFModel:
         self.base_model = self.model
         self.adapter_path = None
         # Multi-adapter support (PEFT). We serialize adapter switching per request.
-        self.adapters: dict[str, str] = {}
+        self.adapters: dict[str, str | None] = {}
         self.active_adapter_name: str | None = None
         self.adapter_max_loaded: int = 0
         self._adapter_lru: list[str] = []
         self.adapter_lock = threading.Lock()
+        self._weighted_mix_cache: dict[tuple[tuple[str, float], ...], str] = {}
+        self._weighted_mix_lru: list[tuple[tuple[str, float], ...]] = []
 
     def _input_device(self) -> torch.device:
         try:
@@ -330,6 +333,117 @@ class HFModel:
                 self.adapter_path = self.adapters.get(name)
             self._touch_adapter_lru(name)
             return True
+
+    def _weighted_mix_cache_limit(self) -> int:
+        try:
+            limit = int(getattr(self, "adapter_max_loaded", 0) or 0)
+        except Exception:
+            limit = 0
+        if limit <= 0:
+            return 8
+        return max(2, min(16, limit))
+
+    def _touch_weighted_mix_lru(self, key: tuple[tuple[str, float], ...]) -> None:
+        try:
+            self._weighted_mix_lru.remove(key)
+        except ValueError:
+            pass
+        self._weighted_mix_lru.append(key)
+
+    def _evict_weighted_mix_cache(self) -> None:
+        limit = self._weighted_mix_cache_limit()
+        while len(self._weighted_mix_lru) > limit:
+            victim_key = self._weighted_mix_lru.pop(0)
+            victim_name = self._weighted_mix_cache.pop(victim_key, None)
+            if not victim_name:
+                continue
+            if victim_name == getattr(self, "active_adapter_name", None):
+                continue
+            if hasattr(self.model, "delete_adapter"):
+                try:
+                    self.model.delete_adapter(victim_name)
+                except Exception:
+                    pass
+            self.adapters.pop(victim_name, None)
+            try:
+                self._adapter_lru.remove(victim_name)
+            except ValueError:
+                pass
+
+    def set_weighted_adapters(self, adapter_weights: dict[str, float]) -> bool:
+        """Best-effort adapter mixing using PEFT. Falls back to top-1 when unsupported."""
+        if not adapter_weights:
+            return False
+        cleaned: dict[str, float] = {}
+        for raw_name, raw_w in adapter_weights.items():
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            try:
+                w = float(raw_w)
+            except Exception:
+                continue
+            if w <= 0:
+                continue
+            cleaned[name] = cleaned.get(name, 0.0) + w
+        if not cleaned:
+            return False
+        if len(cleaned) == 1:
+            return self.set_adapter(next(iter(cleaned.keys())))
+        total = sum(cleaned.values())
+        if total <= 0:
+            return False
+        normalized = {k: float(v) / float(total) for k, v in cleaned.items()}
+        top1 = max(normalized.items(), key=lambda kv: kv[1])[0]
+
+        if not hasattr(self.model, "add_weighted_adapter") or not hasattr(self.model, "set_adapter"):
+            return self.set_adapter(top1)
+
+        key = tuple(sorted((name, round(float(weight), 4)) for name, weight in normalized.items()))
+        cached = self._weighted_mix_cache.get(key)
+        peft_cfg = getattr(self.model, "peft_config", None)
+        if cached and isinstance(peft_cfg, dict) and cached in peft_cfg:
+            try:
+                self.model.set_adapter(cached)
+                self.active_adapter_name = cached
+                self.adapter_path = None
+                self.adapters.setdefault(cached, None)
+                self._touch_adapter_lru(cached)
+                self._touch_weighted_mix_lru(key)
+                return True
+            except Exception:
+                pass
+
+        digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:10]
+        virtual_name = cached or f"mix_{digest}"
+
+        adapters = [name for name, _w in key]
+        weights = [float(w) for _name, w in key]
+        try:
+            add_fn = getattr(self.model, "add_weighted_adapter")
+            try:
+                add_fn(adapters=adapters, weights=weights, adapter_name=virtual_name, combination_type="linear")
+            except TypeError:
+                try:
+                    add_fn(adapters, weights, adapter_name=virtual_name, combination_type="linear")
+                except TypeError:
+                    try:
+                        add_fn(adapters, weights, virtual_name)
+                    except TypeError:
+                        add_fn(adapters, weights)
+            self.model.set_adapter(virtual_name)
+        except Exception:
+            return self.set_adapter(top1)
+
+        self._weighted_mix_cache[key] = virtual_name
+        self._touch_weighted_mix_lru(key)
+        self._evict_weighted_mix_cache()
+
+        self.adapters.setdefault(virtual_name, None)
+        self.active_adapter_name = virtual_name
+        self.adapter_path = None
+        self._touch_adapter_lru(virtual_name)
+        return True
 
     def _touch_adapter_lru(self, name: str) -> None:
         try:

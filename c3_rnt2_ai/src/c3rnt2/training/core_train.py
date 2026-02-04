@@ -195,7 +195,7 @@ def train_once(settings: dict, base_dir: Path, *, reuse_dataset: bool = False, m
             },
         )
         has_approval = approval_present(quarantine_dir)
-        promote_res = promote_quarantine_run(base_dir, run_id=str(tick.run_id), require_approval=True)
+        promote_res = promote_quarantine_run(base_dir, run_id=str(tick.run_id), require_approval=True, settings=settings)
         promoted = bool(promote_res.promoted)
 
     return CoreTrainResult(

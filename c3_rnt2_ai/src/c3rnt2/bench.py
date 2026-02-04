@@ -232,6 +232,7 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "vram_peak_mb_allocated": round(float(vram_peak_allocated_mb), 3) if vram_peak_allocated_mb is not None else None,
         "vram_peak_mb_reserved": round(float(vram_peak_reserved_mb), 3) if vram_peak_reserved_mb is not None else None,
         "ram_rss_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
+        "ram_peak_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
         # Paging counters (required keys, null if not applicable).
         "cache_hit_rate": paging_after.get("cache_hit_rate"),
         "bytes_prefetched": paging_after.get("bytes_prefetched"),

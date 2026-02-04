@@ -34,7 +34,7 @@ def test_adapter_router_keyword_map_selects_adapter() -> None:
     assert decision2.selected_adapter == "programming"
     assert decision2.reason.startswith("keyword:")
 
-    router3 = AdapterRouter(mode="hybrid", keyword_map={"python": "programming"}, default_adapter="general")
+    router3 = AdapterRouter(mode="hybrid", keyword_map={"python": "programming"}, default_adapter="general", top_k=2)
     decision3 = router3.select("write python code", ["general", "programming"])
     assert decision3.selected_adapter == "programming"
     assert decision3.reason.startswith("keyword:")

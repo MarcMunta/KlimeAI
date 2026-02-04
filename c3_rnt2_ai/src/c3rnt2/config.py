@@ -194,6 +194,8 @@ def normalize_settings(settings: dict) -> dict:
     adapter_router.setdefault("embedding_backend", knowledge.get("embedding_backend", "hash"))
     adapter_router.setdefault("embedding_dim", 128)
     adapter_router.setdefault("embedding_min_score", 0.0)
+    adapter_router.setdefault("top_k", 1)
+    adapter_router.setdefault("mix_mode", "single")
     adapters["router"] = adapter_router
     normalized["adapters"] = adapters
 
@@ -454,6 +456,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     if backend == "hf":
         if not core.get("hf_model"):
             missing.append("core.hf_model")
+    elif backend == "llama_cpp":
+        if not core.get("llama_cpp_model_path"):
+            missing.append("core.llama_cpp_model_path")
     elif backend == "tensorrt":
         if not (core.get("tensorrt_engine_dir") or core.get("tensorrt_engine_path")):
             missing.append("core.tensorrt_engine_dir")
@@ -539,6 +544,15 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
             errors.append("adapters.paths must not be empty when adapters.enabled is true")
         router_cfg = adapters_cfg.get("router", {}) or {}
         keyword_map = router_cfg.get("keyword_map", {}) or {}
+        try:
+            top_k = int(router_cfg.get("top_k", 1) or 1)
+            if top_k <= 0:
+                errors.append("adapters.router.top_k must be >= 1")
+        except Exception:
+            errors.append("adapters.router.top_k must be >= 1")
+        mix_mode = str(router_cfg.get("mix_mode", "single") or "single").lower()
+        if mix_mode not in {"single", "weighted"}:
+            errors.append("adapters.router.mix_mode must be one of single|weighted")
         for _kw, name in keyword_map.items():
             if name and name not in paths:
                 errors.append(f"adapters.router.keyword_map references unknown adapter: {name}")

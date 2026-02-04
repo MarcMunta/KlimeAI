@@ -37,7 +37,73 @@ from .runtime.vram_governor import decide_max_new_tokens
 from .utils.oom import is_oom_error, clear_cuda_cache
 
 
+def _normalize_weights(raw: list[object], *, n: int) -> list[float] | None:
+    if n <= 0:
+        return None
+    weights: list[float] = []
+    for item in raw:
+        try:
+            val = float(item)
+        except Exception:
+            return None
+        if val <= 0:
+            return None
+        weights.append(val)
+    if len(weights) != n:
+        return None
+    total = float(sum(weights))
+    if total <= 0:
+        return None
+    return [float(w) / total for w in weights]
+
+
+def _weights_from_scores(scores: list[float] | None) -> list[float] | None:
+    if not scores:
+        return None
+    vals = []
+    for item in scores:
+        try:
+            vals.append(max(0.0, float(item)))
+        except Exception:
+            vals.append(0.0)
+    total = float(sum(vals))
+    if total <= 1e-12:
+        return [1.0 / float(len(scores)) for _ in scores]
+    return [float(v) / total for v in vals]
+
+
+def _resolve_mix_mode(settings: dict) -> str:
+    for section in ("experts", "adapters"):
+        cfg = settings.get(section, {}) or {}
+        router_cfg = cfg.get("router", {}) or {}
+        mode = router_cfg.get("mix_mode")
+        if mode:
+            return str(mode).strip().lower()
+    return "single"
+
+
 def _select_hf_adapter_for_request(payload: dict, prompt: str, registry: AdapterRegistry, router: AdapterRouter) -> dict:
+    requested_list = payload.get("experts")
+    if requested_list is not None:
+        if not isinstance(requested_list, list) or not requested_list:
+            return {"ok": False, "error": "experts_invalid"}
+        adapters = [str(x).strip() for x in requested_list if str(x).strip()]
+        if not adapters:
+            return {"ok": False, "error": "experts_invalid"}
+        for name in adapters:
+            if name not in registry.paths:
+                return {"ok": False, "error": "adapter_not_found", "adapter": name}
+        weights_raw = payload.get("expert_weights")
+        if weights_raw is None:
+            weights = [1.0 / float(len(adapters)) for _ in adapters]
+        else:
+            if not isinstance(weights_raw, list):
+                return {"ok": False, "error": "expert_weights_invalid"}
+            weights = _normalize_weights(weights_raw, n=len(adapters))
+            if weights is None:
+                return {"ok": False, "error": "expert_weights_invalid"}
+        return {"ok": True, "explicit": True, "adapters": adapters, "weights": weights, "reason": "request_weighted"}
+
     requested = payload.get("expert") if payload.get("expert") is not None else payload.get("adapter")
     if requested is not None:
         name = str(requested).strip()
@@ -45,9 +111,30 @@ def _select_hf_adapter_for_request(payload: dict, prompt: str, registry: Adapter
             return {"ok": False, "error": "adapter_invalid"}
         if name not in registry.paths:
             return {"ok": False, "error": "adapter_not_found", "adapter": name}
-        return {"ok": True, "adapter": name, "reason": "request"}
-    decision = router.select(prompt, registry.names)
-    return {"ok": True, "adapter": decision.selected_adapter, "reason": decision.reason, "score": decision.score}
+        return {"ok": True, "explicit": True, "adapter": name, "reason": "request"}
+
+    top_k_override = payload.get("expert_top_k")
+    top_k = None
+    if top_k_override is not None:
+        try:
+            parsed = int(top_k_override)
+        except Exception:
+            parsed = None
+        if parsed is None or parsed <= 0:
+            return {"ok": False, "error": "expert_top_k_invalid"}
+        top_k = parsed
+
+    decision = router.select(prompt, registry.names, top_k=top_k)
+    if decision.selected_adapters and len(decision.selected_adapters) > 1:
+        return {
+            "ok": True,
+            "explicit": False,
+            "adapters": list(decision.selected_adapters),
+            "scores": list(decision.scores or []),
+            "reason": decision.reason,
+            "score": decision.score,
+        }
+    return {"ok": True, "explicit": False, "adapter": decision.selected_adapter, "reason": decision.reason, "score": decision.score}
 
 
 def _ensure_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | None) -> dict:
@@ -70,6 +157,77 @@ def _ensure_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | 
     except Exception as exc:
         return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": adapter, "path": path}
     return {"ok": True, "adapter": adapter, "loaded": True, "path": path}
+
+
+def _load_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | None) -> dict:
+    if not adapter:
+        return {"ok": True, "adapter": None, "loaded": False}
+    path = registry.get_path(adapter)
+    if not path:
+        return {"ok": False, "error": "adapter_not_found", "adapter": adapter}
+    if not Path(path).exists():
+        return {"ok": False, "error": "adapter_path_missing", "adapter": adapter, "path": path}
+    if not hasattr(model, "add_adapter"):
+        return {"ok": False, "error": "model_no_adapter_support"}
+    try:
+        setattr(model, "adapter_max_loaded", int(registry.max_loaded))
+    except Exception:
+        pass
+    try:
+        model.add_adapter(adapter, path)
+    except Exception as exc:
+        return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": adapter, "path": path}
+    return {"ok": True, "adapter": adapter, "loaded": True, "path": path}
+
+
+def _apply_hf_adapter_selection(model: object, settings: dict, registry: AdapterRegistry, selection: dict) -> dict:
+    """Apply adapter selection to a HFModel inside adapter_lock. Best-effort for non-explicit routing."""
+    explicit = bool(selection.get("explicit", False))
+    mix_mode = _resolve_mix_mode(settings)
+    adapters = selection.get("adapters")
+    weights = selection.get("weights")
+    scores = selection.get("scores")
+    if weights is not None:
+        mix_mode = "weighted"
+
+    if isinstance(adapters, list) and adapters:
+        names = [str(x).strip() for x in adapters if str(x).strip()]
+        if not names:
+            return {"ok": False, "error": "experts_invalid"}
+        if mix_mode == "weighted" and len(names) > 1:
+            for name in names:
+                loaded = _load_hf_adapter(model, registry, name)
+                if not loaded.get("ok", False):
+                    if explicit:
+                        return loaded
+                    return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
+            w = weights if isinstance(weights, list) and len(weights) == len(names) else _weights_from_scores(scores)
+            if w is None or len(w) != len(names):
+                w = [1.0 / float(len(names)) for _ in names]
+            adapter_weights = {name: float(weight) for name, weight in zip(names, w)}
+            if hasattr(model, "set_weighted_adapters"):
+                try:
+                    mixed_ok = bool(model.set_weighted_adapters(adapter_weights))
+                except Exception:
+                    mixed_ok = False
+                if mixed_ok:
+                    return {"ok": True, "adapter": getattr(model, "active_adapter_name", None), "mixed": True}
+            ensured = _ensure_hf_adapter(model, registry, names[0])
+            if not ensured.get("ok", False) and not explicit:
+                return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
+            return {**ensured, "mixed": False, "fallback": True}
+        ensured = _ensure_hf_adapter(model, registry, names[0])
+        if not ensured.get("ok", False) and not explicit:
+            return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
+        return ensured
+
+    adapter = selection.get("adapter")
+    if adapter:
+        ensured = _ensure_hf_adapter(model, registry, str(adapter))
+        if not ensured.get("ok", False) and not explicit:
+            return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
+        return ensured
+    return {"ok": True, "adapter": None, "loaded": False}
 
 
 def _maybe_load_adapter(model: CoreTransformer, settings: dict, base_dir: Path) -> None:
@@ -661,26 +819,34 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         device, dtype = _resolve_device_dtype(selected_model, settings)
         decode_args["max_new_tokens"] = decide_max_new_tokens(decode_args["max_new_tokens"], device, dtype, settings)
 
+        adapter_sel: dict | None = None
         adapter_active: str | None = None
         adapter_reason: str | None = None
-        if (payload.get("adapter") is not None or payload.get("expert") is not None) and not bool(getattr(selected_model, "is_hf", False)):
+        if (
+            payload.get("adapter") is not None
+            or payload.get("expert") is not None
+            or payload.get("experts") is not None
+            or payload.get("expert_weights") is not None
+            or payload.get("expert_top_k") is not None
+        ) and not bool(getattr(selected_model, "is_hf", False)):
             raise HTTPException(status_code=400, detail="adapter_only_supported_for_hf")
         if bool(getattr(selected_model, "is_hf", False)) and bool(adapters_registry.enabled):
             adapter_sel = _select_hf_adapter_for_request(payload, prompt, adapters_registry, adapters_router)
             if not adapter_sel.get("ok", False):
                 raise HTTPException(status_code=400, detail=adapter_sel.get("error", "adapter_error"))
-            adapter_active = adapter_sel.get("adapter")
             adapter_reason = adapter_sel.get("reason")
+            adapter_active = adapter_sel.get("adapter") or (adapter_sel.get("adapters") or [None])[0]
 
         if not stream:
             start = time.time()
             with model_lock.read_lock():
                 adapter_ctx = getattr(selected_model, "adapter_lock", None) or nullcontext()
                 with adapter_ctx:
-                    if adapter_active:
-                        ensured = _ensure_hf_adapter(selected_model, adapters_registry, str(adapter_active))
-                        if not ensured.get("ok", False):
-                            raise HTTPException(status_code=400, detail=ensured.get("error", "adapter_load_failed"))
+                    if adapter_sel is not None:
+                        applied = _apply_hf_adapter_selection(selected_model, settings, adapters_registry, adapter_sel)
+                        if not applied.get("ok", False):
+                            raise HTTPException(status_code=400, detail=applied.get("error", "adapter_load_failed"))
+                        adapter_active = applied.get("adapter")
                     try:
                         if hasattr(selected_model, "generate"):
                             if hasattr(selected_model, "blocks"):
@@ -842,10 +1008,11 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             with model_lock.read_lock():
                 adapter_ctx = getattr(current_model, "adapter_lock", None) or nullcontext()
                 with adapter_ctx:
-                    if current_adapter:
-                        ensured = _ensure_hf_adapter(current_model, adapters_registry, str(current_adapter))
-                        if not ensured.get("ok", False):
-                            raise RuntimeError(str(ensured.get("error", "adapter_load_failed")))
+                    if adapter_sel is not None:
+                        applied = _apply_hf_adapter_selection(current_model, settings, adapters_registry, adapter_sel)
+                        if not applied.get("ok", False):
+                            raise RuntimeError(str(applied.get("error", "adapter_load_failed")))
+                        current_adapter = applied.get("adapter")
                     if hasattr(current_model, "stream_generate"):
                         gen = current_model.stream_generate(prompt, **decode_args)
                     else:
@@ -1187,9 +1354,16 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             request_id = _new_request_id(payload.get("request_id"))
             resp_id = f"chatcmpl-{request_id}"
 
+            adapter_sel: dict | None = None
             adapter_active = None
             adapter_reason = None
-            if (payload.get("adapter") is not None or payload.get("expert") is not None) and not bool(getattr(model, "is_hf", False)):
+            if (
+                payload.get("adapter") is not None
+                or payload.get("expert") is not None
+                or payload.get("experts") is not None
+                or payload.get("expert_weights") is not None
+                or payload.get("expert_top_k") is not None
+            ) and not bool(getattr(model, "is_hf", False)):
                 self.send_response(400)
                 self.end_headers()
                 return
@@ -1199,20 +1373,22 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                     self.send_response(400)
                     self.end_headers()
                     return
-                adapter_active = sel.get("adapter")
+                adapter_sel = sel
                 adapter_reason = sel.get("reason")
+                adapter_active = sel.get("adapter") or (sel.get("adapters") or [None])[0]
 
             if not stream:
                 start = time.time()
                 with model_lock:
                     adapter_ctx = getattr(model, "adapter_lock", None) or nullcontext()
                     with adapter_ctx:
-                        if adapter_active:
-                            ensured = _ensure_hf_adapter(model, adapters_registry, str(adapter_active))
-                            if not ensured.get("ok", False):
+                        if adapter_sel is not None:
+                            applied = _apply_hf_adapter_selection(model, settings, adapters_registry, adapter_sel)
+                            if not applied.get("ok", False):
                                 self.send_response(400)
                                 self.end_headers()
                                 return
+                            adapter_active = applied.get("adapter")
                     try:
                         text = model.generate(
                             prompt,
@@ -1310,10 +1486,11 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             with model_lock:
                 adapter_ctx = getattr(model, "adapter_lock", None) or nullcontext()
                 with adapter_ctx:
-                    if adapter_active:
-                        ensured = _ensure_hf_adapter(model, adapters_registry, str(adapter_active))
-                        if not ensured.get("ok", False):
-                            raise RuntimeError(str(ensured.get("error", "adapter_load_failed")))
+                    if adapter_sel is not None:
+                        applied = _apply_hf_adapter_selection(model, settings, adapters_registry, adapter_sel)
+                        if not applied.get("ok", False):
+                            raise RuntimeError(str(applied.get("error", "adapter_load_failed")))
+                        adapter_active = applied.get("adapter")
                 if hasattr(model, "stream_generate"):
                     for delta in model.stream_generate(prompt, **decode_args):
                         chunk = {

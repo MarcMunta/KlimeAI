@@ -16,5 +16,5 @@ class ExpertRouter(AdapterRouter):
             embedding_backend=router_cfg.get("embedding_backend", knowledge.get("embedding_backend", "hash")),
             embedding_dim=int(router_cfg.get("embedding_dim", 128)),
             embedding_min_score=float(router_cfg.get("embedding_min_score", 0.0)),
+            top_k=int(router_cfg.get("top_k", 1) or 1),
         )
-

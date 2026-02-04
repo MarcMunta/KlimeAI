@@ -56,6 +56,17 @@ def _load_bench_baseline(reg_dir: Path) -> float | None:
         return None
 
 
+def _log_bench_promote(base_dir: Path, payload: dict) -> None:
+    log_dir = base_dir / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "bench_promote.jsonl"
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(payload), ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
 def _bench_short(model: object, tokenizer: object, *, max_new_tokens: int) -> float | None:
     if not hasattr(model, "generate") or tokenizer is None:
         return None
@@ -758,12 +769,16 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     learning_cfg = settings.get("learning", {}) or {}
     require_bench_ok = bool(learning_cfg.get("require_bench_ok", False))
     bench_cfg = settings.get("bench", {}) or {}
+    bench_thresholds = settings.get("bench_thresholds", {}) or {}
     bench_enabled = bool(autopilot_cfg.get("bench_enabled", False) or require_bench_ok)
     if bench_enabled and hasattr(model, "generate"):
         try:
             baseline_tps = _load_bench_baseline(reg_dir)
             bench_tps = _bench_short(model, tokenizer, max_new_tokens=int(autopilot_cfg.get("bench_max_new_tokens", 64)))
-            min_tps = bench_cfg.get("min_tokens_per_sec", autopilot_cfg.get("bench_min_tokens_per_sec", 0.0))
+            min_tps = bench_cfg.get(
+                "min_tokens_per_sec",
+                bench_thresholds.get("min_tokens_per_sec", autopilot_cfg.get("bench_min_tokens_per_sec", 0.0)),
+            )
             try:
                 min_tps = float(min_tps) if min_tps is not None else 0.0
             except Exception:
@@ -777,7 +792,11 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                     except Exception:
                         max_drop = 0.15
                 else:
-                    max_drop = 0.15
+                    mr = bench_thresholds.get("max_regression", autopilot_cfg.get("bench_max_regression", 0.15))
+                    try:
+                        max_drop = float(mr)
+                    except Exception:
+                        max_drop = 0.15
             else:
                 try:
                     max_drop = float(max_drop)
@@ -840,6 +859,21 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         if promote_ok:
             registry = {"current_adapter": str(adapter_dir), "last_run_id": run_id, "ts": time.time()}
             registry_path.write_text(json.dumps(registry, ensure_ascii=True), encoding="utf-8")
+            if isinstance(bench_tps, (int, float)) and float(bench_tps) > 0:
+                try:
+                    (reg_dir / "bench_baseline.json").write_text(
+                        json.dumps(
+                            {
+                                "adapter_path": str(adapter_dir),
+                                "bench_tokens_per_sec": float(bench_tps),
+                                "ts": time.time(),
+                            },
+                            ensure_ascii=True,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
         else:
             candidate_path = reg_dir / "candidates.jsonl"
             with candidate_path.open("a", encoding="utf-8") as handle:
@@ -860,6 +894,27 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 )
     except Exception as exc:
         post_error = str(exc)
+
+    try:
+        _log_bench_promote(
+            base_dir,
+            {
+                "kind": "bench_promote",
+                "backend": "hf_train",
+                "run_id": run_id,
+                "adapter_path": str(adapter_dir) if adapter_dir is not None else None,
+                "bench_enabled": bool(bench_enabled),
+                "require_bench_ok": bool(require_bench_ok),
+                "bench_ok": bench_ok,
+                "bench_tokens_per_sec": bench_tps,
+                "baseline_tokens_per_sec": baseline_tps,
+                "regression": bench_regression,
+                "promote_ok": promote_ok,
+                "ts": time.time(),
+            },
+        )
+    except Exception:
+        pass
 
     ok_train = True
     ok_eval = bool(eval_ok) if eval_enabled else True

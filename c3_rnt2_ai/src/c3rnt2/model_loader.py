@@ -25,6 +25,16 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
             if fb:
                 return load_inference_model(settings, backend_override=fb)
             raise
+    if backend == "llama_cpp":
+        try:
+            from .llama_cpp_backend import load_llama_cpp_model
+
+            return load_llama_cpp_model(settings)
+        except Exception:
+            fb = _fallback_backend(core, backend)
+            if fb:
+                return load_inference_model(settings, backend_override=fb)
+            raise
     if backend == "tensorrt":
         try:
             return load_tensorrt_model(settings)

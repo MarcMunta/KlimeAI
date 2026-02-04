@@ -37,6 +37,7 @@ rag = [
   # Wheels are not consistently available on Windows; code falls back to non-faiss ranking.
   "faiss-cpu>=1.7; platform_system != 'Windows'",
 ]
+llama_cpp = ["llama-cpp-python>=0.2.0"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

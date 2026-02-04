@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import random
+import inspect
 import sys
 import time
 from copy import deepcopy
@@ -387,6 +388,46 @@ def _self_train_mock(settings: dict, base_dir: Path) -> dict[str, Any]:
     }
 
 
+def _llama_cpp_backend_check(settings: dict, base_dir: Path) -> dict[str, Any]:
+    core = settings.get("core", {}) or {}
+    model_path = core.get("llama_cpp_model_path")
+    if not model_path:
+        return {"ok": False, "error": "core.llama_cpp_model_path missing"}
+    path = Path(str(model_path))
+    if not path.is_absolute():
+        path = base_dir / path
+    path = path.resolve()
+    if not path.exists():
+        return {"ok": False, "error": "gguf_missing", "path": str(path)}
+    try:
+        from .llama_cpp_backend import load_llama_cpp_model
+
+        model = load_llama_cpp_model(settings, base_dir=base_dir)
+        text = model.generate(prompt="Hello", max_new_tokens=8, temperature=0.0, top_p=1.0)
+        return {"ok": True, "path": str(path), "sample_len": int(len(text))}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "path": str(path)}
+
+
+def _promotion_gating_wiring_check(base_dir: Path) -> dict[str, Any]:
+    try:
+        from .continuous.promotion import promote_quarantine_run
+
+        sig = inspect.signature(promote_quarantine_run)
+        has_settings = "settings" in sig.parameters
+    except Exception as exc:
+        return {"ok": False, "error": f"promotion_import_failed:{exc}"}
+    log_dir = base_dir / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "bench_promote.jsonl"
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"kind": "doctor_promotion_wiring", "ts": time.time()}, ensure_ascii=True) + "\n")
+    except Exception as exc:
+        return {"ok": False, "error": f"bench_promote_log_unwritable:{exc}", "log_path": str(path)}
+    return {"ok": True, "has_settings_param": bool(has_settings), "log_path": str(path)}
+
+
 def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> dict[str, Any]:
     info = detect_device()
     report: dict[str, Any] = {"deep_ok": True, "ts": time.time()}
@@ -398,6 +439,15 @@ def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> di
     if sys.platform.startswith("win") and not bool(info.cuda_available):
         checks["windows_cuda"]["error"] = "CUDA not available on Windows (install CUDA-enabled torch + drivers)."
         report["deep_ok"] = False
+
+    backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
+    if backend == "llama_cpp":
+        if mock:
+            checks["llama_cpp_backend"] = {"ok": True, "skipped": "mock"}
+        else:
+            checks["llama_cpp_backend"] = _llama_cpp_backend_check(settings, base_dir)
+            if not bool(checks["llama_cpp_backend"].get("ok", False)):
+                report["deep_ok"] = False
 
     try:
         checks["tokenizer_roundtrip"] = _tokenizer_roundtrip_strict(settings, base_dir)
@@ -429,10 +479,18 @@ def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> di
         checks["self_train_mock"] = {"ok": False, "error": str(exc)}
         report["deep_ok"] = False
 
+    try:
+        checks["promotion_gating"] = _promotion_gating_wiring_check(base_dir)
+        if not bool(checks["promotion_gating"].get("ok", False)):
+            report["deep_ok"] = False
+    except Exception as exc:
+        checks["promotion_gating"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
+
     lock_dir = base_dir / "data" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_status = {}
-    for role in ("serve", "train", "self_patch"):
+    for role in ("serve", "train", "self_patch", "gpu"):
         lock_path = lock_dir / f"{role}.lock"
         lock = FileLock(lock_path)
         try:
@@ -466,4 +524,3 @@ def doctor_report(settings: dict, base_dir: Path, deep: bool = False, *, mock: b
     if deep:
         report.update(run_deep_checks(settings, base_dir=base_dir, mock=mock))
     return report
-

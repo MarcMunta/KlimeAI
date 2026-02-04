@@ -36,6 +36,8 @@ def test_serve_self_train_mock_loop(tmp_path: Path, monkeypatch) -> None:
 
     lock_path = tmp_path / "data" / "locks" / "train.lock"
     assert lock_path.exists()
+    gpu_lock_path = tmp_path / "data" / "locks" / "gpu.lock"
+    assert gpu_lock_path.exists()
 
 
 def test_self_train_tick_sets_and_clears_training_active(tmp_path: Path, monkeypatch) -> None:
@@ -69,3 +71,36 @@ def test_self_train_tick_sets_and_clears_training_active(tmp_path: Path, monkeyp
     )
     assert result.get("ok") is True
     assert app.state.training_active is False
+
+
+def test_self_train_tick_skips_when_vram_insufficient(tmp_path: Path, monkeypatch) -> None:
+    from c3rnt2 import __main__ as main_mod
+
+    monkeypatch.setattr(main_mod, "ingest_sources", lambda base_dir, allowlist, settings: 0)
+    monkeypatch.setattr(main_mod, "get_vram_free_mb", lambda: 100.0)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    train_calls: list[int] = []
+
+    def _fake_train(_settings, _base_dir, reuse_dataset=False):
+        train_calls.append(1)
+        return SimpleNamespace(ok=True, ok_eval=True, ok_train=True, eval_ok=True)
+
+    settings = {
+        "core": {"vram_safety_margin_mb": 512, "vram_threshold_mb": 1200},
+        "server": {"block_during_training": True, "train_strategy": "inprocess"},
+        "continuous": {"ingest_web": False, "trigger": {"enabled": False}},
+    }
+    result = main_mod._run_self_train_tick(
+        app,
+        settings,
+        tmp_path,
+        reuse_dataset=False,
+        maintenance_window_s=0.0,
+        reload_fn=None,
+        train_fn=_fake_train,
+    )
+    assert result.get("ok") is True
+    assert result.get("skipped") == "vram_insufficient"
+    assert train_calls == []
+    assert (tmp_path / "data" / "locks" / "gpu.lock").exists()

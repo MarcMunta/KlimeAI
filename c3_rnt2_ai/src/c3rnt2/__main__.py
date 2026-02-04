@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ from .agent.runner import run_agent
 from .runtime.vram_governor import decide_max_new_tokens
 from .autopilot import run_autopilot_loop, run_autopilot_tick, run_autopatch_once
 from .continuous.promotion import promote_quarantine_run
+from .utils.vram import get_vram_free_mb
 
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
@@ -144,6 +146,7 @@ def _run_train_inprocess(
 
 
 def _unload_models_for_train(app: object) -> None:
+    vram_before = get_vram_free_mb()
     state = getattr(app, "state", None)
     if state is None:
         return
@@ -158,6 +161,20 @@ def _unload_models_for_train(app: object) -> None:
     if torch is not None and torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
+        except Exception:
+            pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        clear_cuda_cache()
+    except Exception:
+        pass
+    vram_after = get_vram_free_mb()
+    if vram_before is not None and vram_after is not None:
+        try:
+            print({"vram_free_mb_before_unload": float(vram_before), "vram_free_mb_after_unload": float(vram_after)})
         except Exception:
             pass
 
@@ -310,6 +327,8 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
         # Dry checks only: avoid pulling large HF weights during "doctor".
         if backend == "hf":
             __import__("transformers")
+        elif backend == "llama_cpp":
+            __import__("llama_cpp")
         elif backend == "tensorrt":
             __import__("tensorrt")
         else:
@@ -773,12 +792,21 @@ def _run_self_train_tick(
     train_strategy = str(server_cfg.get("train_strategy", "subprocess")).lower()
     lock_path = base_dir / "data" / "locks" / "train.lock"
     lock = FileLock(lock_path)
-    did_unload = False
     try:
         lock.acquire(blocking=False)
     except LockUnavailable:
         return {"ok": False, "error": "train_lock_unavailable", "new_docs": new_docs}
+    gpu_lock_path = base_dir / "data" / "locks" / "gpu.lock"
+    gpu_lock = FileLock(gpu_lock_path)
     try:
+        gpu_lock.acquire(blocking=False)
+    except LockUnavailable:
+        lock.release()
+        return {"ok": True, "skipped": "gpu_lock_unavailable", "new_docs": new_docs, "stats": stats.__dict__}
+    try:
+        did_unload = False
+        skipped: str | None = None
+        skip_info: dict[str, object] = {}
         state = getattr(app, "state", SimpleNamespace())
         setattr(app, "state", state)
         state.training_active = True
@@ -788,7 +816,18 @@ def _run_self_train_tick(
             if train_strategy in {"unload_reload", "subprocess_unload"}:
                 _unload_models_for_train(app)
                 did_unload = True
-            if train_strategy in {"subprocess", "subprocess_unload"}:
+            core_cfg = settings.get("core", {}) or {}
+            margin_mb = float(core_cfg.get("vram_safety_margin_mb", 0.0) or 0.0)
+            threshold_mb = float(core_cfg.get("train_vram_threshold_mb", core_cfg.get("vram_threshold_mb", 0.0) or 0.0) or 0.0)
+            required_mb = float(margin_mb + threshold_mb)
+            free_mb = get_vram_free_mb()
+            if free_mb is not None and required_mb > 0 and float(free_mb) < required_mb:
+                skipped = "vram_insufficient"
+                skip_info = {"vram_free_mb": float(free_mb), "vram_required_mb": float(required_mb)}
+            if skipped:
+                result = None
+                error = None
+            elif train_strategy in {"subprocess", "subprocess_unload"}:
                 timeout_s = None
                 max_walltime_min = budgets_cfg.get("max_walltime_min")
                 try:
@@ -805,59 +844,64 @@ def _run_self_train_tick(
             error = str(exc)
         else:
             error = None
-    finally:
-        lock.release()
-    reload_error = None
-    if did_unload:
+        reload_error = None
+        if did_unload:
+            try:
+                _reload_models_for_app(app, settings)
+            except Exception as exc:
+                reload_error = f"reload_model_failed: {exc}"
         try:
-            _reload_models_for_app(app, settings)
-        except Exception as exc:
-            reload_error = f"reload_model_failed: {exc}"
-    try:
+            if reload_error:
+                # Keep the server blocked if we failed to restore the model.
+                app.state.training_active = True
+            else:
+                app.state.training_active = False
+            if maintenance_window_s and maintenance_window_s > 0:
+                app.state.maintenance_until = time.time() + float(maintenance_window_s)
+        except Exception:
+            pass
+        if skipped:
+            payload = {"ok": True, "skipped": skipped, "new_docs": new_docs, "stats": stats.__dict__}
+            payload.update(skip_info)
+            return payload
+        if error:
+            message = error
+            if reload_error:
+                message = f"{message}; {reload_error}"
+            return {"ok": False, "error": message, "new_docs": new_docs, "stats": stats.__dict__}
         if reload_error:
-            # Keep the server blocked if we failed to restore the model.
-            app.state.training_active = True
-        else:
-            app.state.training_active = False
-        if maintenance_window_s and maintenance_window_s > 0:
-            app.state.maintenance_until = time.time() + float(maintenance_window_s)
-    except Exception:
-        pass
-    if error:
-        message = error
-        if reload_error:
-            message = f"{message}; {reload_error}"
-        return {"ok": False, "error": message, "new_docs": new_docs, "stats": stats.__dict__}
-    if reload_error:
-        return {"ok": False, "error": reload_error, "new_docs": new_docs, "stats": stats.__dict__}
-    reload_result = None
-    if reload_fn is not None and result and bool(getattr(result, "ok_eval", getattr(result, "eval_ok", getattr(result, "ok", False)))):
+            return {"ok": False, "error": reload_error, "new_docs": new_docs, "stats": stats.__dict__}
+        reload_result = None
+        if reload_fn is not None and result and bool(getattr(result, "ok_eval", getattr(result, "eval_ok", getattr(result, "ok", False)))):
+            try:
+                reload_result = reload_fn(app, base_dir, settings, force=True)
+            except Exception as exc:
+                reload_result = {"ok": False, "error": str(exc)}
+        metrics = {
+            "docs_new": new_docs,
+            "samples_used": getattr(result, "samples", None) if result else None,
+            "steps": getattr(result, "steps", None) if result else None,
+            "loss": getattr(result, "loss", None) if result else None,
+            "tokens_per_sec": getattr(result, "tokens_per_sec", None) if result else None,
+            "vram_peak_mb": getattr(result, "vram_peak_mb", None) if result else None,
+            "eval_ok": getattr(result, "eval_ok", None) if result else None,
+        }
         try:
-            reload_result = reload_fn(app, base_dir, settings, force=True)
-        except Exception as exc:
-            reload_result = {"ok": False, "error": str(exc)}
-    metrics = {
-        "docs_new": new_docs,
-        "samples_used": getattr(result, "samples", None) if result else None,
-        "steps": getattr(result, "steps", None) if result else None,
-        "loss": getattr(result, "loss", None) if result else None,
-        "tokens_per_sec": getattr(result, "tokens_per_sec", None) if result else None,
-        "vram_peak_mb": getattr(result, "vram_peak_mb", None) if result else None,
-        "eval_ok": getattr(result, "eval_ok", None) if result else None,
-    }
-    try:
-        from .continuous.budgets import record_run
+            from .continuous.budgets import record_run
 
-        steps_val = int(getattr(result, "steps", 0) or 0) if result else 0
-        tokens_val = int(getattr(result, "tokens_seen", getattr(result, "tokens", 0)) or 0) if result else 0
-        if steps_val > 0 or tokens_val > 0:
-            record = record_run(base_dir, steps=steps_val, tokens=tokens_val)
-            metrics["budget_recorded"] = bool(record.ok)
-            metrics["budget_state"] = record.state
-    except Exception:
-        pass
-    print({"self_train_metrics": metrics})
-    return {"ok": True, "new_docs": new_docs, "train": result.__dict__ if result else None, "reload": reload_result, "stats": stats.__dict__}
+            steps_val = int(getattr(result, "steps", 0) or 0) if result else 0
+            tokens_val = int(getattr(result, "tokens_seen", getattr(result, "tokens", 0)) or 0) if result else 0
+            if steps_val > 0 or tokens_val > 0:
+                record = record_run(base_dir, steps=steps_val, tokens=tokens_val)
+                metrics["budget_recorded"] = bool(record.ok)
+                metrics["budget_state"] = record.state
+        except Exception:
+            pass
+        print({"self_train_metrics": metrics})
+        return {"ok": True, "new_docs": new_docs, "train": result.__dict__ if result else None, "reload": reload_result, "stats": stats.__dict__}
+    finally:
+        gpu_lock.release()
+        lock.release()
 
 
 def cmd_serve_self_train(args: argparse.Namespace) -> None:
