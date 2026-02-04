@@ -31,6 +31,7 @@ class BenchArgs:
     json_out: Path
     jsonl_out: Path | None = None
     mock: bool = False
+    scenario: str = "default"
 
 
 def _resolve_stream_topk(settings: dict) -> int | bool:
@@ -159,6 +160,29 @@ def _rss_mb() -> float | None:
         return None
 
 
+def _proc_mem_mb() -> dict[str, float | None]:
+    try:
+        proc = psutil.Process()
+        info = proc.memory_info()
+        rss_mb = float(getattr(info, "rss", 0.0) or 0.0) / 1e6
+        vms_mb = float(getattr(info, "vms", 0.0) or 0.0) / 1e6
+        commit_mb = None
+        try:
+            full = proc.memory_full_info()
+            private_bytes = getattr(full, "private", None)
+            uss_bytes = getattr(full, "uss", None)
+            commit_bytes = private_bytes if private_bytes is not None else uss_bytes
+            if commit_bytes is not None:
+                commit_mb = float(commit_bytes) / 1e6
+        except Exception:
+            commit_mb = None
+        if commit_mb is None:
+            commit_mb = vms_mb
+        return {"rss_mb": rss_mb, "vms_mb": vms_mb, "commit_mb": commit_mb}
+    except Exception:
+        return {"rss_mb": None, "vms_mb": None, "commit_mb": None}
+
+
 def _pct_ms(values_s: list[float], pct: float) -> float | None:
     if not values_s:
         return None
@@ -261,6 +285,7 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
     core_cfg = settings.get("core", {}) or {}
     backend = str(core_cfg.get("backend", "vortex")).lower()
     stream_topk = _resolve_stream_topk(settings)
+    scenario = str(getattr(args, "scenario", "") or "default")
     backend_resolved = backend
     quant_mode = None
     offload_enabled = None
@@ -296,6 +321,9 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         tokens_per_sec_steady = 12.0
         steady_tokens = int(max(1, int(args.repeat)) * int(args.max_new))
         steady_total_s = float(steady_tokens) / max(1e-9, float(tokens_per_sec_steady))
+        per_iter_s = float(steady_total_s) / float(max(1, int(args.repeat) or 1))
+        steady_s = [per_iter_s for _ in range(max(1, int(args.repeat) or 1))]
+        mem = _proc_mem_mb()
         report: dict[str, Any] = {
             "ok": True,
             "ts": time.time(),
@@ -304,6 +332,7 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
             "backend_resolved": backend_resolved,
             "quant_mode": quant_mode,
             "offload_enabled": offload_enabled,
+            "scenario": scenario,
             "seed": int(args.seed),
             "repeat": int(args.repeat),
             "warmup": int(args.warmup),
@@ -321,13 +350,16 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
             "decode_tokens_per_sec": round(float(tokens_per_sec_steady), 6),
             "latency_ms_total": round(float(steady_total_s) * 1000.0, 3),
             "latency_ms_per_token": round(float(steady_total_s) * 1000.0 / max(1, steady_tokens), 6),
-            "latency_p50_ms": None,
-            "latency_p95_ms": None,
+            "latency_p50_ms": round(float(_pct_ms(steady_s, 50.0) or 0.0), 3),
+            "latency_p95_ms": round(float(_pct_ms(steady_s, 95.0) or 0.0), 3),
             "vram_peak_mb": None,
             "vram_peak_mb_allocated": None,
             "vram_peak_mb_reserved": None,
-            "ram_rss_mb": round(float(_rss_mb() or 0.0), 3) if _rss_mb() is not None else None,
-            "ram_peak_mb": round(float(_rss_mb() or 0.0), 3) if _rss_mb() is not None else None,
+            "rss_mb": round(float(mem.get("rss_mb") or 0.0), 3) if mem.get("rss_mb") is not None else None,
+            "commit_mb": round(float(mem.get("commit_mb") or 0.0), 3) if mem.get("commit_mb") is not None else None,
+            "ram_rss_mb": round(float(mem.get("rss_mb") or 0.0), 3) if mem.get("rss_mb") is not None else None,
+            "ram_commit_mb": round(float(mem.get("commit_mb") or 0.0), 3) if mem.get("commit_mb") is not None else None,
+            "ram_peak_mb": round(float(mem.get("rss_mb") or 0.0), 3) if mem.get("rss_mb") is not None else None,
             "cache_hit_rate": None,
             "bytes_prefetched": None,
             "page_faults": None,
@@ -446,7 +478,8 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         except Exception:
             vram_peak_reserved_mb = None
 
-    rss_mb = _rss_mb()
+    mem = _proc_mem_mb()
+    rss_mb = mem.get("rss_mb")
 
     prefill_tps = None
     decode_tps = None
@@ -477,6 +510,7 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "backend_resolved": backend_resolved,
         "quant_mode": quant_mode,
         "offload_enabled": offload_enabled,
+        "scenario": scenario,
         "stream_topk": stream_topk,
         "seed": int(args.seed),
         "repeat": int(args.repeat),
@@ -500,7 +534,10 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "vram_peak_mb": round(float(vram_peak_allocated_mb), 3) if vram_peak_allocated_mb is not None else None,
         "vram_peak_mb_allocated": round(float(vram_peak_allocated_mb), 3) if vram_peak_allocated_mb is not None else None,
         "vram_peak_mb_reserved": round(float(vram_peak_reserved_mb), 3) if vram_peak_reserved_mb is not None else None,
+        "rss_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
+        "commit_mb": round(float(mem.get("commit_mb") or 0.0), 3) if mem.get("commit_mb") is not None else None,
         "ram_rss_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
+        "ram_commit_mb": round(float(mem.get("commit_mb") or 0.0), 3) if mem.get("commit_mb") is not None else None,
         "ram_peak_mb": round(float(rss_mb), 3) if rss_mb is not None else None,
         "active_adapters": list(active_adapters),
         "adapter_load_ms": round(float(adapter_load_ms), 3) if adapter_load_ms is not None else None,

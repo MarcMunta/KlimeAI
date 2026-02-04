@@ -247,17 +247,55 @@ def decode(stream: VortexStream, model: VortexTokModel) -> str:
     return data.decode("utf-8", errors="strict")
 
 
-def metrics(stream: VortexStream) -> dict:
+def metrics(stream: VortexStream, model: Optional[VortexTokModel] = None) -> dict:
     tokens = len(stream.tokens)
     esc = sum(1 for t in stream.tokens if t.kind == "ESC")
     macro = sum(1 for t in stream.tokens if t.kind == "MACRO")
-    ratio = stream.total_len / max(1, tokens)
+    subpatch = sum(1 for t in stream.tokens if t.kind == "SUBPATCH")
+    ratio = float(stream.total_len) / max(1, tokens)
+    tokens_per_byte = float(tokens) / max(1.0, float(stream.total_len))
+    escape_rate_pct = (float(esc) / max(1.0, float(tokens))) * 100.0
+    subpatch_rate_pct = (float(subpatch) / max(1.0, float(tokens))) * 100.0
+    fallback_tokens = int(esc + subpatch)
+    fallback_rate_pct = (float(fallback_tokens) / max(1.0, float(tokens))) * 100.0
+
+    macro_len_hist: dict[int, int] | None = None
+    macro_avg_len: float | None = None
+    if model is not None:
+        try:
+            hist: dict[int, int] = {}
+            expanded = 0
+            for tok in stream.tokens:
+                if tok.kind != "MACRO":
+                    continue
+                seq = model.macro_codebook.lookup(int(tok.value))
+                n = int(len(seq))
+                expanded += n
+                hist[n] = int(hist.get(n, 0) or 0) + 1
+            if hist:
+                macro_len_hist = dict(sorted(hist.items(), key=lambda kv: kv[0]))
+                macro_avg_len = float(expanded) / max(1.0, float(sum(hist.values())))
+        except Exception:
+            macro_len_hist = None
+            macro_avg_len = None
+
     return {
         "tokens": tokens,
-        "bytes": stream.total_len,
+        "bytes": int(stream.total_len),
         "bytes_per_token": round(ratio, 4),
-        "escapes_pct": round((esc / max(1, tokens)) * 100.0, 2),
-        "macro_hit_rate": round((macro / max(1, tokens)) * 100.0, 2),
+        "tokens_per_byte": round(tokens_per_byte, 6),
+        "escape_tokens": int(esc),
+        "escape_rate_pct": round(escape_rate_pct, 2),
+        # Backward compatible alias.
+        "escapes_pct": round(escape_rate_pct, 2),
+        "subpatch_tokens": int(subpatch),
+        "subpatch_rate_pct": round(subpatch_rate_pct, 2),
+        "fallback_tokens": int(fallback_tokens),
+        "fallback_rate_pct": round(fallback_rate_pct, 2),
+        "macro_tokens": int(macro),
+        "macro_hit_rate": round((float(macro) / max(1.0, float(tokens))) * 100.0, 2),
+        "macro_avg_len": round(float(macro_avg_len), 3) if macro_avg_len is not None else None,
+        "macro_len_hist": macro_len_hist,
     }
 
 

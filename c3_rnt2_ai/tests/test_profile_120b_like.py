@@ -66,7 +66,13 @@ def test_doctor_deep_mock_profile_120b_like_passes(tmp_path: Path, monkeypatch) 
     assert bench_path.exists()
     payload = json.loads(bench_path.read_text(encoding="utf-8"))
     for key in (
+        "scenario",
         "tokens_per_sec",
+        "prefill_tokens_per_sec",
+        "decode_tokens_per_sec",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "rss_mb",
         "vram_peak_mb",
         "backend",
         "backend_resolved",
@@ -76,6 +82,7 @@ def test_doctor_deep_mock_profile_120b_like_passes(tmp_path: Path, monkeypatch) 
         "adapter_load_ms",
     ):
         assert key in payload
+    assert payload.get("scenario") == "default"
 
 
 def test_gating_blocks_and_logs_reason(tmp_path: Path) -> None:

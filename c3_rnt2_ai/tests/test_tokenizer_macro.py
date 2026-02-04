@@ -11,5 +11,6 @@ def test_macro_trie_roundtrip_and_hit_rate():
     text = "aabb"
     stream = encode(text, model)
     assert decode(stream, model) == text
-    stats = metrics(stream)
+    stats = metrics(stream, model)
     assert stats["macro_hit_rate"] > 0.0
+    assert stats["macro_len_hist"] == {2: 1}

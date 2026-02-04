@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from c3rnt2 import doctor as doctor_mod
 from c3rnt2 import model_loader as loader_mod
+import c3rnt2.bench as bench_mod
 
 
 class _DummyHFModel:
@@ -12,6 +13,27 @@ class _DummyHFModel:
 
     def __init__(self, *, quant_fallback: bool):
         self.quant_fallback = bool(quant_fallback)
+
+
+class _DummyBenchModel:
+    is_hf = True
+    runtime_cfg = {"paged_lm_head": False}
+    lm_head = None
+
+    def encode_prompt(self, text: str):  # type: ignore[no-untyped-def]
+        words = (text or "").split()
+        ids = list(range(len(words)))
+        return ids, len(ids)
+
+    def decode_ids(self, ids: list[int], total_len: int | None = None) -> str:  # type: ignore[no-untyped-def]
+        _ = total_len
+        if not ids:
+            return ""
+        return ("x " * len(ids)).strip()
+
+    def generate(self, _prompt: str, *, max_new_tokens: int):  # type: ignore[no-untyped-def]
+        _ = max_new_tokens
+        return "ok"
 
 
 def _patch_deep_checks_lightweight(monkeypatch) -> None:
@@ -29,6 +51,7 @@ def _patch_deep_checks_lightweight(monkeypatch) -> None:
 def test_doctor_deep_120b_like_fails_when_quant_fallback(tmp_path: Path, monkeypatch) -> None:
     _patch_deep_checks_lightweight(monkeypatch)
     monkeypatch.setattr(loader_mod, "load_inference_model", lambda _settings: _DummyHFModel(quant_fallback=True))
+    monkeypatch.setattr(bench_mod, "load_inference_model", lambda _settings: _DummyBenchModel())
 
     # Baseline is required for 120B-like in real (non-mock) doctor.
     bench_dir = tmp_path / "data" / "bench"
@@ -45,6 +68,7 @@ def test_doctor_deep_120b_like_fails_when_quant_fallback(tmp_path: Path, monkeyp
             "hf_offload_folder": "data/hf_offload",
         },
         "bench_thresholds": {"min_tokens_per_sec": 10.0, "max_regression": 0.15, "max_vram_peak_mb": 15500, "required_ctx": 4096},
+        "bench": {"scenarios": {name: {} for name in ("default", "prefill_long", "decode_long", "multi_turn", "rag_off", "rag_on")}},
         "adapters": {"enabled": True, "allow_empty": True, "max_loaded": 6, "router": {"mode": "hybrid", "top_k": 2, "mix_mode": "weighted"}},
         "experts": {"enabled": True, "max_loaded": 6, "paths": {}, "router": {"mode": "hybrid", "top_k": 2, "mix_mode": "weighted"}},
         "learning": {"require_bench_ok": False},
@@ -60,6 +84,7 @@ def test_doctor_deep_120b_like_fails_when_quant_fallback(tmp_path: Path, monkeyp
 def test_doctor_deep_120b_like_passes_when_quant_active(tmp_path: Path, monkeypatch) -> None:
     _patch_deep_checks_lightweight(monkeypatch)
     monkeypatch.setattr(loader_mod, "load_inference_model", lambda _settings: _DummyHFModel(quant_fallback=False))
+    monkeypatch.setattr(bench_mod, "load_inference_model", lambda _settings: _DummyBenchModel())
 
     bench_dir = tmp_path / "data" / "bench"
     bench_dir.mkdir(parents=True, exist_ok=True)
@@ -75,6 +100,7 @@ def test_doctor_deep_120b_like_passes_when_quant_active(tmp_path: Path, monkeypa
             "hf_offload_folder": "data/hf_offload",
         },
         "bench_thresholds": {"min_tokens_per_sec": 10.0, "max_regression": 0.15, "max_vram_peak_mb": 15500, "required_ctx": 4096},
+        "bench": {"scenarios": {name: {} for name in ("default", "prefill_long", "decode_long", "multi_turn", "rag_off", "rag_on")}},
         "adapters": {"enabled": True, "allow_empty": True, "max_loaded": 6, "router": {"mode": "hybrid", "top_k": 2, "mix_mode": "weighted"}},
         "experts": {"enabled": True, "max_loaded": 6, "paths": {}, "router": {"mode": "hybrid", "top_k": 2, "mix_mode": "weighted"}},
         "learning": {"require_bench_ok": False},

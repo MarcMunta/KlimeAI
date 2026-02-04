@@ -99,8 +99,10 @@ def _tokenizer_roundtrip_strict(settings: dict, base_dir: Path) -> dict[str, Any
     elapsed_ms = (time.perf_counter() - start) * 1000.0
 
     stream = encode("\n\n".join(cases), tok_model)
-    tok_metrics = metrics(stream)
-    tok_metrics["tokens_per_byte"] = round(float(tok_metrics.get("tokens", 0)) / max(1, float(tok_metrics.get("bytes", 1))), 6)
+    tok_metrics = metrics(stream, tok_model)
+    fallback_pct = tok_metrics.get("fallback_rate_pct")
+    if fallback_pct is None:
+        fallback_pct = tok_metrics.get("escapes_pct")
 
     return {
         "ok": not failures,
@@ -108,7 +110,7 @@ def _tokenizer_roundtrip_strict(settings: dict, base_dir: Path) -> dict[str, Any
         "cases": len(cases),
         "failures": failures[:3] if failures else None,
         **tok_metrics,
-        "fallback_pct": tok_metrics.get("escapes_pct"),
+        "fallback_pct": fallback_pct,
     }
 
 
@@ -600,6 +602,60 @@ def _deep_check_120b_like_profile(settings: dict, base_dir: Path, *, mock: bool)
         except Exception:
             errors.append("bench_thresholds_invalid_types")
 
+    bench_cfg = settings.get("bench", {}) or {}
+    scenarios_raw = bench_cfg.get("scenarios")
+    scenarios: dict[str, dict] = {}
+    if isinstance(scenarios_raw, dict):
+        for name, scfg in scenarios_raw.items():
+            if isinstance(scfg, dict):
+                scenarios[str(name)] = dict(scfg)
+    elif isinstance(scenarios_raw, list):
+        for item in scenarios_raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            scfg = dict(item)
+            scfg.pop("name", None)
+            scenarios[str(name)] = scfg
+
+    required_scenarios = ["default", "prefill_long", "decode_long", "multi_turn", "rag_off", "rag_on"]
+    missing_scenarios = [name for name in required_scenarios if name not in scenarios]
+    info["bench_suite"] = {
+        "ok": not missing_scenarios,
+        "scenarios": sorted(list(scenarios.keys())),
+        "required": required_scenarios,
+        "missing": missing_scenarios or None,
+    }
+    if missing_scenarios:
+        errors.append(f"bench_scenarios_missing:{','.join(missing_scenarios)}")
+
+    scenario_thresholds: dict[str, dict[str, Any]] = {}
+    try:
+        raw = thresholds.get("scenarios") if isinstance(thresholds, dict) else None
+    except Exception:
+        raw = None
+    if isinstance(raw, dict):
+        for name, th in raw.items():
+            if isinstance(th, dict):
+                scenario_thresholds[str(name)] = dict(th)
+    info["bench_thresholds_scenarios"] = {"ok": True, "scenarios": sorted(list(scenario_thresholds.keys())) or None}
+
+    def _resolve_thresholds_for_scenario(name: str) -> dict[str, Any]:
+        resolved: dict[str, Any] = {}
+        for key in ("min_tokens_per_sec", "max_regression", "max_vram_peak_mb", "required_ctx"):
+            if thresholds.get(key) is not None:
+                resolved[key] = thresholds.get(key)
+        sc = scenario_thresholds.get(name, {})
+        for key in ("min_tokens_per_sec", "max_regression", "max_vram_peak_mb"):
+            if sc.get(key) is not None:
+                resolved[key] = sc.get(key)
+        for key in ("required_ctx", "max_regression"):
+            if key in sc:
+                resolved[key] = sc.get(key)
+        return resolved
+
     if not mock:
         baseline_path = base_dir / "data" / "bench" / "baseline.json"
         baseline_ok = False
@@ -732,12 +788,30 @@ def _deep_check_120b_like_profile(settings: dict, base_dir: Path, *, mock: bool)
             info["quant_active"] = {"ok": False, "error": "120b_like_requires_quant_backend", "detail": str(exc)}
             errors.append("120b_like_requires_quant_backend")
 
+    def _bench_required_fields(report: dict[str, Any]) -> list[str]:
+        required_keys = [
+            "scenario",
+            "backend",
+            "tokens_per_sec",
+            "prefill_tokens_per_sec",
+            "decode_tokens_per_sec",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "rss_mb",
+            "vram_peak_mb",
+        ]
+        return [key for key in required_keys if key not in report]
+
     if mock:
         try:
             from .bench import BenchArgs, run_bench
-            from .promotion.gating import DEFAULT_BENCH_PROMPT
+            from .promotion.gating import DEFAULT_BENCH_PROMPT, bench_gate
 
-            required_ctx = (thresholds.get("required_ctx") if isinstance(thresholds, dict) else None) or (settings.get("bench", {}) or {}).get("required_ctx")
+            scenario_name = "default" if "default" in scenarios else (next(iter(scenarios.keys())) if scenarios else "default")
+            th = _resolve_thresholds_for_scenario(scenario_name)
+            required_ctx = th.get("required_ctx")
+            if required_ctx is None:
+                required_ctx = (thresholds.get("required_ctx") if isinstance(thresholds, dict) else None) or (settings.get("bench", {}) or {}).get("required_ctx")
             try:
                 ctx = int(required_ctx) if required_ctx is not None else None
             except Exception:
@@ -758,19 +832,140 @@ def _deep_check_120b_like_profile(settings: dict, base_dir: Path, *, mock: bool)
                     json_out=out_path,
                     jsonl_out=None,
                     mock=True,
+                    scenario=scenario_name,
                 ),
+            )
+            missing_fields = _bench_required_fields(bench_report)
+            verdict = bench_gate(
+                bench_report,
+                baseline={"tokens_per_sec": bench_report.get("tokens_per_sec")},
+                thresholds={
+                    "min_tokens_per_sec": th.get("min_tokens_per_sec", thresholds.get("min_tokens_per_sec", 0.0)),
+                    "required_ctx": th.get("required_ctx", thresholds.get("required_ctx")),
+                    "max_vram_peak_mb": th.get("max_vram_peak_mb", thresholds.get("max_vram_peak_mb")),
+                    "max_regression": th.get("max_regression", thresholds.get("max_regression", 0.0)),
+                },
             )
             info["bench_mock"] = {
                 "ok": bool(bench_report.get("ok", False)),
                 "backend": bench_report.get("backend"),
                 "tokens_per_sec": bench_report.get("tokens_per_sec"),
                 "json_out": str(out_path),
+                "scenario": bench_report.get("scenario"),
+                "missing_fields": missing_fields or None,
+                "verdict": verdict,
             }
             if not bool(bench_report.get("ok", False)):
                 errors.append("bench_mock_failed")
+            if missing_fields:
+                errors.append(f"bench_mock_missing_fields:{','.join(missing_fields)}")
+            if not bool(verdict.get("ok", False)):
+                errors.append(f"bench_mock_thresholds_failed:{verdict.get('reason') or 'unknown'}")
         except Exception as exc:
             info["bench_mock"] = {"ok": False, "error": str(exc)}
             errors.append("bench_mock_failed")
+
+    if not mock:
+        try:
+            from .bench import BenchArgs, run_bench
+            from .promotion.gating import DEFAULT_BENCH_PROMPT, bench_gate
+
+            scenario_name = "default" if "default" in scenarios else (next(iter(scenarios.keys())) if scenarios else "default")
+            scfg = scenarios.get(scenario_name, {}) if isinstance(scenarios, dict) else {}
+            th = _resolve_thresholds_for_scenario(scenario_name)
+
+            required_ctx = th.get("required_ctx")
+            if required_ctx is None:
+                required_ctx = thresholds.get("required_ctx") if isinstance(thresholds, dict) else None
+            try:
+                ctx = int(required_ctx) if required_ctx is not None else None
+            except Exception:
+                ctx = None
+
+            max_new = scfg.get("max_new_tokens", scfg.get("max_new", 64))
+            try:
+                max_new_i = int(max_new) if max_new is not None else 64
+            except Exception:
+                max_new_i = 64
+            warmup = scfg.get("warmup", 1)
+            repeat = scfg.get("repeat", 1)
+            seed = scfg.get("seed", 0)
+
+            prompt_text = scfg.get("prompt") if isinstance(scfg, dict) else None
+            if prompt_text is None:
+                prompt_text = DEFAULT_BENCH_PROMPT
+
+            out_path = base_dir / "data" / "bench" / "doctor_120b_like_real.json"
+            backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
+            offline_env = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
+            old_env = {k: os.environ.get(k) for k in offline_env}
+            if backend in {"hf", "transformers"}:
+                for k, v in offline_env.items():
+                    os.environ[k] = v
+            try:
+                bench_report = run_bench(
+                    settings,
+                    base_dir=base_dir,
+                    args=BenchArgs(
+                        profile=profile,
+                        prompt=str(prompt_text),
+                        prompt_file=None,
+                        ctx=ctx,
+                        max_new=max(1, max_new_i),
+                        warmup=max(0, int(warmup) if warmup is not None else 1),
+                        repeat=max(1, int(repeat) if repeat is not None else 1),
+                        seed=int(seed) if seed is not None else 0,
+                        json_out=out_path,
+                        jsonl_out=None,
+                        mock=False,
+                        scenario=scenario_name,
+                    ),
+                )
+            finally:
+                if backend in {"hf", "transformers"}:
+                    for k, prev in old_env.items():
+                        if prev is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = prev
+
+            missing_fields = _bench_required_fields(bench_report)
+            baseline_tps = None
+            try:
+                baseline_tps = float((info.get("bench_baseline") or {}).get("tokens_per_sec"))
+            except Exception:
+                baseline_tps = None
+            verdict = bench_gate(
+                bench_report,
+                baseline={"tokens_per_sec": baseline_tps} if baseline_tps is not None else None,
+                thresholds={
+                    "min_tokens_per_sec": th.get("min_tokens_per_sec", thresholds.get("min_tokens_per_sec", 0.0)),
+                    "required_ctx": th.get("required_ctx", thresholds.get("required_ctx")),
+                    "max_vram_peak_mb": th.get("max_vram_peak_mb", thresholds.get("max_vram_peak_mb")),
+                    "max_regression": th.get("max_regression", thresholds.get("max_regression", 0.0)),
+                },
+            )
+            info["bench_real"] = {
+                "ok": bool(bench_report.get("ok", False)) and bool(verdict.get("ok", False)) and not bool(missing_fields),
+                "scenario": bench_report.get("scenario"),
+                "backend": bench_report.get("backend"),
+                "tokens_per_sec": bench_report.get("tokens_per_sec"),
+                "vram_peak_mb": bench_report.get("vram_peak_mb"),
+                "latency_p95_ms": bench_report.get("latency_p95_ms"),
+                "rss_mb": bench_report.get("rss_mb"),
+                "json_out": str(out_path),
+                "missing_fields": missing_fields or None,
+                "verdict": verdict,
+            }
+            if not bool(bench_report.get("ok", False)):
+                errors.append("bench_real_failed")
+            if missing_fields:
+                errors.append(f"bench_real_missing_fields:{','.join(missing_fields)}")
+            if not bool(verdict.get("ok", False)):
+                errors.append(f"bench_real_thresholds_failed:{verdict.get('reason') or 'unknown'}")
+        except Exception as exc:
+            info["bench_real"] = {"ok": False, "error": str(exc)}
+            errors.append("bench_real_failed")
 
     return {"ok": not errors, "errors": errors or None, "info": info}
 
