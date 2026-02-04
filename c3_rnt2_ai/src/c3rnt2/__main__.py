@@ -479,7 +479,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     if args.deep:
         try:
-            deep_result = run_deep_checks(settings, base_dir=base_dir)
+            deep_result = run_deep_checks(settings, base_dir=base_dir, mock=bool(getattr(args, "mock", False)))
             print({"deep": deep_result})
             if not bool(deep_result.get("deep_ok", False)):
                 sys.exit(1)
@@ -1310,6 +1310,7 @@ def main() -> None:
     doc = sub.add_parser("doctor")
     doc.add_argument("--profile", default=None)
     doc.add_argument("--deep", action="store_true")
+    doc.add_argument("--mock", action="store_true")
     doc.set_defaults(func=cmd_doctor)
 
     chat = sub.add_parser("chat")

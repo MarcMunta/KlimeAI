@@ -188,6 +188,13 @@ profiles:
     core:
       backend: hf
       hf_model: "Qwen/Qwen2.5-7B-Instruct"
+      # Avoid OOM/thrashing on Windows when 4-bit quant (bitsandbytes) isn't available:
+      # keep VRAM under bench.max_vram_peak_mb via CPU offload.
+      hf_device_map: auto
+      hf_max_memory:
+        0: "12GiB"
+        cpu: "48GiB"
+      hf_offload_folder: "data/hf_offload"
       hf_use_safetensors: true
       hf_load_in_4bit: true
       hf_device: cuda

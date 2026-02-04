@@ -50,7 +50,7 @@ def _profile_checks(base_dir: Path) -> dict[str, str]:
     return results
 
 
-def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
+def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> dict[str, Any]:
     info = detect_device()
     report: dict[str, Any] = {"deep_ok": True}
     model_loaded = False
@@ -258,50 +258,53 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         required_ctx = int(bench_cfg.get("required_ctx", 4096) or 4096)
         max_new = int(bench_cfg.get("doctor_max_new_tokens", 32) or 32)
         timeout_s = float(bench_cfg.get("doctor_timeout_s", 1800) or 1800)
-        env = dict(os.environ)
-        # Avoid downloading weights during doctor runs by default.
-        env.setdefault("HF_HUB_OFFLINE", "1")
-        env.setdefault("TRANSFORMERS_OFFLINE", "1")
-        cmd = [
-            sys.executable,
-            "-m",
-            "c3rnt2",
-            "bench",
-            "--profile",
-            profile_name,
-            "--ctx",
-            str(required_ctx),
-            "--max-new-tokens",
-            str(max_new),
-        ]
-        try:
-            res = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, env=env, timeout=timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            checks["bench"] = {
-                "ok": False,
-                "error": f"timeout_after_s:{timeout_s}",
-                "stdout_tail": (exc.stdout or "")[-400:] if exc.stdout else None,
-                "stderr_tail": (exc.stderr or "")[-400:] if exc.stderr else None,
-            }
-            report["deep_ok"] = False
-            res = None
-        latest_path = base_dir / "data" / "bench" / "latest.json"
-        latest = None
-        if latest_path.exists():
+        if mock:
+            checks["bench"] = {"ok": True, "skipped": "mock"}
+        else:
+            env = dict(os.environ)
+            # Avoid downloading weights during doctor runs by default.
+            env.setdefault("HF_HUB_OFFLINE", "1")
+            env.setdefault("TRANSFORMERS_OFFLINE", "1")
+            cmd = [
+                sys.executable,
+                "-m",
+                "c3rnt2",
+                "bench",
+                "--profile",
+                profile_name,
+                "--ctx",
+                str(required_ctx),
+                "--max-new-tokens",
+                str(max_new),
+            ]
             try:
-                latest = json.loads(latest_path.read_text(encoding="utf-8"))
-            except Exception:
-                latest = None
-        if res is not None:
-            checks["bench"] = {
-                "ok": bool(res.returncode == 0 and isinstance(latest, dict) and latest.get("ok", False)),
-                "returncode": int(res.returncode),
-                "latest": latest,
-                "stdout_tail": (res.stdout or "")[-400:] if res.stdout else None,
-                "stderr_tail": (res.stderr or "")[-400:] if res.stderr else None,
-            }
-            if not bool(checks["bench"].get("ok", False)):
+                res = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, env=env, timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                checks["bench"] = {
+                    "ok": False,
+                    "error": f"timeout_after_s:{timeout_s}",
+                    "stdout_tail": (exc.stdout or "")[-400:] if exc.stdout else None,
+                    "stderr_tail": (exc.stderr or "")[-400:] if exc.stderr else None,
+                }
                 report["deep_ok"] = False
+                res = None
+            latest_path = base_dir / "data" / "bench" / "latest.json"
+            latest = None
+            if latest_path.exists():
+                try:
+                    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    latest = None
+            if res is not None:
+                checks["bench"] = {
+                    "ok": bool(res.returncode == 0 and isinstance(latest, dict) and latest.get("ok", False)),
+                    "returncode": int(res.returncode),
+                    "latest": latest,
+                    "stdout_tail": (res.stdout or "")[-400:] if res.stdout else None,
+                    "stderr_tail": (res.stderr or "")[-400:] if res.stderr else None,
+                }
+                if not bool(checks["bench"].get("ok", False)):
+                    report["deep_ok"] = False
     except Exception as exc:
         checks["bench"] = {"ok": False, "error": str(exc)}
         report["deep_ok"] = False

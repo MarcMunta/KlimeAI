@@ -51,7 +51,7 @@ class HFModel:
         if "device_map" not in cfg.load_kwargs:
             self.model.to(cfg.device)
         self.model.eval()
-        self.device = torch.device(cfg.device)
+        self.device = self._input_device()
         self.base_model = self.model
         self.adapter_path = None
         # Multi-adapter support (PEFT). We serialize adapter switching per request.
@@ -61,14 +61,36 @@ class HFModel:
         self._adapter_lru: list[str] = []
         self.adapter_lock = threading.Lock()
 
+    def _input_device(self) -> torch.device:
+        try:
+            emb = getattr(self.model, "get_input_embeddings", None)
+            if callable(emb):
+                weight = emb().weight
+                if getattr(weight, "device", None) is not None and weight.device.type != "meta":
+                    return weight.device
+        except Exception:
+            pass
+        try:
+            device = next(self.model.parameters()).device
+            if device.type != "meta":
+                return device
+        except Exception:
+            return torch.device(str(self.cfg.device))
+
     def _prepare_prompt(self, prompt: str | None, messages: list[dict] | None, system: str | None) -> str:
         if messages is not None:
             return build_chat_prompt(messages, backend="hf", tokenizer=self.tokenizer, default_system=system)
         return prompt or ""
 
-    def _encode(self, prompt: str) -> torch.Tensor:
+    def _encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
         inputs = self.tokenizer(prompt, return_tensors="pt")
-        return inputs["input_ids"].to(self.cfg.device)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
+        device = self._input_device()
+        input_ids = input_ids.to(device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+        return input_ids, attention_mask
 
     def _adjust_max_new_tokens(self, max_new_tokens: int) -> int:
         cfg = getattr(self, "vram_cfg", {}) or {}
@@ -84,7 +106,8 @@ class HFModel:
         return max(1, max_new)
 
     def encode_prompt(self, prompt: str):
-        ids = self._encode(prompt).tolist()[0]
+        input_ids, _ = self._encode(prompt)
+        ids = input_ids.tolist()[0]
         return ids, len(ids)
 
     def decode_ids(self, ids: list[int], total_len: int | None = None) -> str:
@@ -104,20 +127,23 @@ class HFModel:
     ) -> str:
         start = time.time()
         prompt_text = self._prepare_prompt(prompt, messages, system)
-        input_ids = self._encode(prompt_text)
+        input_ids, attention_mask = self._encode(prompt_text)
         do_sample = temperature > 0
         max_new = self._adjust_max_new_tokens(max_new_tokens)
         for attempt in range(2):
             try:
-                output = self.model.generate(
-                    input_ids=input_ids,
-                    max_new_tokens=max_new,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else None,
-                    top_p=top_p if do_sample else None,
-                    repetition_penalty=repetition_penalty if repetition_penalty > 1.0 else None,
-                    no_repeat_ngram_size=no_repeat_ngram if no_repeat_ngram > 0 else None,
-                )
+                kwargs = {
+                    "input_ids": input_ids,
+                    "max_new_tokens": max_new,
+                    "do_sample": do_sample,
+                    "temperature": temperature if do_sample else None,
+                    "top_p": top_p if do_sample else None,
+                    "repetition_penalty": repetition_penalty if repetition_penalty > 1.0 else None,
+                    "no_repeat_ngram_size": no_repeat_ngram if no_repeat_ngram > 0 else None,
+                }
+                if attention_mask is not None:
+                    kwargs["attention_mask"] = attention_mask
+                output = self.model.generate(**kwargs)
                 break
             except RuntimeError as exc:
                 if is_oom_error(exc) and attempt == 0:
@@ -163,7 +189,7 @@ class HFModel:
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"transformers streamer not available: {exc}")
 
-        input_ids = self._encode(prompt_text)
+        input_ids, attention_mask = self._encode(prompt_text)
         do_sample = temperature > 0
         max_new = self._adjust_max_new_tokens(max_new_tokens)
         start = time.time()
@@ -174,16 +200,19 @@ class HFModel:
 
             def _run():
                 try:
-                    self.model.generate(
-                        input_ids=input_ids,
-                        max_new_tokens=max_new,
-                        do_sample=do_sample,
-                        temperature=temperature if do_sample else None,
-                        top_p=top_p if do_sample else None,
-                        repetition_penalty=repetition_penalty if repetition_penalty > 1.0 else None,
-                        no_repeat_ngram_size=no_repeat_ngram if no_repeat_ngram > 0 else None,
-                        streamer=streamer,
-                    )
+                    kwargs = {
+                        "input_ids": input_ids,
+                        "max_new_tokens": max_new,
+                        "do_sample": do_sample,
+                        "temperature": temperature if do_sample else None,
+                        "top_p": top_p if do_sample else None,
+                        "repetition_penalty": repetition_penalty if repetition_penalty > 1.0 else None,
+                        "no_repeat_ngram_size": no_repeat_ngram if no_repeat_ngram > 0 else None,
+                        "streamer": streamer,
+                    }
+                    if attention_mask is not None:
+                        kwargs["attention_mask"] = attention_mask
+                    self.model.generate(**kwargs)
                 except Exception as exc:  # pragma: no cover - captured in error list
                     error.append(exc)
 
@@ -347,6 +376,8 @@ def _build_load_kwargs(
     load_in_8bit: bool,
     attn_impl: str | None,
     max_memory: dict | str | None,
+    device_map: str | dict | None,
+    offload_folder: str | None,
     use_safetensors: bool | None,
 ) -> dict:
     load_kwargs: dict = {"torch_dtype": torch_dtype}
@@ -356,10 +387,20 @@ def _build_load_kwargs(
         load_kwargs["attn_implementation"] = attn_impl
     if max_memory:
         load_kwargs["max_memory"] = max_memory
+    if offload_folder:
+        load_kwargs["offload_folder"] = str(offload_folder)
     if load_in_4bit or load_in_8bit:
         load_kwargs["load_in_4bit"] = load_in_4bit
         load_kwargs["load_in_8bit"] = load_in_8bit
-        load_kwargs["device_map"] = "auto" if device.startswith("cuda") else "cpu"
+    if device_map:
+        load_kwargs["device_map"] = device_map
+    elif (load_in_4bit or load_in_8bit) and device.startswith("cuda"):
+        load_kwargs["device_map"] = "auto"
+    elif max_memory and device.startswith("cuda"):
+        load_kwargs["device_map"] = "auto"
+    if "device_map" in load_kwargs:
+        load_kwargs.setdefault("low_cpu_mem_usage", True)
+        load_kwargs.setdefault("offload_state_dict", True)
     return load_kwargs
 
 
@@ -401,6 +442,13 @@ def load_hf_model(settings: dict) -> HFModel:
     load_in_4bit = bool(core.get("hf_load_in_4bit"))
     load_in_8bit = bool(core.get("hf_load_in_8bit"))
     max_memory = core.get("hf_max_memory")
+    device_map = core.get("hf_device_map")
+    offload_folder = core.get("hf_offload_folder")
+    if isinstance(offload_folder, str) and offload_folder:
+        try:
+            Path(offload_folder).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            offload_folder = None
     use_safetensors = core.get("hf_use_safetensors")
     use_safetensors = bool(use_safetensors) if use_safetensors is not None else None
     quant_requested = bool(load_in_4bit or load_in_8bit)
@@ -413,13 +461,32 @@ def load_hf_model(settings: dict) -> HFModel:
             quant_available = False
 
     attempts: list[HFConfig] = []
+    if device_map or (max_memory and device.startswith("cuda")):
+        attempts.append(
+            HFConfig(
+                model_name=str(model_name),
+                device=device,
+                dtype=torch_dtype,
+                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl, max_memory, device_map, offload_folder, use_safetensors),
+            )
+        )
     if quant_requested and quant_available:
         attempts.append(
             HFConfig(
                 model_name=str(model_name),
                 device=device,
                 dtype=torch_dtype,
-                load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, attn_impl, max_memory, use_safetensors),
+                load_kwargs=_build_load_kwargs(
+                    torch_dtype,
+                    device,
+                    load_in_4bit,
+                    load_in_8bit,
+                    attn_impl,
+                    max_memory,
+                    device_map,
+                    offload_folder,
+                    use_safetensors,
+                ),
             )
         )
         if attn_impl:
@@ -428,7 +495,17 @@ def load_hf_model(settings: dict) -> HFModel:
                     model_name=str(model_name),
                     device=device,
                     dtype=torch_dtype,
-                    load_kwargs=_build_load_kwargs(torch_dtype, device, load_in_4bit, load_in_8bit, None, max_memory, use_safetensors),
+                    load_kwargs=_build_load_kwargs(
+                        torch_dtype,
+                        device,
+                        load_in_4bit,
+                        load_in_8bit,
+                        None,
+                        max_memory,
+                        device_map,
+                        offload_folder,
+                        use_safetensors,
+                    ),
                 )
             )
     # Non-quant fallback
@@ -437,7 +514,7 @@ def load_hf_model(settings: dict) -> HFModel:
             model_name=str(model_name),
             device=device,
             dtype=torch_dtype,
-            load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl, max_memory, use_safetensors),
+            load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, attn_impl, max_memory, device_map, offload_folder, use_safetensors),
         )
     )
     if attn_impl:
@@ -446,7 +523,7 @@ def load_hf_model(settings: dict) -> HFModel:
                 model_name=str(model_name),
                 device=device,
                 dtype=torch_dtype,
-                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, None, max_memory, use_safetensors),
+                load_kwargs=_build_load_kwargs(torch_dtype, device, False, False, None, max_memory, device_map, offload_folder, use_safetensors),
             )
         )
     # CPU fallback
@@ -456,7 +533,7 @@ def load_hf_model(settings: dict) -> HFModel:
                 model_name=str(model_name),
                 device="cpu",
                 dtype=torch.float32,
-                load_kwargs=_build_load_kwargs(torch.float32, "cpu", False, False, None, None, use_safetensors),
+                load_kwargs=_build_load_kwargs(torch.float32, "cpu", False, False, None, None, None, None, use_safetensors),
             )
         )
 

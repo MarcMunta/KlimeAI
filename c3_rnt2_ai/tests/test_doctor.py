@@ -95,3 +95,22 @@ def test_doctor_hf_train_missing_deps_fails_with_actionable_message(tmp_path: Pa
     report = main_mod._run_doctor_checks(settings, tmp_path)
     assert report["ok"] is False
     assert any(str(err).startswith("hf_train_deps_missing:") for err in report["errors"])
+
+
+def test_doctor_deep_mock_skips_bench(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from c3rnt2 import doctor as doctor_mod
+
+    monkeypatch.setattr(doctor_mod, "detect_device", lambda: SimpleNamespace(device="cuda", cuda_available=True, name="gpu", vram_gb=16.0, dtype="bf16"))
+    monkeypatch.setattr(doctor_mod, "_profile_checks", lambda _base_dir: {})
+    monkeypatch.setattr(doctor_mod.subprocess, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("bench should be skipped in mock")))
+
+    settings = {
+        "_profile": "rtx4080_16gb_safe_windows_hf",
+        "core": {"backend": "hf"},
+        "bench": {"required_ctx": 4096},
+    }
+    report = doctor_mod.run_deep_checks(settings, base_dir=tmp_path, mock=True)
+    assert report["deep_ok"] is True
+    assert report["checks"]["bench"]["skipped"] == "mock"

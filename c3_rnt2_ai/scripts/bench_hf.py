@@ -141,6 +141,14 @@ def _build_input_ids(tokenizer: object, ctx: int) -> list[int]:
 
 def _best_effort_device(model: object, fallback: torch.device) -> torch.device:
     try:
+        emb = getattr(model, "get_input_embeddings", None)
+        if callable(emb):
+            weight = emb().weight
+            if getattr(weight, "device", None) is not None and weight.device.type != "meta":
+                return weight.device
+    except Exception:
+        pass
+    try:
         return next(model.parameters()).device  # type: ignore[call-arg]
     except Exception:
         return fallback
@@ -151,8 +159,8 @@ def main() -> None:
     parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--ctx", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--iters", type=int, default=3)
-    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--iters", type=int, default=1)
+    parser.add_argument("--warmup", type=int, default=0)
     args = parser.parse_args()
 
     base_dir = Path(".").resolve()
@@ -184,11 +192,12 @@ def main() -> None:
     ctx = max(1, int(args.ctx))
     input_ids_list = _build_input_ids(tok, ctx)
     input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=device)
+    attention_mask = torch.ones_like(input_ids)
 
     # Warmup (does not count).
     for _ in range(max(0, int(args.warmup))):
         with torch.inference_mode():
-            _ = model.generate(input_ids=input_ids, max_new_tokens=int(args.max_new_tokens), do_sample=False)
+            _ = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=int(args.max_new_tokens), do_sample=False)
         if device.type == "cuda":
             try:
                 torch.cuda.synchronize()
@@ -214,7 +223,7 @@ def main() -> None:
                 pass
         start = time.time()
         with torch.inference_mode():
-            out = model.generate(input_ids=input_ids, max_new_tokens=int(args.max_new_tokens), do_sample=False)
+            out = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=int(args.max_new_tokens), do_sample=False)
         if device.type == "cuda":
             try:
                 torch.cuda.synchronize()

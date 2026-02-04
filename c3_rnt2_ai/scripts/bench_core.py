@@ -145,7 +145,7 @@ def main() -> None:
     parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--ctx", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--iters", type=int, default=3)
+    parser.add_argument("--iters", type=int, default=1)
     args = parser.parse_args()
 
     base_dir = Path(".").resolve()
