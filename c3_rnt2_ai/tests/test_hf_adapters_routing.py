@@ -29,6 +29,16 @@ def test_adapter_router_keyword_map_selects_adapter() -> None:
     assert decision.selected_adapter == "programming"
     assert decision.reason.startswith("keyword:")
 
+    router2 = AdapterRouter(mode="keyword", keyword_map={"python": "programming"}, default_adapter="general")
+    decision2 = router2.select("write python code", ["general", "programming"])
+    assert decision2.selected_adapter == "programming"
+    assert decision2.reason.startswith("keyword:")
+
+    router3 = AdapterRouter(mode="hybrid", keyword_map={"python": "programming"}, default_adapter="general")
+    decision3 = router3.select("write python code", ["general", "programming"])
+    assert decision3.selected_adapter == "programming"
+    assert decision3.reason.startswith("keyword:")
+
 
 def test_select_hf_adapter_for_request_rejects_unknown_adapter() -> None:
     reg = AdapterRegistry(enabled=True, paths={"a": "/tmp/a"}, max_loaded=0, default=None)
@@ -36,6 +46,10 @@ def test_select_hf_adapter_for_request_rejects_unknown_adapter() -> None:
     out = _select_hf_adapter_for_request({"adapter": "missing"}, "prompt", reg, router)
     assert out["ok"] is False
     assert out["error"] == "adapter_not_found"
+
+    out2 = _select_hf_adapter_for_request({"expert": "missing"}, "prompt", reg, router)
+    assert out2["ok"] is False
+    assert out2["error"] == "adapter_not_found"
 
 
 def test_ensure_hf_adapter_calls_model(tmp_path: Path) -> None:
@@ -57,4 +71,3 @@ def test_ensure_hf_adapter_calls_model(tmp_path: Path) -> None:
     out = _ensure_hf_adapter(model, reg, "programming")
     assert out["ok"] is True
     assert ("set", "programming") in model.calls
-

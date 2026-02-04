@@ -60,17 +60,18 @@ class AdapterRouter:
             return RouterDecision(None, reason="no_adapters")
         prompt_l = (prompt or "").lower()
 
-        if self.mode == "keyword_map":
+        if self.mode in {"keyword_map", "keyword", "hybrid"}:
             # Prefer longest matches to reduce accidental collisions.
             for kw, adapter in sorted(self.keyword_map.items(), key=lambda kv: len(kv[0]), reverse=True):
                 if adapter not in adapter_names:
                     continue
                 if kw and kw in prompt_l:
                     return RouterDecision(adapter, reason=f"keyword:{kw}")
-            fallback = self.default_adapter if self.default_adapter in adapter_names else adapter_names[0]
-            return RouterDecision(fallback, reason="default")
+            if self.mode != "hybrid":
+                fallback = self.default_adapter if self.default_adapter in adapter_names else adapter_names[0]
+                return RouterDecision(fallback, reason="default")
 
-        if self.mode == "embedding":
+        if self.mode in {"embedding", "hybrid"}:
             # Embed prompt and per-adapter routing text, then pick highest cosine.
             by_adapter: dict[str, list[str]] = {}
             for kw, adapter in self.keyword_map.items():
@@ -96,4 +97,3 @@ class AdapterRouter:
         # Unknown mode -> safe fallback.
         fallback = self.default_adapter if self.default_adapter in adapter_names else adapter_names[0]
         return RouterDecision(fallback, reason="unknown_mode_default")
-

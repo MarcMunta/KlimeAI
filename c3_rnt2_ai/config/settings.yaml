@@ -187,7 +187,7 @@ profiles:
     base_profile: dev_small
     core:
       backend: hf
-      hf_model: "Qwen/Qwen2.5-8B-Instruct"
+      hf_model: "Qwen/Qwen2.5-7B-Instruct"
       hf_use_safetensors: true
       hf_load_in_4bit: true
       hf_device: cuda
@@ -236,7 +236,7 @@ profiles:
         enabled: true
     hf_train:
       enabled: true
-      model_name: "Qwen/Qwen2.5-8B-Instruct"
+      model_name: "Qwen/Qwen2.5-7B-Instruct"
       registry_dir: data/registry/hf_train
       dataset_path: data/registry/hf_train/sft_samples.jsonl
       state_path: data/registry/hf_train/state.json
@@ -273,7 +273,7 @@ profiles:
     base_profile: qwen8b_train
     core:
       backend: hf
-      hf_model: "Qwen/Qwen2.5-8B-Instruct"
+      hf_model: "Qwen/Qwen2.5-7B-Instruct"
     server:
       train_strategy: unload_reload
       block_during_training: true
@@ -308,6 +308,75 @@ profiles:
     bench_thresholds:
       min_tokens_per_sec: 10.0
       max_regression: 0.15
+
+  rtx4080_16gb_safe_windows_hf:
+    # Windows-safe RTX 4080 16GB (HF). Defaults: safe, offline, fail-closed promotion.
+    base_profile: qwen8b_train
+    core:
+      backend: hf
+      hf_model: "Qwen/Qwen2.5-7B-Instruct"
+    tools:
+      web:
+        enabled: false
+    continuous:
+      ingest_web: false
+    server:
+      train_strategy: subprocess_unload
+      block_during_training: true
+      auto_reload_adapter: true
+      reload_interval_s: 30
+    hf_train:
+      enabled: false
+      max_seq_len: 2048
+      micro_batch_size: 1
+      grad_accum_steps: 8
+      lora_rank: 8
+      eval:
+        enabled: true
+    autopilot:
+      enabled: false
+      autopatch_enabled: false
+    learning:
+      require_eval_ok: true
+      require_bench_ok: true
+    experts:
+      enabled: false
+      max_loaded: 6
+      default: null
+      paths: {}
+      router:
+        mode: hybrid
+        keyword_map: {}
+    bench:
+      required_ctx: 4096
+      max_regression_pct: 15
+      max_vram_peak_mb: 15500
+      min_tokens_per_sec: 0
+
+  rtx4080_16gb_safe_windows_core:
+    # Windows-safe RTX 4080 16GB (core backend).
+    base_profile: rtx4080_16gb_safe_vortex
+    tools:
+      web:
+        enabled: false
+    continuous:
+      ingest_web: false
+    autopilot:
+      enabled: false
+      autopatch_enabled: false
+    experts:
+      enabled: false
+      max_loaded: 6
+      default: null
+      paths: {}
+      router:
+        mode: hybrid
+        keyword_map: {}
+    bench:
+      required_ctx: 4096
+      max_regression_pct: 15
+      max_vram_peak_mb: 15500
+      min_tokens_per_sec: 0
 
   autonomous_4080_hf:
     # Full autonomous (internet + self-train + autopatch) for 4080 16GB.

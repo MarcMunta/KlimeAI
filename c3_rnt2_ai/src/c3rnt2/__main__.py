@@ -320,9 +320,54 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
     except Exception as exc:
         errors.append(f"model_load_failed: {exc}")
 
+    # Windows + CUDA gate for GPU-targeted profiles (e.g. RTX 4080).
+    # Only enforce when the profile/device indicates CUDA is expected.
+    profile_l = str(settings.get("_profile") or "").lower()
+    core = settings.get("core", {}) or {}
+    requested_device = core.get("hf_device", core.get("device"))
+    requested_device_l = str(requested_device or "").lower()
+    wants_cuda = ("rtx4080" in profile_l or "4080" in profile_l) and not (requested_device_l.startswith("cpu") or requested_device_l in {"", "none"})
+    if sys.platform.startswith("win") and wants_cuda:
+        try:
+            import torch  # type: ignore
+
+            if not bool(torch.cuda.is_available()):
+                errors.append(
+                    "cuda_missing: Windows profile expects CUDA but torch.cuda.is_available() is False. "
+                    "Install a CUDA-enabled PyTorch build and NVIDIA drivers, or use WSL2 for training."
+                )
+        except Exception as exc:
+            errors.append(f"cuda_check_failed: {exc}")
+
+    # HF training dependency gate (do not block inference; fail doctor if training is enabled but stack is missing).
+    hf_train = settings.get("hf_train", {}) or {}
+    if bool(hf_train.get("enabled", False)):
+        missing: list[str] = []
+        for mod in ("transformers", "peft", "accelerate"):
+            try:
+                __import__(mod)
+            except Exception:
+                missing.append(mod)
+        quant_requested = bool(
+            hf_train.get("load_in_4bit")
+            or hf_train.get("load_in_8bit")
+            or core.get("hf_load_in_4bit")
+            or core.get("hf_load_in_8bit")
+        )
+        if quant_requested:
+            try:
+                __import__("bitsandbytes")
+            except Exception:
+                missing.append("bitsandbytes")
+        if missing:
+            errors.append(
+                "hf_train_deps_missing: "
+                + ", ".join(sorted(set(missing)))
+                + ". Recommendation: on Windows, use WSL2 for HF training (PEFT/bitsandbytes) or install the missing packages."
+            )
+
     decode_cfg = settings.get("decode", {}) or {}
     requested = int(decode_cfg.get("max_new_tokens", 64))
-    core = settings.get("core", {}) or {}
     device = core.get("hf_device", core.get("device", None))
     dtype = core.get("dtype")
     decided = decide_max_new_tokens(requested, device, dtype, settings)
@@ -436,6 +481,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         try:
             deep_result = run_deep_checks(settings, base_dir=base_dir)
             print({"deep": deep_result})
+            if not bool(deep_result.get("deep_ok", False)):
+                sys.exit(1)
         except Exception as exc:
             print({"deep": {"deep_ok": False, "error": str(exc)}})
             sys.exit(1)
@@ -927,7 +974,7 @@ def cmd_serve_autopilot(args: argparse.Namespace) -> None:
     base_dir = Path(".")
     interval_min = float(args.interval_minutes) if args.interval_minutes is not None else float((settings.get("autopilot", {}) or {}).get("interval_minutes", settings.get("continuous", {}).get("interval_minutes", 30)))
     once = bool(args.once)
-    no_web = bool(args.no_web)
+    no_web = bool(args.no_web) or bool(args.mock)
     force = bool(args.force)
 
     if args.mock:
@@ -1236,27 +1283,24 @@ def cmd_bench(args: argparse.Namespace) -> None:
     profile = args.profile or resolve_profile(None)
     settings = _load_and_validate(profile)
     backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
-    script_name = "bench_hf_generate.py" if backend == "hf" else "bench_generate.py"
+    script_name = "bench_hf.py" if backend == "hf" else "bench_core.py"
     script = Path(__file__).resolve().parents[2] / "scripts" / script_name
     if not script.exists():
-        print({"ok": False, "error": f"{script_name} not found"})
-        return
-    cmd = [sys.executable, str(script), "--profile", profile, "--max-new-tokens", str(args.max_new_tokens)]
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        if backend == "hf":
-            print({"ok": True, "warning": "bench_hf_failed_or_missing_deps", "error": str(exc)})
-            return
-        raise
-    bench_dir = Path(__file__).resolve().parents[2] / "data" / "bench"
-    latest = bench_dir / "latest.json"
-    if latest.exists():
-        try:
-            payload = json.loads(latest.read_text(encoding="utf-8"))
-            _update_bench_baseline(bench_dir, payload)
-        except Exception:
-            pass
+        print(json.dumps({"ok": False, "error": f"{script_name} not found"}, ensure_ascii=True))
+        sys.exit(1)
+    cmd = [
+        sys.executable,
+        str(script),
+        "--profile",
+        profile,
+        "--ctx",
+        str(int(args.ctx)),
+        "--max-new-tokens",
+        str(int(args.max_new_tokens)),
+    ]
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
 
 
 def main() -> None:
@@ -1318,7 +1362,8 @@ def main() -> None:
 
     bench = sub.add_parser("bench")
     bench.add_argument("--profile", default=None)
-    bench.add_argument("--max-new-tokens", type=int, default=512)
+    bench.add_argument("--ctx", type=int, default=4096)
+    bench.add_argument("--max-new-tokens", type=int, default=64)
     bench.set_defaults(func=cmd_bench)
 
     boot = sub.add_parser("bootstrap")

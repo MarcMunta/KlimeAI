@@ -599,6 +599,14 @@ def run_autopilot_tick(
 
     try:
         pause_path = base_dir / "data" / "state" / "PAUSE_AUTOPILOT"
+        pause_env = os.getenv("PAUSE_AUTOPILOT", "").strip().lower() in {"1", "true", "yes"}
+        if pause_env:
+            state = _load_state(base_dir)
+            state["last_tick_ts"] = time.time()
+            _save_state(base_dir, state)
+            steps = {"skipped": "paused", "pause_env": True}
+            _log_event(base_dir, {"ok": True, "steps": steps, "summary": {"paused": True}})
+            return AutopilotResult(ok=True, steps=steps)
         if pause_path.exists():
             state = _load_state(base_dir)
             state["last_tick_ts"] = time.time()
@@ -697,16 +705,19 @@ def run_autopilot_tick(
             steps["train"] = {"ok": True, "skipped": "mock_or_cooldown"}
 
         # eval + promote
+        learning_cfg = settings.get("learning", {}) or {}
+        bench_required = bool(learning_cfg.get("require_bench_ok", False))
+        bench_enabled = bool(autopilot_cfg.get("bench_enabled", False) or bench_required)
         if safe_mode:
             steps["eval_short"] = {"ok": True, "skipped": "safe_mode"}
-            if bool(autopilot_cfg.get("bench_enabled", False)):
+            if bench_enabled:
                 steps["bench"] = {"ok": True, "skipped": "safe_mode"}
             steps["promote"] = {"ok": True, "promoted": False, "skipped": "safe_mode"}
         elif train_result and train_result.get("ok_train") and _cooldown_ok(float(state.get("last_eval_ts", 0.0)), eval_cooldown):
             eval_ok = bool(train_result.get("eval_ok", train_result.get("ok_eval", False)))
             improvement = train_result.get("improvement")
             bench = None
-            if bool(autopilot_cfg.get("bench_enabled", False)):
+            if bench_enabled:
                 bench = {
                     "bench_ok": train_result.get("bench_ok"),
                     "bench_tokens_per_sec": train_result.get("bench_tokens_per_sec"),
@@ -742,7 +753,7 @@ def run_autopilot_tick(
                 _request_reload(base_dir, adapter_path)
         else:
             steps["eval_short"] = {"ok": True, "skipped": "no_train_or_cooldown"}
-            if bool(autopilot_cfg.get("bench_enabled", False)):
+            if bench_enabled:
                 steps["bench"] = {"ok": True, "skipped": "no_train_or_cooldown"}
             steps["promote"] = {"ok": True, "promoted": False, "skipped": "no_eval"}
 

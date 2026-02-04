@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import subprocess
 import sys
 import time
 from copy import deepcopy
@@ -145,6 +147,7 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
     bootstrap_path = base_dir / "data" / "registry" / "bootstrap" / "bootstrap_samples.jsonl"
 
     checks = {
+        "windows_cuda": {"ok": (not sys.platform.startswith("win")) or bool(info.cuda_available)},
         "web_enabled": bool(web_cfg.get("enabled", False)),
         "web_allowlist_ok": bool(web_cfg.get("allow_domains")) if web_cfg.get("enabled") else True,
         "web_content_types_ok": bool(web_cfg.get("allow_content_types")) if web_cfg.get("enabled") else True,
@@ -160,6 +163,38 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         "profiles": _profile_checks(base_dir),
     }
 
+    if sys.platform.startswith("win") and not bool(info.cuda_available):
+        checks["windows_cuda"]["error"] = "CUDA not available on Windows (install CUDA-enabled torch + drivers)."
+        report["deep_ok"] = False
+
+    # HF training stack (QLoRA) gating (Windows-safe).
+    try:
+        backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
+        hf_train_cfg = settings.get("hf_train", {}) or {}
+        if backend == "hf" and bool(hf_train_cfg.get("enabled", False)):
+            quant_requested = bool(hf_train_cfg.get("load_in_4bit", True) or hf_train_cfg.get("load_in_8bit", False))
+            required = ["transformers", "accelerate", "peft"]
+            if quant_requested:
+                required.append("bitsandbytes")
+            deps = check_deps(required)
+            missing = [name for name, status in deps.items() if status != "ok"]
+            checks["hf_train_stack"] = {
+                "ok": not missing,
+                "required": required,
+                "missing": missing or None,
+                "status": deps,
+                "quant_requested": bool(quant_requested),
+            }
+            if missing:
+                checks["hf_train_stack"]["message"] = (
+                    "En Windows, para training QLoRA se recomienda WSL2 o instalar wheels compatibles. "
+                    "Inferencia puede seguir si hay fallback, pero training debe bloquearse."
+                )
+                report["deep_ok"] = False
+    except Exception as exc:
+        checks["hf_train_stack"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
+
     # Tokenizer roundtrip (VORTEX-Tok).
     try:
         from .tokenizer.vortex_tok import load_or_create, encode, decode, metrics  # type: ignore
@@ -174,12 +209,22 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
             "",
             "hello world",
             "ASCII: ~!@#$%^&*()_+-=[]{}|;:',.<>/?",
-            "unicode: ñ é ö 😀 — 東京",
+            "utf8: ñ é ö 😀 — 東京",
             "\tTabs\nNewlines\r\nWindows newlines\n\n",
             "code:\n```py\ndef f(x):\n    return x * (x + 1) // 2\n```\n",
             'json: {"ok": true, "text": "ñ 😀 \\\\ \\\" \\n", "n": 123}',
+            "\x00\x01\t\ncontrol-chars",
             "a" * 4096,
+            ("abc" * 1500) + " END",
         ]
+        rng = random.Random(0)
+        alphabet = (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n\t-_=+()[]{}<>/\\'\".,:;!?"
+            "Ã±Ã©Ã¶ðŸ˜€â€”æ±äº¬"
+        )
+        for _ in range(100):
+            n = rng.randint(0, 200)
+            cases.append("".join(rng.choice(alphabet) for _ in range(n)))
         start = time.time()
         failures: list[dict[str, Any]] = []
         for text in cases:
@@ -194,7 +239,7 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         # Aggregate metrics on a representative sample.
         stream = encode("\n\n".join(cases), tok_model)
         tok_metrics = metrics(stream)
-        checks["tokenizer_roundtrip_check"] = {
+        checks["tokenizer_roundtrip"] = {
             "ok": not failures,
             "elapsed_ms": round(elapsed_ms, 3),
             **tok_metrics,
@@ -203,38 +248,63 @@ def run_deep_checks(settings: dict, base_dir: Path) -> dict[str, Any]:
         if failures:
             report["deep_ok"] = False
     except Exception as exc:
-        checks["tokenizer_roundtrip_check"] = {"ok": False, "error": str(exc)}
+        checks["tokenizer_roundtrip"] = {"ok": False, "error": str(exc)}
         report["deep_ok"] = False
 
-    # Bench regression vs baseline (warning only; does not flip deep_ok).
+    # Bench (ctx, VRAM peak, regression vs baseline).
     try:
-        profile = str(settings.get("_profile") or "")
-        backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
-        bench_thresh = settings.get("bench_thresholds", {}) or {}
-        autopilot = settings.get("autopilot", {}) or {}
-        max_regression = float(bench_thresh.get("max_regression", autopilot.get("bench_max_regression", 0.15)))
-        min_tps = bench_thresh.get("min_tokens_per_sec", autopilot.get("bench_min_tokens_per_sec"))
-        checks["bench_thresholds"] = {"min_tokens_per_sec": min_tps, "max_regression": max_regression}
-        baseline_path = base_dir / "data" / "bench" / "baseline.json"
-        if profile and baseline_path.exists() and tokens_per_sec is not None:
-            baseline = json.loads(baseline_path.read_text(encoding="utf-8")) or {}
-            base_entry = (baseline.get(profile, {}) or {}).get(backend)
-            if isinstance(base_entry, dict):
-                base_tps = float(base_entry.get("tokens_per_sec", 0.0) or 0.0)
-                if base_tps > 0:
-                    regression = max(0.0, (base_tps - float(tokens_per_sec)) / base_tps)
-                    checks["bench_baseline_tps"] = round(base_tps, 3)
-                    checks["bench_regression"] = round(regression, 3)
-                    if regression > max_regression:
-                        checks["bench_regression_warning"] = True
-        if tokens_per_sec is not None and min_tps is not None:
+        profile_name = str(settings.get("_profile") or os.getenv("C3RNT2_PROFILE") or "dev_small").strip()
+        bench_cfg = settings.get("bench", {}) or {}
+        required_ctx = int(bench_cfg.get("required_ctx", 4096) or 4096)
+        max_new = int(bench_cfg.get("doctor_max_new_tokens", 32) or 32)
+        timeout_s = float(bench_cfg.get("doctor_timeout_s", 1800) or 1800)
+        env = dict(os.environ)
+        # Avoid downloading weights during doctor runs by default.
+        env.setdefault("HF_HUB_OFFLINE", "1")
+        env.setdefault("TRANSFORMERS_OFFLINE", "1")
+        cmd = [
+            sys.executable,
+            "-m",
+            "c3rnt2",
+            "bench",
+            "--profile",
+            profile_name,
+            "--ctx",
+            str(required_ctx),
+            "--max-new-tokens",
+            str(max_new),
+        ]
+        try:
+            res = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, env=env, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            checks["bench"] = {
+                "ok": False,
+                "error": f"timeout_after_s:{timeout_s}",
+                "stdout_tail": (exc.stdout or "")[-400:] if exc.stdout else None,
+                "stderr_tail": (exc.stderr or "")[-400:] if exc.stderr else None,
+            }
+            report["deep_ok"] = False
+            res = None
+        latest_path = base_dir / "data" / "bench" / "latest.json"
+        latest = None
+        if latest_path.exists():
             try:
-                if float(tokens_per_sec) < float(min_tps):
-                    checks["bench_min_tps_warning"] = True
+                latest = json.loads(latest_path.read_text(encoding="utf-8"))
             except Exception:
-                pass
-    except Exception:
-        pass
+                latest = None
+        if res is not None:
+            checks["bench"] = {
+                "ok": bool(res.returncode == 0 and isinstance(latest, dict) and latest.get("ok", False)),
+                "returncode": int(res.returncode),
+                "latest": latest,
+                "stdout_tail": (res.stdout or "")[-400:] if res.stdout else None,
+                "stderr_tail": (res.stderr or "")[-400:] if res.stderr else None,
+            }
+            if not bool(checks["bench"].get("ok", False)):
+                report["deep_ok"] = False
+    except Exception as exc:
+        checks["bench"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
 
     if str(runtime.get("gpu_decompress", "none")).lower() == "triton":
         try:

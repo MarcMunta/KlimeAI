@@ -16,11 +16,10 @@ def test_vortex_tok_roundtrip_cases(tmp_path: Path) -> None:
         "",
         "hello world",
         "ASCII: ~!@#$%^&*()_+-=[]{}|;:',.<>/?",
-        "unicode: ñ é ö 😀 — 東京",
+        "utf8: ñ é ö 😀 — 東京",
         "\tTabs\nNewlines\r\nWindows newlines\n\n",
         "code:\n```py\ndef f(x):\n    return x * (x + 1) // 2\n```\n",
         'json: {"ok": true, "text": "ñ 😀 \\\\ \\\" \\n", "n": 123}',
-        "unicode: ñ é ö 😀",
         "\x00\x01\t\ncontrol-chars",
         "a" * 10000,
         ("abc" * 4000) + " END",
@@ -42,3 +41,6 @@ def test_vortex_tok_fuzz_roundtrip(tmp_path: Path) -> None:
         text = "".join(rng.choice(alphabet) for _ in range(n))
         stream = vt.encode(text, model)
         assert vt.decode(stream, model) == text
+
+        ids, total_len = vt.encode_to_ids(text, model)
+        assert vt.decode_from_ids(ids, model, total_len=total_len) == text

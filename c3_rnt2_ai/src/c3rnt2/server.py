@@ -29,6 +29,8 @@ from .continuous.dataset import retrieve_context_details
 from .continuous.registry import load_registry
 from .adapters.registry import AdapterRegistry
 from .adapters.router import AdapterRouter
+from .experts.registry import ExpertRegistry
+from .experts.router import ExpertRouter
 from .episodes import EpisodeIndex
 from .runtime.router import build_features, load_router, log_router_event
 from .runtime.vram_governor import decide_max_new_tokens
@@ -36,7 +38,7 @@ from .utils.oom import is_oom_error, clear_cuda_cache
 
 
 def _select_hf_adapter_for_request(payload: dict, prompt: str, registry: AdapterRegistry, router: AdapterRouter) -> dict:
-    requested = payload.get("adapter")
+    requested = payload.get("expert") if payload.get("expert") is not None else payload.get("adapter")
     if requested is not None:
         name = str(requested).strip()
         if not name:
@@ -595,8 +597,11 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
     model_lock = RWLock()
     episode_lock = threading.Lock()
     episode_index = EpisodeIndex(base_dir / "data" / "episodes" / "index.sqlite")
-    adapters_registry = AdapterRegistry.from_settings(settings, base_dir=base_dir)
-    adapters_router = AdapterRouter.from_settings(settings)
+    adapters_registry = ExpertRegistry.from_settings(settings, base_dir=base_dir)
+    adapters_router = ExpertRouter.from_settings(settings)
+    if not bool(getattr(adapters_registry, "enabled", False)):
+        adapters_registry = AdapterRegistry.from_settings(settings, base_dir=base_dir)
+        adapters_router = AdapterRouter.from_settings(settings)
     app.state.model = model
     app.state.models = models
     app.state.settings = settings
@@ -658,7 +663,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
 
         adapter_active: str | None = None
         adapter_reason: str | None = None
-        if payload.get("adapter") is not None and not bool(getattr(selected_model, "is_hf", False)):
+        if (payload.get("adapter") is not None or payload.get("expert") is not None) and not bool(getattr(selected_model, "is_hf", False)):
             raise HTTPException(status_code=400, detail="adapter_only_supported_for_hf")
         if bool(getattr(selected_model, "is_hf", False)) and bool(adapters_registry.enabled):
             adapter_sel = _select_hf_adapter_for_request(payload, prompt, adapters_registry, adapters_router)
@@ -1033,6 +1038,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 "adapters": adapters,
                 "active_adapters": active_adapters,
                 "adapter_experts": adapters_registry.names if adapters_registry.enabled else [],
+                "experts": adapters_registry.names if adapters_registry.enabled else [],
             }
         )
 
@@ -1065,8 +1071,11 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
     episode_index = EpisodeIndex(base_dir / "data" / "episodes" / "index.sqlite")
     fallback_backend = _resolve_fallback_backend(settings, str(settings.get("core", {}).get("backend", "vortex")).lower())
     fallback_model = None
-    adapters_registry = AdapterRegistry.from_settings(settings, base_dir=base_dir)
-    adapters_router = AdapterRouter.from_settings(settings)
+    adapters_registry = ExpertRegistry.from_settings(settings, base_dir=base_dir)
+    adapters_router = ExpertRouter.from_settings(settings)
+    if not bool(getattr(adapters_registry, "enabled", False)):
+        adapters_registry = AdapterRegistry.from_settings(settings, base_dir=base_dir)
+        adapters_router = AdapterRouter.from_settings(settings)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):  # noqa: N802
@@ -1088,6 +1097,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                     "adapters": adapters,
                     "active_adapters": active_adapters,
                     "adapter_experts": adapters_registry.names if adapters_registry.enabled else [],
+                    "experts": adapters_registry.names if adapters_registry.enabled else [],
                 }
             ).encode("utf-8")
             self.send_response(200)
@@ -1179,7 +1189,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
 
             adapter_active = None
             adapter_reason = None
-            if payload.get("adapter") is not None and not bool(getattr(model, "is_hf", False)):
+            if (payload.get("adapter") is not None or payload.get("expert") is not None) and not bool(getattr(model, "is_hf", False)):
                 self.send_response(400)
                 self.end_headers()
                 return

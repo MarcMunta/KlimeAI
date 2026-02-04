@@ -15,7 +15,7 @@ def test_bootstrap_dataset_format(tmp_path: Path) -> None:
     dataset_path = tmp_path / "data" / "registry" / "bootstrap" / "bootstrap_samples.jsonl"
     sample = Sample(prompt="Hi", response="Hello")
     meta = {
-        "teacher": "Qwen/Qwen2.5-8B-Instruct",
+        "teacher": "Qwen/Qwen2.5-7B-Instruct",
         "quant": "4bit",
         "seed": 123,
         "profile": "qwen8b_base",
@@ -27,7 +27,7 @@ def test_bootstrap_dataset_format(tmp_path: Path) -> None:
     payload = json.loads(dataset_path.read_text(encoding="utf-8").splitlines()[0])
     assert payload["messages"][0]["role"] == "system"
     assert payload["prompt_hash"] == _hash_messages(payload["messages"])
-    assert payload["teacher"] == "Qwen/Qwen2.5-8B-Instruct"
+    assert payload["teacher"] == "Qwen/Qwen2.5-7B-Instruct"
     assert payload["quant"] == "4bit"
     assert payload["seed"] == 123
     assert payload["profile"] == "qwen8b_base"

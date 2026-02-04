@@ -36,7 +36,7 @@ def test_bootstrap_teacher_missing_transformers(tmp_path: Path, monkeypatch) -> 
     result = run_bootstrap(
         settings=settings,
         base_dir=tmp_path,
-        teacher="Qwen/Qwen2.5-8B-Instruct",
+        teacher="Qwen/Qwen2.5-7B-Instruct",
         max_prompts=2,
         max_new_tokens=8,
         steps=1,
