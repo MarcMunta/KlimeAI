@@ -277,6 +277,31 @@ profiles:
         web: 0.8
         logs: 0.8
 
+  qwen8b_chat_qlora:
+    # QLoRA chat finetune on external chat datasets (RTX 4080 16GB).
+    base_profile: qwen8b_train
+    core:
+      backend: hf
+      hf_model: "Qwen/Qwen2.5-7B-Instruct"
+    hf_train:
+      enabled: true
+      dataset_path: data/registry/hf_train/sft_samples.jsonl
+      max_samples: 20000
+      max_seq_len: 1024
+      micro_batch_size: 1
+      grad_accum_steps: 8
+      max_steps: 400
+      lr: 2.0e-4
+      load_in_4bit: true
+      quant_type: nf4
+      double_quant: true
+      compute_dtype: bf16
+      gradient_checkpointing: true
+      lora_rank: 8
+      lora_alpha: 16
+      lora_dropout: 0.05
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
   safe_selftrain_4080_hf:
     # HF Qwen-8B self-train (safe defaults for 16GB)
     base_profile: qwen8b_train
