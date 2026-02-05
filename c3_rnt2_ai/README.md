@@ -50,6 +50,7 @@ pip install -e .[api]
 El servidor expone un contrato estilo OpenAI:
 - `GET /healthz`, `GET /readyz`
 - `GET /v1/models`
+- `GET /v1/skills`, `POST /v1/skills/stage`, `POST /v1/skills/approve` (gestión de Agent Skills)
 - `POST /v1/chat/completions` (no-stream + streaming SSE con `data: ...` y `data: [DONE]`)
 - `GET /metrics`
 - `GET|POST /doctor`, `GET /doctor/deep`
@@ -58,14 +59,42 @@ Arranque (ejemplo):
 ```bash
 # opcional: auth dev (si se define, exige Authorization: Bearer ...)
 export VORTEX_API_TOKEN=devtoken
+# compat:
+export KLIMEAI_API_TOKEN=devtoken
 
 vortex serve --host 0.0.0.0 --port 8000
+# compat: klimeai serve --host 0.0.0.0 --port 8000
 ```
 
 Smoke test:
 ```bash
-pytest -q tests/test_openai_api_smoke.py
+pytest -q
 python scripts/smoke_api.py --base-url http://localhost:8000
+klimeai skills validate --all
+klimeai doctor --deep --mock
+```
+
+## Agent Skills (Skill Store)
+
+El backend soporta skills **prompt-only** (YAML + Markdown) que se inyectan como mensaje `system` en `POST /v1/chat/completions` cuando están habilitadas.
+
+Store local:
+- `skills/vortex-core/` (pack incluido)
+- `skills/_staging/` (descargas sin aprobar; ignorado por git)
+- `skills/_proposals/` (propuestas; ignorado por git)
+
+Config (env):
+- `KLIMEAI_SKILLS_ENABLED=1` (default: 0)
+- `KLIMEAI_SKILLS_MAX_K=3`
+- `KLIMEAI_SKILLS_TOKEN_BUDGET=600`
+- `KLIMEAI_SKILLS_STRICT=1` (default: 1)
+
+CLI:
+```bash
+klimeai skills list
+klimeai skills validate --all
+klimeai skills stage owner/repo
+klimeai skills approve <staged_id> --namespace community
 ```
 
 Para HF + entrenamiento QLoRA:

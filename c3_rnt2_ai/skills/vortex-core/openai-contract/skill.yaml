@@ -1,0 +1,16 @@
+id: openai-contract
+name: OpenAI-Compatible Contract
+version: 1.0.0
+tags: ["api", "openai", "sse", "compat"]
+triggers:
+  keywords: ["openai", "/v1", "models", "chat/completions", "sse", "stream", "streaming", "contract"]
+  regex: ["/v1/chat/completions", "data: \\[DONE\\]"]
+token_budget: 260
+priority: 70
+safety:
+  network: false
+  filesystem_write: false
+  shell: false
+requires_approval: false
+source: local:vortex-core
+

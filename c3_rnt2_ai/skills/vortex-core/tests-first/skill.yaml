@@ -1,0 +1,16 @@
+id: tests-first
+name: Validation First
+version: 1.0.0
+tags: ["testing", "quality"]
+triggers:
+  keywords: ["pytest", "tests", "test", "smoke", "failing", "regression", "ci"]
+  regex: ["\\bpytest\\b", "\\bnpm run test\\b"]
+token_budget: 220
+priority: 60
+safety:
+  network: false
+  filesystem_write: false
+  shell: false
+requires_approval: false
+source: local:vortex-core
+

@@ -7,3 +7,11 @@ data/
 *.pyc
 *.pyo
 *.pyd
+
+# Skills store runtime state / untrusted staging
+c3_rnt2_ai/skills/.state.json
+c3_rnt2_ai/skills/.index.json
+c3_rnt2_ai/skills/_staging/*
+!c3_rnt2_ai/skills/_staging/.gitkeep
+c3_rnt2_ai/skills/_proposals/*
+!c3_rnt2_ai/skills/_proposals/.gitkeep

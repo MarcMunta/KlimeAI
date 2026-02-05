@@ -24,8 +24,12 @@ pip install -e .[api]
 # opcional (AUTH dev)
 # Windows (PowerShell): $env:VORTEX_API_TOKEN=\"devtoken\"
 # Linux/macOS: export VORTEX_API_TOKEN=devtoken
+# compat:
+# Windows (PowerShell): $env:KLIMEAI_API_TOKEN=\"devtoken\"
+# Linux/macOS: export KLIMEAI_API_TOKEN=devtoken
 
 vortex serve --host 0.0.0.0 --port 8000
+# compat: klimeai serve --host 0.0.0.0 --port 8000
 ```
 
 Validación rápida:
@@ -48,14 +52,17 @@ curl -N -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: appl
 Smoke test:
 
 ```bash
-pytest -q tests/test_openai_api_smoke.py
+pytest -q
 python scripts/smoke_api.py --base-url http://localhost:8000
+klimeai skills validate --all
+klimeai doctor --deep --mock
 ```
 
 Endpoints soportados:
 - `GET /healthz`
 - `GET /readyz`
 - `GET /v1/models`
+- `GET /v1/skills`, `POST /v1/skills/stage`, `POST /v1/skills/approve`
 - `POST /v1/chat/completions` (stream + no-stream)
 - `GET /metrics`
 - `GET|POST /doctor`, `GET /doctor/deep`

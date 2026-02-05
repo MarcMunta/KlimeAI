@@ -44,6 +44,7 @@ llama_cpp = ["llama-cpp-python>=0.2.0"]
 
 [project.scripts]
 vortex = "c3rnt2.__main__:main"
+klimeai = "c3rnt2.__main__:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"

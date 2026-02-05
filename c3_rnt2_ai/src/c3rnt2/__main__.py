@@ -40,6 +40,7 @@ from .runtime.vram_governor import decide_max_new_tokens
 from .autopilot import run_autopilot_loop, run_autopilot_tick, run_autopatch_once
 from .continuous.promotion import promote_quarantine_run
 from .utils.vram import get_vram_free_mb
+from .skills.cli import register_skills_cli
 
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
@@ -1745,7 +1746,8 @@ def cmd_prepare_model(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="vortex")
+    prog = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else "vortex"
+    parser = argparse.ArgumentParser(prog=prog)
     sub = parser.add_subparsers(dest="command")
 
     doc = sub.add_parser("doctor")
@@ -1765,9 +1767,9 @@ def main() -> None:
     chat.add_argument("--top-p", type=float, default=None)
     chat.set_defaults(func=cmd_chat)
 
-    default_host = os.getenv("VORTEX_API_HOST") or os.getenv("C3RNT2_API_HOST") or "0.0.0.0"
+    default_host = os.getenv("KLIMEAI_API_HOST") or os.getenv("VORTEX_API_HOST") or os.getenv("C3RNT2_API_HOST") or "0.0.0.0"
     try:
-        default_port = int(os.getenv("VORTEX_API_PORT") or os.getenv("C3RNT2_API_PORT") or 8000)
+        default_port = int(os.getenv("KLIMEAI_API_PORT") or os.getenv("VORTEX_API_PORT") or os.getenv("C3RNT2_API_PORT") or 8000)
     except Exception:
         default_port = 8000
 
@@ -1970,12 +1972,17 @@ def main() -> None:
     promo.add_argument("--no-approval", action="store_true")
     promo.set_defaults(func=cmd_promote_quarantine)
 
+    skills = register_skills_cli(sub)
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
     if args.command == "learn" and not getattr(args, "learn_command", None):
         learn.print_help()
+        sys.exit(1)
+    if args.command == "skills" and not getattr(args, "skills_command", None):
+        skills.print_help()
         sys.exit(1)
     args.func(args)
 

@@ -59,7 +59,7 @@ def _openai_error(
 
 
 def _resolve_api_token(settings: dict) -> str | None:
-    raw = os.getenv("VORTEX_API_TOKEN") or os.getenv("C3RNT2_API_TOKEN")
+    raw = os.getenv("KLIMEAI_API_TOKEN") or os.getenv("VORTEX_API_TOKEN") or os.getenv("C3RNT2_API_TOKEN")
     if raw is None:
         raw = (settings.get("server", {}) or {}).get("api_token")
     token = str(raw or "").strip()
@@ -67,7 +67,7 @@ def _resolve_api_token(settings: dict) -> str | None:
 
 
 def _resolve_cors_origins(settings: dict) -> list[str]:
-    raw = os.getenv("VORTEX_CORS_ORIGINS") or os.getenv("C3RNT2_CORS_ORIGINS")
+    raw = os.getenv("KLIMEAI_CORS_ORIGINS") or os.getenv("VORTEX_CORS_ORIGINS") or os.getenv("C3RNT2_CORS_ORIGINS")
     if raw is None:
         raw = (settings.get("server", {}) or {}).get("cors_origins")
     if raw is None:
@@ -1195,6 +1195,41 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
     app.state.metrics = _MetricsState()
     app.state.api_token = _resolve_api_token(settings)
     app.state.cors_origins = _resolve_cors_origins(settings)
+    try:
+        from .skills.installer import approve as _skills_approve
+        from .skills.installer import stage as _skills_stage
+        from .skills.metrics import SkillsMetrics
+        from .skills.render import render_skills_system_message
+        from .skills.router import SkillsRouter
+        from .skills.store import SkillStore, SkillsConfig
+    except Exception:  # pragma: no cover
+        _skills_approve = None  # type: ignore[assignment]
+        _skills_stage = None  # type: ignore[assignment]
+        SkillsMetrics = None  # type: ignore[misc,assignment]
+        render_skills_system_message = None  # type: ignore[misc,assignment]
+        SkillsRouter = None  # type: ignore[misc,assignment]
+        SkillStore = None  # type: ignore[misc,assignment]
+        SkillsConfig = None  # type: ignore[misc,assignment]
+
+    skills_store = None
+    skills_router = None
+    skills_cfg = None
+    skills_metrics = None
+    if SkillStore is not None and SkillsRouter is not None and SkillsConfig is not None and SkillsMetrics is not None:
+        skills_cfg = SkillsConfig.from_env()
+        skills_store = SkillStore(base_dir / "skills")
+        skills_store.refresh()
+        skills_router = SkillsRouter(skills_store)
+        skills_metrics = SkillsMetrics()
+        try:
+            records = skills_store.list()
+            skills_metrics.set_inventory(installed_total=len(records), enabled_total=sum(1 for r in records if r.enabled))
+        except Exception:
+            pass
+    app.state.skills_store = skills_store
+    app.state.skills_router = skills_router
+    app.state.skills_config = skills_cfg
+    app.state.skills_metrics = skills_metrics
 
     cors_origins = list(getattr(app.state, "cors_origins", []) or [])
     if cors_origins:
@@ -1302,7 +1337,67 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
     @app.get("/metrics")
     async def metrics():
         text = getattr(app.state, "metrics", _MetricsState()).render_prometheus()
+        sm = getattr(app.state, "skills_metrics", None)
+        if sm is not None and hasattr(sm, "render_prometheus"):
+            try:
+                text += sm.render_prometheus()
+            except Exception:
+                pass
         return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
+
+    @app.get("/v1/skills")
+    async def list_skills():
+        store = getattr(app.state, "skills_store", None)
+        if store is None:
+            return JSONResponse(content={"object": "list", "data": []})
+        try:
+            store.refresh()
+            data = [rec.to_public_dict(include_prompt=False) for rec in store.list()]
+        except Exception:
+            data = []
+        return JSONResponse(content={"object": "list", "data": data})
+
+    @app.post("/v1/skills/stage")
+    async def stage_skills(request: StarletteRequest):
+        if _skills_stage is None:
+            raise HTTPException(status_code=501, detail=_openai_error("skills_stage_not_available", type="server_error", code="not_implemented"))
+        payload = await request.json()
+        source = str((payload or {}).get("source") or "").strip()
+        ref = (payload or {}).get("ref")
+        subdir = (payload or {}).get("subdir")
+        cfg = getattr(app.state, "skills_config", None)
+        strict = bool(getattr(cfg, "strict", True))
+        try:
+            result = _skills_stage(base_dir / "skills", source, ref=str(ref).strip() if ref else None, subdir=str(subdir).strip() if subdir else None, strict=strict)
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        if not bool(getattr(result, "ok", False)):
+            return JSONResponse(status_code=400, content={"ok": False, "errors": getattr(result, "errors", None) or ["stage_failed"]})
+        return JSONResponse(content={"ok": True, "staged_id": result.staged_id, "found": result.found})
+
+    @app.post("/v1/skills/approve")
+    async def approve_skills(request: StarletteRequest):
+        if _skills_approve is None:
+            raise HTTPException(status_code=501, detail=_openai_error("skills_approve_not_available", type="server_error", code="not_implemented"))
+        payload = await request.json()
+        staged_id = str((payload or {}).get("staged_id") or "").strip()
+        namespace = str((payload or {}).get("namespace") or "community").strip() or "community"
+        cfg = getattr(app.state, "skills_config", None)
+        strict = bool(getattr(cfg, "strict", True))
+        result = _skills_approve(base_dir / "skills", staged_id, namespace=namespace, strict=strict)
+        if not bool(result.get("ok", False)):
+            return JSONResponse(status_code=400, content=result)
+        store = getattr(app.state, "skills_store", None)
+        sm = getattr(app.state, "skills_metrics", None)
+        if store is not None:
+            try:
+                store.refresh()
+                if sm is not None and hasattr(sm, "set_inventory"):
+                    records = store.list()
+                    sm.set_inventory(installed_total=len(records), enabled_total=sum(1 for r in records if r.enabled))
+            except Exception:
+                pass
+        return JSONResponse(content=result)
 
     @app.get("/doctor")
     @app.post("/doctor")
@@ -1345,6 +1440,28 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         except Exception as exc:  # pragma: no cover
             payload["ok"] = False
             payload["error"] = str(exc)
+        try:
+            cfg = getattr(app.state, "skills_config", None)
+            store = getattr(app.state, "skills_store", None)
+            strict = bool(getattr(cfg, "strict", True))
+            if store is None:
+                payload["skills"] = {"ok": True, "skipped": "not_available"}
+            else:
+                report = store.validate_all(strict=strict)
+                staging = []
+                try:
+                    staging_root = Path(store.staging_root)
+                    if staging_root.exists():
+                        staging = [p.name for p in staging_root.iterdir() if p.name != ".gitkeep"]
+                except Exception:
+                    staging = []
+                report["staging"] = staging
+                if strict and staging:
+                    report["ok"] = False
+                    report["errors"] = (report.get("errors") or []) + ["staging_not_empty"]
+                payload["skills"] = report
+        except Exception as exc:
+            payload["skills"] = {"ok": False, "error": str(exc)}
         return JSONResponse(content=payload, status_code=200 if payload.get("ok") else 500)
 
     @app.post("/v1/embeddings")
@@ -1426,6 +1543,49 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             )
         device, dtype = _resolve_device_dtype(selected_model, settings)
         decode_args["max_new_tokens"] = decide_max_new_tokens(decode_args["max_new_tokens"], device, dtype, settings)
+
+        # Inject prompt-only Agent Skills (trusted, local) as a system message.
+        try:
+            cfg = getattr(app.state, "skills_config", None)
+            enabled = bool(getattr(cfg, "enabled", False))
+            if enabled and render_skills_system_message is not None:
+                sm = getattr(app.state, "skills_metrics", None)
+                if sm is not None and hasattr(sm, "observe_injection"):
+                    try:
+                        sm.observe_injection(selected=[], tokens_estimate=0)
+                    except Exception:
+                        pass
+                already_has = any(
+                    (str(m.get("role") or "").lower() == "system" and "[SKILLS]" in str(m.get("content") or ""))
+                    for m in (messages[:3] if isinstance(messages, list) else [])
+                )
+                if not already_has:
+                    router_obj = getattr(app.state, "skills_router", None)
+                    if router_obj is not None and hasattr(router_obj, "select"):
+                        selected_skills = router_obj.select(
+                            messages,
+                            model=str(chosen_backend),
+                            max_k=int(getattr(cfg, "max_k", 3) or 3),
+                            token_budget_total=int(getattr(cfg, "token_budget_total", 600) or 600),
+                            strict=bool(getattr(cfg, "strict", True)),
+                        )
+                        rendered = render_skills_system_message(
+                            selected_skills, token_budget_total=int(getattr(cfg, "token_budget_total", 600) or 600)
+                        )
+                        if rendered is not None and rendered.content:
+                            insert_at = 0
+                            for msg in messages:
+                                if str(msg.get("role", "")).lower() == "system":
+                                    insert_at += 1
+                                else:
+                                    break
+                            messages = list(messages)
+                            messages.insert(insert_at, {"role": "system", "content": rendered.content})
+                            if sm is not None and hasattr(sm, "observe_injection"):
+                                sm.observe_injection(selected=list(rendered.skill_refs), tokens_estimate=int(rendered.tokens_est))
+        except Exception:
+            pass
+
         prompt = build_chat_prompt(messages, backend_cfg, tokenizer=getattr(selected_model, "tokenizer", None), default_system=default_system)
 
         ctx_max = _resolve_ctx_max_tokens(settings)

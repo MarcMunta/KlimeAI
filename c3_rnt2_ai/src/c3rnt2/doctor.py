@@ -1037,6 +1037,33 @@ def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> di
         "profiles": _profile_checks(base_dir),
     }
 
+    # Skills store (prompt-only). Strict mode requires trusted/approved skills only.
+    try:
+        from .skills.store import SkillStore, SkillsConfig
+
+        cfg = SkillsConfig.from_env()
+        strict = bool(cfg.strict)
+        store = SkillStore(base_dir / "skills")
+        skills_report = store.validate_all(strict=strict)
+        staging: list[str] = []
+        try:
+            staging_root = store.staging_root
+            if staging_root.exists():
+                staging = [p.name for p in staging_root.iterdir() if p.name != ".gitkeep"]
+        except Exception:
+            staging = []
+        skills_report["staging"] = staging
+        skills_report["strict"] = strict
+        if strict and staging:
+            skills_report["ok"] = False
+            skills_report["errors"] = (skills_report.get("errors") or []) + ["staging_not_empty"]
+        checks["skills"] = skills_report
+        if not bool(skills_report.get("ok", False)):
+            report["deep_ok"] = False
+    except Exception as exc:
+        checks["skills"] = {"ok": False, "error": str(exc)}
+        report["deep_ok"] = False
+
     if sys.platform.startswith("win") and not bool(info.cuda_available):
         checks["windows_cuda"]["error"] = "CUDA not available on Windows (install CUDA-enabled torch + drivers)."
         report["deep_ok"] = False
