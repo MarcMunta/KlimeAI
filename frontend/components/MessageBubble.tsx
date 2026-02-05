@@ -482,7 +482,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
         <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border transition-all duration-700 group-hover:scale-110 group-hover:rotate-6 ${isUser ? 'bg-primary text-white border-primary/20 shadow-xl' : 'bg-background border-border glass-card shadow-lg'}`}>{isUser ? <User size={20} /> : <Bot size={20} />}</div>
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1`}>
           <div className={`px-8 py-6 rounded-[2.5rem] ${isUser ? 'bg-primary text-white rounded-tr-none shadow-2xl' : 'bg-muted/10 border border-border/40 rounded-tl-none glass-card'} ${fontSizeClass} leading-relaxed w-full relative`}>
-            {!isUser && message.fileChanges && message.fileChanges.length >= 2 && (
+            {!isUser && message.fileChanges && message.fileChanges.length >= 1 && (
               <PatchOverview fileChanges={message.fileChanges} onToggleAll={toggleAll} onToggleSingle={togglePath} onOpenExplorer={() => onOpenModificationExplorer(message.fileChanges!)} collapsedPaths={collapsedPaths} language={language} />
             )}
             <div className="markdown-content relative overflow-visible z-10">
@@ -495,7 +495,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
             {!isUser && (
               <div className="flex gap-6">
                 <button onClick={handleCopyMessage} className="text-[11px] font-black uppercase tracking-widest text-muted-foreground hover:text-primary transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
-                {(message.thought || (isStreaming && message.role === Role.AI)) && (
+                {onShowReasoning && (message.thought || (isStreaming && message.role === Role.AI)) && (
                   <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[11px] font-black uppercase tracking-widest text-primary flex items-center gap-2.5 py-2 px-4 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
                     <div className="relative"><Brain size={14} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
                     <span>{isStreaming && !message.content ? (language === 'es' ? 'Razonando...' : 'Thinking...') : (language === 'es' ? 'Razonamiento' : 'Reasoning')}</span>

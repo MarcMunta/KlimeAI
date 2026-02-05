@@ -508,6 +508,20 @@ def _security_deep_check(settings: dict, base_dir: Path) -> dict[str, Any]:
         if not auto_sandbox:
             errors.append("self_patch_auto_sandbox_disabled")
 
+    # Self-edits proposals dir (API/UI) must be writable.
+    proposals_dir = base_dir / "skills" / "_proposals" / "self_edits"
+    proposals_writable = True
+    proposals_error = None
+    try:
+        proposals_dir.mkdir(parents=True, exist_ok=True)
+        probe = proposals_dir / ".doctor_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        proposals_writable = False
+        proposals_error = str(exc)
+        errors.append("self_edits_proposals_dir_unwritable")
+
     return {
         "ok": not errors,
         "errors": errors or None,
@@ -523,6 +537,12 @@ def _security_deep_check(settings: dict, base_dir: Path) -> dict[str, Any]:
             "approval_file": str(approval_file) if approval_file else None,
             "self_patch_enabled": self_patch_enabled,
             "auto_sandbox": auto_sandbox,
+        },
+        "self_edits": {
+            "proposals_dir": str(proposals_dir),
+            "writable": proposals_writable,
+            "error": proposals_error,
+            "auto_edits_enabled_env": bool(os.getenv("ENABLE_AUTO_EDITS") == "1"),
         },
     }
 

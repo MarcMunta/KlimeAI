@@ -14,6 +14,7 @@ class PatchMeta:
     context: str | None
     created_ts: float
     status: str
+    error: str | None = None
 
 
 def _normalize_path(path: Path) -> str:

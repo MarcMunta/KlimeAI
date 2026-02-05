@@ -71,7 +71,12 @@ def _resolve_cors_origins(settings: dict) -> list[str]:
     if raw is None:
         raw = (settings.get("server", {}) or {}).get("cors_origins")
     if raw is None:
-        return ["http://localhost:3000", "http://127.0.0.1:3000"]
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
     if isinstance(raw, str):
         return [part.strip() for part in raw.split(",") if part.strip()]
     if isinstance(raw, list):
@@ -191,6 +196,9 @@ class _MetricsState:
     chat_latency_ms_count: int = 0
     chat_vram_peak_mb: float | None = None
     last_request_ts: float | None = None
+    self_edits_pending_total: int = 0
+    self_edits_applied_total: int = 0
+    self_edits_failed_total: int = 0
 
     def observe_chat(
         self,
@@ -240,6 +248,15 @@ class _MetricsState:
                 "# HELP vortex_chat_latency_ms_count Count of latency observations.",
                 "# TYPE vortex_chat_latency_ms_count counter",
                 f"vortex_chat_latency_ms_count {int(self.chat_latency_ms_count)}",
+                "# HELP vortex_self_edits_pending_total Pending self-edit proposals (estimated).",
+                "# TYPE vortex_self_edits_pending_total gauge",
+                f"vortex_self_edits_pending_total {int(self.self_edits_pending_total)}",
+                "# HELP vortex_self_edits_applied_total Applied self-edit proposals.",
+                "# TYPE vortex_self_edits_applied_total counter",
+                f"vortex_self_edits_applied_total {int(self.self_edits_applied_total)}",
+                "# HELP vortex_self_edits_failed_total Failed self-edit proposal applies.",
+                "# TYPE vortex_self_edits_failed_total counter",
+                f"vortex_self_edits_failed_total {int(self.self_edits_failed_total)}",
             ]
             if self.chat_vram_peak_mb is not None:
                 lines.extend(
@@ -250,6 +267,17 @@ class _MetricsState:
                     ]
                 )
             return "\n".join(lines) + "\n"
+
+    def observe_self_edits_pending(self, pending: int) -> None:
+        with self.lock:
+            self.self_edits_pending_total = max(0, int(pending))
+
+    def observe_self_edits_apply(self, *, ok: bool) -> None:
+        with self.lock:
+            if ok:
+                self.self_edits_applied_total += 1
+            else:
+                self.self_edits_failed_total += 1
 
 
 def _normalize_weights(raw: list[object], *, n: int) -> list[float] | None:
@@ -1202,6 +1230,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         from .skills.render import render_skills_system_message
         from .skills.router import SkillsRouter
         from .skills.store import SkillStore, SkillsConfig
+        from .self_edits.store import SelfEditsError, SelfEditsStore
     except Exception:  # pragma: no cover
         _skills_approve = None  # type: ignore[assignment]
         _skills_stage = None  # type: ignore[assignment]
@@ -1210,6 +1239,8 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         SkillsRouter = None  # type: ignore[misc,assignment]
         SkillStore = None  # type: ignore[misc,assignment]
         SkillsConfig = None  # type: ignore[misc,assignment]
+        SelfEditsStore = None  # type: ignore[misc,assignment]
+        SelfEditsError = RuntimeError  # type: ignore[assignment]
 
     skills_store = None
     skills_router = None
@@ -1230,6 +1261,13 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
     app.state.skills_router = skills_router
     app.state.skills_config = skills_cfg
     app.state.skills_metrics = skills_metrics
+    if SelfEditsStore is not None:
+        try:
+            app.state.self_edits_store = SelfEditsStore.from_app_dir(base_dir, profile=str(settings.get("_profile") or "dev_small"))
+        except Exception:
+            app.state.self_edits_store = None
+    else:
+        app.state.self_edits_store = None
 
     cors_origins = list(getattr(app.state, "cors_origins", []) or [])
     if cors_origins:
@@ -1398,6 +1436,97 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             except Exception:
                 pass
         return JSONResponse(content=result)
+
+    @app.get("/v1/self-edits/proposals")
+    async def list_self_edits(status: str | None = None):
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            return JSONResponse(content={"object": "list", "data": []})
+        raw = str(status or "pending").strip().lower()
+        status_filter = None if raw in {"", "all", "*"} else raw
+        try:
+            data = store.list(status=status_filter)
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request"))
+        try:
+            pending_count = len(store.list(status="pending"))
+            ms = getattr(app.state, "metrics", None)
+            if ms is not None and hasattr(ms, "observe_self_edits_pending"):
+                ms.observe_self_edits_pending(pending_count)
+        except Exception:
+            pass
+        return JSONResponse(content={"object": "list", "data": data})
+
+    @app.get("/v1/self-edits/proposals/{proposal_id}")
+    async def get_self_edit_proposal(proposal_id: str):
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            raise HTTPException(status_code=501, detail=_openai_error("self_edits_not_available", type="server_error", code="not_implemented"))
+        try:
+            payload = store.get(proposal_id)
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=404, detail=_openai_error(str(exc), type="invalid_request_error", code="not_found"))
+        return JSONResponse(content=payload)
+
+    @app.post("/v1/self-edits/proposals/{proposal_id}/accept")
+    async def accept_self_edit_proposal(proposal_id: str):
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            raise HTTPException(status_code=501, detail=_openai_error("self_edits_not_available", type="server_error", code="not_implemented"))
+        try:
+            payload = store.accept(proposal_id)
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request"))
+        return JSONResponse(content=payload)
+
+    @app.post("/v1/self-edits/proposals/{proposal_id}/reject")
+    async def reject_self_edit_proposal(proposal_id: str):
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            raise HTTPException(status_code=501, detail=_openai_error("self_edits_not_available", type="server_error", code="not_implemented"))
+        try:
+            payload = store.reject(proposal_id)
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request"))
+        return JSONResponse(content=payload)
+
+    @app.post("/v1/self-edits/proposals/{proposal_id}/apply")
+    async def apply_self_edit_proposal(proposal_id: str):
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            raise HTTPException(status_code=501, detail=_openai_error("self_edits_not_available", type="server_error", code="not_implemented"))
+        result = None
+        try:
+            result = store.apply(proposal_id)
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request"))
+        try:
+            ok = bool((result or {}).get("ok", False))
+            ms = getattr(app.state, "metrics", None)
+            if ms is not None and hasattr(ms, "observe_self_edits_apply"):
+                ms.observe_self_edits_apply(ok=ok)
+            if ms is not None and hasattr(ms, "observe_self_edits_pending"):
+                ms.observe_self_edits_pending(len(store.list(status="pending")))
+        except Exception:
+            pass
+        return JSONResponse(content=result or {"ok": False, "error": "apply_failed"})
+
+    @app.post("/v1/self-edits/proposals/demo")
+    async def demo_self_edits():
+        store = getattr(app.state, "self_edits_store", None)
+        if store is None:
+            raise HTTPException(status_code=501, detail=_openai_error("self_edits_not_available", type="server_error", code="not_implemented"))
+        try:
+            created = store.create_demo()
+        except SelfEditsError as exc:
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request"))
+        try:
+            ms = getattr(app.state, "metrics", None)
+            if ms is not None and hasattr(ms, "observe_self_edits_pending"):
+                ms.observe_self_edits_pending(len(store.list(status="pending")))
+        except Exception:
+            pass
+        return JSONResponse(content=created)
 
     @app.get("/doctor")
     @app.post("/doctor")

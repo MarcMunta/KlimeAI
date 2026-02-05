@@ -11,8 +11,10 @@ import AnalysisView from './components/AnalysisView';
 import TerminalView from './components/TerminalView';
 import VirtualizedMessageList from './components/VirtualizedMessageList';
 import ModificationExplorerModal from './components/ModificationExplorerModal';
+import PersonalAIDrawer from './components/PersonalAIDrawer';
 import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language } from './types';
 import { vortexService } from './services/vortexService';
+import { listSelfEditProposals, SelfEditProposalSummary } from './services/selfEditsClient';
 import { translations } from './translations';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'framer-motion';
 
@@ -74,6 +76,10 @@ const App: React.FC = () => {
   const [activeThoughtMessageId, setActiveThoughtMessageId] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const mainScrollRef = useRef<HTMLDivElement>(null);
+
+  const [isPersonalAIOpen, setIsPersonalAIOpen] = useState(false);
+  const [selfEditProposals, setSelfEditProposals] = useState<SelfEditProposalSummary[]>([]);
+  const [selfEditsError, setSelfEditsError] = useState<string | null>(null);
   
   const { scrollY } = useScroll({ container: mainScrollRef });
   const t = translations[settings.language];
@@ -352,6 +358,28 @@ const VORTEX_CONFIG = {
     setFooterVisible(false);
   };
 
+  const refreshSelfEdits = useCallback(async () => {
+    const baseUrl = (settings.llm.baseUrl || '').trim();
+    if (!baseUrl) {
+      setSelfEditProposals([]);
+      setSelfEditsError(settings.language === 'es' ? 'Configura VITE_API_BASE_URL (frontend/.env).' : 'Set VITE_API_BASE_URL (frontend/.env).');
+      return;
+    }
+    try {
+      const items = await listSelfEditProposals({ baseUrl, token: settings.llm.token, status: 'pending' });
+      setSelfEditProposals(items);
+      setSelfEditsError(null);
+    } catch (err: any) {
+      setSelfEditsError(err?.message || (settings.language === 'es' ? 'Backend offline' : 'Backend offline'));
+    }
+  }, [settings.llm.baseUrl, settings.llm.token, settings.language]);
+
+  useEffect(() => {
+    refreshSelfEdits();
+    const id = window.setInterval(() => refreshSelfEdits(), 5000);
+    return () => window.clearInterval(id);
+  }, [refreshSelfEdits]);
+
   const springConfig = { type: 'spring' as const, damping: 28, stiffness: 220, mass: 0.9 };
   const direction = VIEW_INDEX[activeView] > VIEW_INDEX[prevView] ? 1 : -1;
 
@@ -372,6 +400,20 @@ const VORTEX_CONFIG = {
               <div className="flex items-center gap-4">
                 <motion.button whileHover={{ scale: 1.1, backgroundColor: 'hsla(var(--primary) / 0.1)' }} whileTap={{ scale: 0.9 }} onClick={() => setSettings({ ...settings, language: settings.language === 'es' ? 'en' : 'es' })} className="w-12 h-12 flex items-center justify-center bg-muted/40 dark:bg-zinc-900/40 border border-border/50 rounded-2xl hover:border-primary/40 transition-all shadow-sm overflow-hidden"><img src={settings.language === 'es' ? 'https://flagcdn.com/w80/es.png' : 'https://flagcdn.com/w80/us.png'} alt={settings.language} className="w-7 h-auto object-contain rounded-sm select-none" /></motion.button>
                 <div className="flex items-center gap-1 bg-muted/40 dark:bg-zinc-900/40 p-1 rounded-2xl border border-border/50 relative">{['chat', 'analysis', 'terminal'].map(v => (<button key={v} onClick={() => handleSelectView(v as ViewType)} className={`relative p-2.5 rounded-xl transition-all z-10 ${activeView === v ? 'text-primary-foreground' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>{v === 'chat' ? <MessageSquare size={16} /> : v === 'analysis' ? <BarChart3 size={16} /> : <TerminalIcon size={16} />}{activeView === v && <motion.div layoutId="header-nav-indicator" className="absolute inset-0 bg-primary rounded-xl shadow-lg -z-10" transition={springConfig} />}</button>))}</div>
+                <motion.button
+                  whileHover={{ scale: 1.05, y: -2 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => { const next = !isPersonalAIOpen; setIsPersonalAIOpen(next); if (next) setIsReasoningOpen(false); }}
+                  className="relative w-12 h-12 flex items-center justify-center bg-muted/50 dark:bg-zinc-900/50 hover:bg-primary/10 rounded-2xl border border-border/50 transition-all shadow-sm"
+                  title={settings.language === 'es' ? 'Personal AI' : 'Personal AI'}
+                >
+                  <Bot size={18} className="text-primary" />
+                  {selfEditProposals.length > 0 && (
+                    <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[9px] font-black rounded-full shadow-lg">
+                      {selfEditProposals.length}
+                    </span>
+                  )}
+                </motion.button>
                 <motion.button whileHover={{ scale: 1.05, y: -2 }} whileTap={{ scale: 0.95 }} onClick={() => setIsCommandPaletteOpen(true)} className="flex items-center gap-3 px-5 py-2.5 bg-muted/50 dark:bg-zinc-900/50 hover:bg-primary/10 rounded-2xl border border-border/50 transition-all shadow-sm"><Zap size={16} className={'text-primary'} /><kbd className="hidden lg:inline-block px-2 py-0.5 bg-background border rounded-lg text-[8px] font-black opacity-40">ALT+K</kbd></motion.button>
               </div>
             </motion.header>
@@ -394,7 +436,7 @@ const VORTEX_CONFIG = {
                         messages={currentSession.messages} 
                         fontSize={settings.fontSize} 
                         codeTheme={settings.codeTheme}
-                        onShowReasoning={messageId => { setActiveThoughtMessageId(messageId); setIsReasoningOpen(true); setIsSidebarOpen(false); }} 
+                        onShowReasoning={messageId => { setActiveThoughtMessageId(messageId); setIsReasoningOpen(true); setIsPersonalAIOpen(false); setIsSidebarOpen(false); }} 
                         onOpenModificationExplorer={handleOpenModificationExplorer} 
                         isLoading={isLoading} 
                         language={settings.language} 
@@ -418,9 +460,30 @@ const VORTEX_CONFIG = {
             </motion.div>
           )}
         </main>
-        
-        <AnimatePresence>{isReasoningOpen && !activeModificationFiles && (
-            <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]"><ReasoningDrawer isOpen={isReasoningOpen} onClose={() => setIsReasoningOpen(false)} thought={activeThought} language={settings.language} isStreaming={isCurrentThoughtStreaming} /></motion.div>
+
+        <AnimatePresence>{isPersonalAIOpen && !activeModificationFiles && (
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 420, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
+            <PersonalAIDrawer
+              isOpen={isPersonalAIOpen}
+              onClose={() => setIsPersonalAIOpen(false)}
+              language={settings.language}
+              api={settings.llm}
+              fontSize={settings.fontSize}
+              codeTheme={settings.codeTheme}
+              isDarkMode={isDarkMode}
+              proposals={selfEditProposals}
+              pendingCount={selfEditProposals.length}
+              backendError={selfEditsError}
+              onRefreshProposals={refreshSelfEdits}
+              onOpenModificationExplorer={handleOpenModificationExplorer}
+            />
+          </motion.div>
+        )}</AnimatePresence>
+
+        <AnimatePresence>{isReasoningOpen && !isPersonalAIOpen && !activeModificationFiles && (
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
+            <ReasoningDrawer isOpen={isReasoningOpen} onClose={() => setIsReasoningOpen(false)} thought={activeThought} language={settings.language} isStreaming={isCurrentThoughtStreaming} />
+          </motion.div>
         )}</AnimatePresence>
       </div>
 

@@ -7,6 +7,8 @@ data/
 *.pyc
 *.pyo
 *.pyd
+.pids/
+logs/
 
 # Skills store runtime state / untrusted staging
 c3_rnt2_ai/skills/.state.json
