@@ -82,6 +82,48 @@ def _resolve_mix_mode(settings: dict) -> str:
     return "single"
 
 
+def _resolve_shared_expert_cfg(settings: dict, base_dir: Path) -> dict[str, Any] | None:
+    for section in ("experts", "adapters"):
+        cfg = settings.get(section, {}) or {}
+        raw_path = cfg.get("shared_expert_path")
+        if not raw_path:
+            continue
+        path = Path(str(raw_path))
+        if not path.is_absolute():
+            path = base_dir / path
+        if not path.exists():
+            continue
+        raw_name = cfg.get("shared_expert_name") or "shared_expert"
+        raw_weight = cfg.get("shared_expert_weight")
+        try:
+            weight = float(raw_weight) if raw_weight is not None else 0.2
+        except Exception:
+            weight = 0.2
+        if weight < 0:
+            weight = 0.0
+        return {"section": section, "name": str(raw_name), "path": str(path), "weight": float(weight)}
+    return None
+
+
+def _load_hf_adapter_path(model: object, name: str, path: str, *, max_loaded: int | None = None) -> dict:
+    if not name or not path:
+        return {"ok": False, "error": "adapter_invalid"}
+    if not Path(path).exists():
+        return {"ok": False, "error": "adapter_path_missing", "adapter": name, "path": path}
+    if not hasattr(model, "add_adapter"):
+        return {"ok": False, "error": "model_no_adapter_support"}
+    if max_loaded is not None:
+        try:
+            setattr(model, "adapter_max_loaded", int(max_loaded))
+        except Exception:
+            pass
+    try:
+        loaded_new = bool(model.add_adapter(str(name), str(path)))
+    except Exception as exc:
+        return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": name, "path": path}
+    return {"ok": True, "adapter": str(name), "loaded": True, "path": str(path), "cache_hit": (not loaded_new)}
+
+
 def _select_hf_adapter_for_request(payload: dict, prompt: str, registry: AdapterRegistry, router: AdapterRouter) -> dict:
     requested_list = payload.get("experts")
     if requested_list is not None:
@@ -152,11 +194,11 @@ def _ensure_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | 
     except Exception:
         pass
     try:
-        model.add_adapter(adapter, path)
+        loaded_new = bool(model.add_adapter(adapter, path))
         model.set_adapter(adapter)
     except Exception as exc:
         return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": adapter, "path": path}
-    return {"ok": True, "adapter": adapter, "loaded": True, "path": path}
+    return {"ok": True, "adapter": adapter, "loaded": True, "path": path, "cache_hit": (not loaded_new)}
 
 
 def _load_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | None) -> dict:
@@ -174,10 +216,10 @@ def _load_hf_adapter(model: object, registry: AdapterRegistry, adapter: str | No
     except Exception:
         pass
     try:
-        model.add_adapter(adapter, path)
+        loaded_new = bool(model.add_adapter(adapter, path))
     except Exception as exc:
         return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": adapter, "path": path}
-    return {"ok": True, "adapter": adapter, "loaded": True, "path": path}
+    return {"ok": True, "adapter": adapter, "loaded": True, "path": path, "cache_hit": (not loaded_new)}
 
 
 def _apply_hf_adapter_selection(model: object, settings: dict, registry: AdapterRegistry, selection: dict) -> dict:
@@ -187,47 +229,136 @@ def _apply_hf_adapter_selection(model: object, settings: dict, registry: Adapter
     adapters = selection.get("adapters")
     weights = selection.get("weights")
     scores = selection.get("scores")
+
+    base_dir_raw = getattr(model, "base_dir", None)
+    base_dir = Path(str(base_dir_raw)) if base_dir_raw is not None else Path(".")
+    shared_cfg = _resolve_shared_expert_cfg(settings, base_dir=base_dir)
+
+    selected: list[str] = []
+    if isinstance(adapters, list) and adapters:
+        selected = [str(x).strip() for x in adapters if str(x).strip()]
+    else:
+        adapter = selection.get("adapter")
+        if adapter:
+            selected = [str(adapter).strip()]
+    selected = [name for name in selected if name]
+
     if weights is not None:
         mix_mode = "weighted"
+    if shared_cfg is not None and (selected or True):
+        # Shared expert implies mixing when possible.
+        mix_mode = "weighted" if hasattr(model, "set_weighted_adapters") else mix_mode
 
-    if isinstance(adapters, list) and adapters:
-        names = [str(x).strip() for x in adapters if str(x).strip()]
-        if not names:
-            return {"ok": False, "error": "experts_invalid"}
-        if mix_mode == "weighted" and len(names) > 1:
-            for name in names:
-                loaded = _load_hf_adapter(model, registry, name)
-                if not loaded.get("ok", False):
-                    if explicit:
-                        return loaded
-                    return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
-            w = weights if isinstance(weights, list) and len(weights) == len(names) else _weights_from_scores(scores)
-            if w is None or len(w) != len(names):
-                w = [1.0 / float(len(names)) for _ in names]
-            adapter_weights = {name: float(weight) for name, weight in zip(names, w)}
-            if hasattr(model, "set_weighted_adapters"):
-                try:
-                    mixed_ok = bool(model.set_weighted_adapters(adapter_weights))
-                except Exception:
-                    mixed_ok = False
-                if mixed_ok:
-                    return {"ok": True, "adapter": getattr(model, "active_adapter_name", None), "mixed": True}
-            ensured = _ensure_hf_adapter(model, registry, names[0])
-            if not ensured.get("ok", False) and not explicit:
-                return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
-            return {**ensured, "mixed": False, "fallback": True}
-        ensured = _ensure_hf_adapter(model, registry, names[0])
-        if not ensured.get("ok", False) and not explicit:
-            return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
-        return ensured
+    shared_name = str(shared_cfg.get("name")) if shared_cfg else None
+    shared_path = str(shared_cfg.get("path")) if shared_cfg else None
+    try:
+        shared_weight = float(shared_cfg.get("weight")) if shared_cfg is not None else 0.0
+    except Exception:
+        shared_weight = 0.2
+    if shared_weight < 0:
+        shared_weight = 0.0
 
-    adapter = selection.get("adapter")
-    if adapter:
-        ensured = _ensure_hf_adapter(model, registry, str(adapter))
-        if not ensured.get("ok", False) and not explicit:
+    names: list[str] = list(selected)
+    if shared_name and shared_path and shared_name not in names:
+        names.append(shared_name)
+
+    if not names:
+        return {"ok": True, "adapter": None, "loaded": False}
+
+    start = time.perf_counter()
+    cache_hits = 0
+    loaded_names: list[str] = []
+    for name in names:
+        if shared_cfg is not None and shared_name and shared_path and name == shared_name:
+            loaded = _load_hf_adapter_path(model, shared_name, shared_path, max_loaded=int(getattr(registry, "max_loaded", 0) or 0))
+        else:
+            loaded = _load_hf_adapter(model, registry, name)
+        if not loaded.get("ok", False):
+            if explicit:
+                return {**loaded, "adapter_load_ms": round((time.perf_counter() - start) * 1000.0, 3)}
+            return {
+                "ok": True,
+                "adapter": None,
+                "skipped": "adapter_load_failed",
+                "adapter_load_ms": round((time.perf_counter() - start) * 1000.0, 3),
+            }
+        if bool(loaded.get("cache_hit", False)):
+            cache_hits += 1
+        loaded_names.append(str(name))
+
+    shared_used = False
+    if mix_mode == "weighted" and len(loaded_names) > 1 and hasattr(model, "set_weighted_adapters"):
+        if selected:
+            w = weights if isinstance(weights, list) and len(weights) == len(selected) else _weights_from_scores(scores)
+            if w is None or len(w) != len(selected):
+                w = [1.0 / float(len(selected)) for _ in selected]
+            adapter_weights = {name: float(weight) for name, weight in zip(selected, w)}
+        else:
+            adapter_weights = {}
+
+        if shared_cfg is not None and shared_name:
+            if not adapter_weights:
+                adapter_weights[shared_name] = 1.0
+            else:
+                adapter_weights[shared_name] = float(shared_weight or 0.2)
+        total = float(sum(max(0.0, float(v)) for v in adapter_weights.values()))
+        if total > 1e-12:
+            adapter_weights = {k: float(v) / total for k, v in adapter_weights.items()}
+        try:
+            mixed_ok = bool(model.set_weighted_adapters(adapter_weights))
+        except Exception:
+            mixed_ok = False
+        if mixed_ok:
+            shared_used = bool(shared_cfg is not None and shared_name in adapter_weights)
+            return {
+                "ok": True,
+                "adapter": getattr(model, "active_adapter_name", None),
+                "mixed": True,
+                "selected_adapters": list(selected),
+                "active_adapters": list(loaded_names),
+                "shared_expert": shared_name if shared_used else None,
+                "shared_used": bool(shared_used),
+                "adapter_cache_hit": int(cache_hits),
+                "adapter_load_ms": round((time.perf_counter() - start) * 1000.0, 3),
+                "weights": adapter_weights,
+            }
+
+    # Fallback single-adapter activation.
+    target = selected[0] if selected else shared_name
+    if shared_cfg is not None and shared_name and shared_path and target == shared_name:
+        loaded = _load_hf_adapter_path(model, shared_name, shared_path, max_loaded=int(getattr(registry, "max_loaded", 0) or 0))
+        if not loaded.get("ok", False) and not explicit:
             return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
-        return ensured
-    return {"ok": True, "adapter": None, "loaded": False}
+        if hasattr(model, "set_adapter"):
+            try:
+                model.set_adapter(shared_name)
+            except Exception as exc:
+                return {"ok": False, "error": f"adapter_load_failed: {exc}", "adapter": shared_name, "path": shared_path}
+        return {
+            "ok": True,
+            "adapter": getattr(model, "active_adapter_name", None) or shared_name,
+            "mixed": False,
+            "selected_adapters": list(selected),
+            "active_adapters": list(loaded_names),
+            "shared_expert": shared_name,
+            "shared_used": True,
+            "adapter_cache_hit": int(cache_hits),
+            "adapter_load_ms": round((time.perf_counter() - start) * 1000.0, 3),
+        }
+
+    ensured = _ensure_hf_adapter(model, registry, target)
+    if not ensured.get("ok", False) and not explicit:
+        return {"ok": True, "adapter": None, "skipped": "adapter_load_failed"}
+    return {
+        **ensured,
+        "mixed": False,
+        "selected_adapters": list(selected),
+        "active_adapters": list(loaded_names),
+        "shared_expert": shared_name if shared_cfg is not None else None,
+        "shared_used": False,
+        "adapter_cache_hit": int(cache_hits),
+        "adapter_load_ms": round((time.perf_counter() - start) * 1000.0, 3),
+    }
 
 
 def _maybe_load_adapter(model: CoreTransformer, settings: dict, base_dir: Path) -> None:
@@ -257,6 +388,10 @@ def _load_backend_model(settings: dict, base_dir: Path, backend: str):
         core["backend"] = "hf"
     elif backend_l in {"llama_cpp", "llamacpp", "llama.cpp"}:
         core["backend"] = "llama_cpp"
+    elif backend_l in {"external", "vllm", "sglang"}:
+        core["backend"] = "external"
+        if backend_l in {"vllm", "sglang"}:
+            core.setdefault("external_engine", backend_l)
     else:
         core["backend"] = "vortex"
     local["core"] = core
@@ -277,6 +412,8 @@ def _normalize_backend_label(value: object) -> str:
         return "hf"
     if name in {"llama_cpp", "llama.cpp", "llamacpp"}:
         return "llama_cpp"
+    if name in {"external", "vllm", "sglang"}:
+        return "external"
     return name
 
 
@@ -847,7 +984,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         router = load_router(router_path, router_path.with_suffix(".json"))
 
     core_backend = str(settings.get("core", {}).get("backend", "vortex")).lower()
-    default_backend_label = "hf" if core_backend == "hf" else "core"
+    default_backend_label = _normalize_backend_label(core_backend)
     model = _load_backend_model(settings, base_dir, default_backend_label)
     models = {default_backend_label: model}
     if router_enabled and bool(router_cfg.get("multi_backend", False)):
@@ -1025,6 +1162,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
         adapter_sel: dict | None = None
         adapter_active: str | None = None
         adapter_reason: str | None = None
+        adapter_telemetry: dict | None = None
         if (
             payload.get("adapter") is not None
             or payload.get("expert") is not None
@@ -1050,6 +1188,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                         if not applied.get("ok", False):
                             raise HTTPException(status_code=400, detail=applied.get("error", "adapter_load_failed"))
                         adapter_active = applied.get("adapter")
+                        adapter_telemetry = applied
                     try:
                         if hasattr(selected_model, "generate"):
                             if hasattr(selected_model, "blocks"):
@@ -1086,6 +1225,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                                     selected_model = fb_model
                                     adapter_active = None
                                     adapter_reason = None
+                                    adapter_telemetry = None
                                     if hasattr(selected_model, "generate"):
                                         if hasattr(selected_model, "blocks"):
                                             text, stats = selected_model.generate(
@@ -1158,6 +1298,13 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 "vram_peak_mb": vram_peak,
                 "adapter": adapter_active,
             }
+            if adapter_telemetry:
+                perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
+                perf["selected_adapters"] = adapter_telemetry.get("selected_adapters")
+                perf["active_adapters"] = adapter_telemetry.get("active_adapters")
+                perf["shared_expert"] = adapter_telemetry.get("shared_expert")
+                perf["shared_used"] = adapter_telemetry.get("shared_used")
+                perf["adapter_cache_hit"] = adapter_telemetry.get("adapter_cache_hit")
             episode = {
                 "version": 1,
                 "ts": time.time(),
@@ -1165,6 +1312,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 "backend": str(chosen_backend),
                 "adapter": adapter_active,
                 "adapter_reason": adapter_reason,
+                "adapter_telemetry": adapter_telemetry,
                 "messages": messages,
                 "prompt_text": prompt,
                 "response_text": text,
@@ -1197,6 +1345,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
             current_backend = chosen_backend
             current_adapter = adapter_active
             current_adapter_reason = adapter_reason
+            current_adapter_telemetry: dict | None = None
             header = {
                 "id": resp_id,
                 "object": "chat.completion.chunk",
@@ -1216,6 +1365,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                         if not applied.get("ok", False):
                             raise RuntimeError(str(applied.get("error", "adapter_load_failed")))
                         current_adapter = applied.get("adapter")
+                        current_adapter_telemetry = applied
                     if hasattr(current_model, "stream_generate"):
                         gen = current_model.stream_generate(prompt, **decode_args)
                     else:
@@ -1235,6 +1385,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                                     current_model = fb_model
                                     current_adapter = None
                                     current_adapter_reason = None
+                                    current_adapter_telemetry = None
                                     if hasattr(current_model, "stream_generate"):
                                         gen = current_model.stream_generate(prompt, **decode_args)
                                     else:
@@ -1295,6 +1446,13 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 "vram_peak_mb": vram_peak,
                 "adapter": current_adapter,
             }
+            if current_adapter_telemetry:
+                perf["adapter_load_ms"] = current_adapter_telemetry.get("adapter_load_ms")
+                perf["selected_adapters"] = current_adapter_telemetry.get("selected_adapters")
+                perf["active_adapters"] = current_adapter_telemetry.get("active_adapters")
+                perf["shared_expert"] = current_adapter_telemetry.get("shared_expert")
+                perf["shared_used"] = current_adapter_telemetry.get("shared_used")
+                perf["adapter_cache_hit"] = current_adapter_telemetry.get("adapter_cache_hit")
             if router is not None:
                 token_count = len(full_text.split())
                 log_router_event(
@@ -1321,6 +1479,7 @@ def create_app(settings: dict, base_dir: Path) -> "FastAPI":
                 "backend": str(current_backend),
                 "adapter": current_adapter,
                 "adapter_reason": current_adapter_reason,
+                "adapter_telemetry": current_adapter_telemetry,
                 "messages": messages,
                 "prompt_text": prompt,
                 "response_text": full_text,
@@ -1550,7 +1709,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 return
             messages, _prompt_override, rag_info = _inject_rag_context(base_dir, settings, messages, None)
             backend = settings.get("core", {}).get("backend", "vortex")
-            backend_label = "hf" if str(backend).lower() == "hf" else "core"
+            backend_label = _normalize_backend_label(backend)
             default_system = settings.get("core", {}).get("hf_system_prompt", "You are Vortex, a helpful coding assistant.")
             prompt = build_chat_prompt(messages, backend, tokenizer=getattr(model, "tokenizer", None), default_system=default_system)
             stream = bool(payload.get("stream", False))
@@ -1564,6 +1723,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             adapter_sel: dict | None = None
             adapter_active = None
             adapter_reason = None
+            adapter_telemetry: dict | None = None
             if (
                 payload.get("adapter") is not None
                 or payload.get("expert") is not None
@@ -1596,6 +1756,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                                 self.end_headers()
                                 return
                             adapter_active = applied.get("adapter")
+                            adapter_telemetry = applied
                     try:
                         text = model.generate(
                             prompt,
@@ -1615,6 +1776,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                                     raise
                             adapter_active = None
                             adapter_reason = None
+                            adapter_telemetry = None
                             text = fallback_model.generate(
                                 prompt,
                                 max_new_tokens=decode_args["max_new_tokens"],
@@ -1634,6 +1796,13 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                     "vram_peak_mb": None,
                     "adapter": adapter_active,
                 }
+                if adapter_telemetry:
+                    perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
+                    perf["selected_adapters"] = adapter_telemetry.get("selected_adapters")
+                    perf["active_adapters"] = adapter_telemetry.get("active_adapters")
+                    perf["shared_expert"] = adapter_telemetry.get("shared_expert")
+                    perf["shared_used"] = adapter_telemetry.get("shared_used")
+                    perf["adapter_cache_hit"] = adapter_telemetry.get("adapter_cache_hit")
                 episode = {
                     "version": 1,
                     "ts": time.time(),
@@ -1641,6 +1810,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                     "backend": str(backend_label),
                     "adapter": adapter_active,
                     "adapter_reason": adapter_reason,
+                    "adapter_telemetry": adapter_telemetry,
                     "messages": messages,
                     "prompt_text": prompt,
                     "response_text": text,
@@ -1698,6 +1868,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                         if not applied.get("ok", False):
                             raise RuntimeError(str(applied.get("error", "adapter_load_failed")))
                         adapter_active = applied.get("adapter")
+                        adapter_telemetry = applied
                 if hasattr(model, "stream_generate"):
                     for delta in model.stream_generate(prompt, **decode_args):
                         chunk = {
@@ -1734,12 +1905,23 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 "tokens_out_est": int(tokens_out),
                 "tokens_per_sec": float(tokens_out) / max(1e-6, elapsed),
                 "vram_peak_mb": None,
+                "adapter": adapter_active,
             }
+            if adapter_telemetry:
+                perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
+                perf["selected_adapters"] = adapter_telemetry.get("selected_adapters")
+                perf["active_adapters"] = adapter_telemetry.get("active_adapters")
+                perf["shared_expert"] = adapter_telemetry.get("shared_expert")
+                perf["shared_used"] = adapter_telemetry.get("shared_used")
+                perf["adapter_cache_hit"] = adapter_telemetry.get("adapter_cache_hit")
             episode = {
                 "version": 1,
                 "ts": time.time(),
                 "request_id": request_id,
                 "backend": str(backend_label),
+                "adapter": adapter_active,
+                "adapter_reason": adapter_reason,
+                "adapter_telemetry": adapter_telemetry,
                 "messages": messages,
                 "prompt_text": prompt,
                 "response_text": full_text,

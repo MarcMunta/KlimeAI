@@ -51,6 +51,7 @@ class LAVAMemory(nn.Module):
         surprise_threshold: float = 0.0,
         kv_quant_bits: int = 0,
         kv_quant: str | None = None,
+        kv_lowrank_rank: int | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -75,24 +76,37 @@ class LAVAMemory(nn.Module):
                 kv_quant = "2bit"
             else:
                 kv_quant = "none"
-        self.kv_quant = str(kv_quant or "none").lower()
+        raw_mode = str(kv_quant or "none").lower().strip()
+        if raw_mode in {"low_rank", "low-rank", "mla"}:
+            raw_mode = "lowrank"
+        self.kv_quant = raw_mode
         self.kv_quant_bits = 0
+        self.kv_lowrank_rank = int(kv_lowrank_rank or 0) if kv_lowrank_rank is not None else 0
         if self.kv_quant == "int8":
             self.kv_quant_bits = 8
         elif self.kv_quant == "2bit":
             self.kv_quant_bits = 2
+        elif self.kv_quant == "lowrank":
+            self.kv_quant_bits = 0
+            if self.kv_lowrank_rank <= 0:
+                self.kv_lowrank_rank = max(8, min(256, int(hidden_size) // 4))
+            if self.kv_lowrank_rank >= int(hidden_size):
+                self.kv_lowrank_rank = max(1, int(hidden_size) - 1)
         self._quant_dirty = True
         self._step = 0
         self._cluster_dirty = False
         self._centroid_dirty = False
 
         self.register_buffer("addresses", torch.randn(latent_slots, hidden_size) * 0.02)
-        self.register_buffer("contents", torch.randn(latent_slots, hidden_size) * 0.02)
-        self.register_buffer("contents_q", torch.empty(latent_slots, hidden_size, dtype=torch.int8))
-        self.register_buffer("contents_scale", torch.ones(hidden_size))
-        packed_dim = (hidden_size + 3) // 4
-        self.register_buffer("contents_q2", torch.empty(latent_slots, packed_dim, dtype=torch.uint8))
-        self.register_buffer("contents_scale_2bit", torch.ones(hidden_size))
+        if self.kv_quant == "lowrank":
+            self.register_buffer("contents_lr", torch.randn(latent_slots, int(self.kv_lowrank_rank)) * 0.02)
+        else:
+            self.register_buffer("contents", torch.randn(latent_slots, hidden_size) * 0.02)
+            self.register_buffer("contents_q", torch.empty(latent_slots, hidden_size, dtype=torch.int8))
+            self.register_buffer("contents_scale", torch.ones(hidden_size))
+            packed_dim = (hidden_size + 3) // 4
+            self.register_buffer("contents_q2", torch.empty(latent_slots, packed_dim, dtype=torch.uint8))
+            self.register_buffer("contents_scale_2bit", torch.ones(hidden_size))
         self.register_buffer("addresses_norm", torch.empty(latent_slots, hidden_size))
         self.register_buffer("addresses_norm_t", torch.empty(hidden_size, latent_slots))
         if self.lava_clusters > 0:
@@ -174,6 +188,10 @@ class LAVAMemory(nn.Module):
             self.kv_quant_bits = 0
             self._quant_dirty = False
             return
+        if self.kv_quant == "lowrank":
+            self.kv_quant_bits = 0
+            self._quant_dirty = False
+            return
         with torch.no_grad():
             if self.kv_quant == "int8":
                 self.kv_quant_bits = 8
@@ -191,15 +209,81 @@ class LAVAMemory(nn.Module):
         self._quant_dirty = False
 
     def set_kv_quant(self, mode: str) -> None:
-        self.kv_quant = str(mode or "none").lower()
+        raw = str(mode or "none").lower().strip()
+        if raw in {"low_rank", "low-rank", "mla"}:
+            raw = "lowrank"
+        self.kv_quant = raw
         if self.kv_quant == "int8":
+            if not hasattr(self, "contents"):
+                try:
+                    proj = self._get_lowrank_projector()
+                    full = (self.contents_lr @ proj.proj_t).to(device=self.addresses.device, dtype=self.addresses.dtype)  # type: ignore[attr-defined]
+                except Exception:
+                    full = torch.randn(self.latent_slots, int(self.hidden_size), device=self.addresses.device) * 0.02
+                self.register_buffer("contents", full)
+            if not hasattr(self, "contents_q"):
+                self.register_buffer(
+                    "contents_q",
+                    torch.empty(self.latent_slots, int(self.hidden_size), dtype=torch.int8, device=self.addresses.device),
+                )
+            if not hasattr(self, "contents_scale"):
+                self.register_buffer("contents_scale", torch.ones(int(self.hidden_size), device=self.addresses.device))
             self.kv_quant_bits = 8
         elif self.kv_quant == "2bit":
+            if not hasattr(self, "contents"):
+                try:
+                    proj = self._get_lowrank_projector()
+                    full = (self.contents_lr @ proj.proj_t).to(device=self.addresses.device, dtype=self.addresses.dtype)  # type: ignore[attr-defined]
+                except Exception:
+                    full = torch.randn(self.latent_slots, int(self.hidden_size), device=self.addresses.device) * 0.02
+                self.register_buffer("contents", full)
+            packed_dim = (int(self.hidden_size) + 3) // 4
+            if not hasattr(self, "contents_q2"):
+                self.register_buffer(
+                    "contents_q2",
+                    torch.empty(self.latent_slots, packed_dim, dtype=torch.uint8, device=self.addresses.device),
+                )
+            if not hasattr(self, "contents_scale_2bit"):
+                self.register_buffer("contents_scale_2bit", torch.ones(int(self.hidden_size), device=self.addresses.device))
             self.kv_quant_bits = 2
+        elif self.kv_quant == "lowrank":
+            self.kv_quant_bits = 0
+            if getattr(self, "kv_lowrank_rank", 0) <= 0:
+                self.kv_lowrank_rank = max(8, min(256, int(self.hidden_size) // 4))
+            if not hasattr(self, "contents_lr"):
+                try:
+                    proj = self._get_lowrank_projector()
+                    if hasattr(self, "contents"):
+                        lr = self.contents.to(proj.proj.dtype) @ proj.proj  # type: ignore[union-attr]
+                    else:
+                        lr = torch.randn(self.latent_slots, int(self.kv_lowrank_rank), device=self.addresses.device) * 0.02
+                except Exception:
+                    lr = torch.randn(self.latent_slots, int(self.kv_lowrank_rank), device=self.addresses.device) * 0.02
+                self.register_buffer("contents_lr", lr)
         else:
             self.kv_quant_bits = 0
+            if not hasattr(self, "contents"):
+                try:
+                    proj = self._get_lowrank_projector()
+                    full = (self.contents_lr @ proj.proj_t).to(device=self.addresses.device, dtype=self.addresses.dtype)  # type: ignore[attr-defined]
+                except Exception:
+                    full = torch.randn(self.latent_slots, int(self.hidden_size), device=self.addresses.device) * 0.02
+                self.register_buffer("contents", full)
         self._quant_dirty = True
         self._refresh_quant_cache()
+
+    def _get_lowrank_projector(self):
+        from ..runtime.kv_compress import get_lowrank_projector
+
+        rank = int(getattr(self, "kv_lowrank_rank", 0) or 0)
+        if rank <= 0:
+            rank = max(8, min(256, int(self.hidden_size) // 4))
+        return get_lowrank_projector(
+            int(self.hidden_size),
+            int(rank),
+            device=self.addresses.device,
+            dtype=self.addresses.dtype,
+        )
 
     def _update_address_cache_row(self, slot: int | torch.Tensor) -> None:
         with torch.no_grad():
@@ -288,7 +372,10 @@ class LAVAMemory(nn.Module):
     def reset_state(self) -> None:
         with torch.no_grad():
             self.addresses.copy_(torch.randn_like(self.addresses) * 0.02)
-            self.contents.copy_(torch.randn_like(self.contents) * 0.02)
+            if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+                self.contents_lr.copy_(torch.randn_like(self.contents_lr) * 0.02)
+            else:
+                self.contents.copy_(torch.randn_like(self.contents) * 0.02)
             self.age.zero_()
             self.importance.zero_()
             self.stats = LavaStats()
@@ -317,11 +404,29 @@ class LAVAMemory(nn.Module):
     def save_state(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        contents = None
+        contents_lr = None
+        if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+            try:
+                proj = self._get_lowrank_projector()
+                contents = (self.contents_lr @ proj.proj_t).detach().cpu()
+                contents_lr = self.contents_lr.detach().cpu()
+            except Exception:
+                contents = torch.zeros(self.latent_slots, int(self.hidden_size), dtype=torch.float32)
+                contents_lr = self.contents_lr.detach().cpu() if hasattr(self, "contents_lr") else None
+        if contents is None:
+            if hasattr(self, "contents"):
+                contents = self.contents.detach().cpu()
+            else:
+                contents = torch.zeros(self.latent_slots, int(self.hidden_size), dtype=torch.float32)
         payload = {
             "addresses": self.addresses.detach().cpu(),
-            "contents": self.contents.detach().cpu(),
+            "contents": contents,
+            "contents_lr": contents_lr,
             "age": self.age.detach().cpu(),
             "importance": self.importance.detach().cpu(),
+            "kv_mode": str(self.kv_quant),
+            "kv_lowrank_rank": int(getattr(self, "kv_lowrank_rank", 0) or 0),
         }
         torch.save(payload, path)
 
@@ -333,7 +438,16 @@ class LAVAMemory(nn.Module):
         payload_t = cast(Dict[str, torch.Tensor], payload)
         with torch.no_grad():
             self.addresses.copy_(payload_t["addresses"].to(self.addresses.device))
-            self.contents.copy_(payload_t["contents"].to(self.contents.device))
+            if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+                lr = payload_t.get("contents_lr")
+                if lr is not None:
+                    self.contents_lr.copy_(lr.to(self.contents_lr.device))
+                else:
+                    proj = self._get_lowrank_projector()
+                    full = payload_t["contents"].to(self.addresses.device)
+                    self.contents_lr.copy_(full @ proj.proj)
+            else:
+                self.contents.copy_(payload_t["contents"].to(self.contents.device))
             self.age.copy_(payload_t["age"].to(self.age.device))
             self.importance.copy_(payload_t["importance"].to(self.importance.device))
         self._refresh_address_cache()
@@ -377,7 +491,12 @@ class LAVAMemory(nn.Module):
                 batch_mean = x.mean(dim=0)
             score = self.age - self.importance
             slot = torch.argmax(score)
-            self.contents[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * batch_mean)
+            if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+                proj = self._get_lowrank_projector()
+                mean_lr = batch_mean.to(proj.proj.dtype) @ proj.proj
+                self.contents_lr[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * mean_lr)
+            else:
+                self.contents[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * batch_mean)
             self.addresses[slot].mul_(1.0 - 0.05 * write_scale).add_(0.05 * write_scale * batch_mean)
             self.importance[slot] = torch.clamp(self.importance[slot] + 0.05 * write_scale, max=1.0)
             self.age.add_(write_scale)
@@ -386,7 +505,7 @@ class LAVAMemory(nn.Module):
                 self.stats.writes += int(x.shape[0])
             self._update_address_cache_row(slot)
             self._maybe_reassign_cluster(slot, self.addresses_norm[slot])
-            if self.kv_quant != "none":
+            if self.kv_quant in {"int8", "2bit"}:
                 self._quant_dirty = True
                 self._refresh_quant_cache()
 
@@ -414,20 +533,26 @@ class LAVAMemory(nn.Module):
                 top_k = min(self.top_k, self.latent_slots)
                 vals, idx = torch.topk(scores, k=top_k, dim=-1)
             attn = torch.softmax(vals, dim=-1)
-            if self.kv_quant != "none":
-                if self._quant_dirty:
-                    self._refresh_quant_cache()
-                if self.kv_quant == "int8":
-                    selected = self.contents_q[idx].to(torch.float32) * self.contents_scale
-                elif self.kv_quant == "2bit":
-                    packed = self.contents_q2[idx]
-                    unpacked = self._unpack_2bit(packed, hidden).to(torch.int8) - 2
-                    selected = unpacked.to(torch.float32) * self.contents_scale_2bit
+            if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+                proj = self._get_lowrank_projector()
+                selected_lr = self.contents_lr[idx]
+                mem_lr = (attn.unsqueeze(-1) * selected_lr).sum(dim=-2)
+                mem = mem_lr @ proj.proj_t
+            else:
+                if self.kv_quant != "none":
+                    if self._quant_dirty:
+                        self._refresh_quant_cache()
+                    if self.kv_quant == "int8":
+                        selected = self.contents_q[idx].to(torch.float32) * self.contents_scale
+                    elif self.kv_quant == "2bit":
+                        packed = self.contents_q2[idx]
+                        unpacked = self._unpack_2bit(packed, hidden).to(torch.int8) - 2
+                        selected = unpacked.to(torch.float32) * self.contents_scale_2bit
+                    else:
+                        selected = self.contents[idx]
                 else:
                     selected = self.contents[idx]
-            else:
-                selected = self.contents[idx]
-            mem = (attn.unsqueeze(-1) * selected).sum(dim=-2)
+                mem = (attn.unsqueeze(-1) * selected).sum(dim=-2)
             mem = self.read_proj(mem)
             if positions is None:
                 self.stats.reads += int(batch * seq)
@@ -466,7 +591,12 @@ class LAVAMemory(nn.Module):
                 batch_mean = x_sel.mean(dim=0)
             score = self.age - self.importance
             slot = torch.argmax(score)
-            self.contents[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * batch_mean)
+            if self.kv_quant == "lowrank" and hasattr(self, "contents_lr"):
+                proj = self._get_lowrank_projector()
+                mean_lr = batch_mean.to(proj.proj.dtype) @ proj.proj
+                self.contents_lr[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * mean_lr)
+            else:
+                self.contents[slot].mul_(1.0 - 0.1 * write_scale).add_(0.1 * write_scale * batch_mean)
             self.addresses[slot].mul_(1.0 - 0.05 * write_scale).add_(0.05 * write_scale * batch_mean)
             self.importance[slot] = torch.clamp(self.importance[slot] + 0.05 * write_scale, max=1.0)
             self.age.add_(write_scale)
@@ -475,7 +605,7 @@ class LAVAMemory(nn.Module):
                 self.stats.writes += 1
             self._update_address_cache_row(slot)
             self._maybe_reassign_cluster(slot, self.addresses_norm[slot])
-            if self.kv_quant != "none":
+            if self.kv_quant in {"int8", "2bit"}:
                 self._quant_dirty = True
                 self._refresh_quant_cache()
 

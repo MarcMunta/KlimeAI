@@ -412,6 +412,36 @@ def _llama_cpp_backend_check(settings: dict, base_dir: Path) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "path": str(path)}
 
 
+def _external_engine_deep_check(settings: dict) -> dict[str, Any]:
+    core = settings.get("core", {}) or {}
+    backend = str(core.get("backend", "vortex") or "vortex").strip().lower()
+    engine = str(core.get("external_engine") or core.get("engine") or backend).strip().lower()
+    if backend in {"vllm", "sglang"}:
+        engine = backend
+        backend = "external"
+    if backend != "external":
+        return {"ok": True, "skipped": "not_external"}
+    base_url = core.get("external_base_url") or core.get("external_url")
+    if not base_url:
+        return {"ok": False, "error": "core.external_base_url missing"}
+    if engine not in {"vllm", "sglang"}:
+        return {"ok": False, "error": "external_engine_invalid", "engine": engine, "required": ["vllm", "sglang"]}
+    pkg = "vllm" if engine == "vllm" else "sglang"
+    installed = bool(importlib.util.find_spec(pkg) is not None)
+    if not installed:
+        install = f"python -m pip install {pkg}"
+        if sys.platform.startswith("win"):
+            install = f"{install}  # on Windows, prefer WSL2"
+        return {
+            "ok": False,
+            "error": "external_engine_not_installed",
+            "engine": engine,
+            "package": pkg,
+            "install": install,
+        }
+    return {"ok": True, "engine": engine, "base_url": str(base_url)}
+
+
 def _promotion_gating_wiring_check(base_dir: Path) -> dict[str, Any]:
     try:
         from .promotion import gating as gating_mod
@@ -799,6 +829,11 @@ def _deep_check_120b_like_profile(settings: dict, base_dir: Path, *, mock: bool)
             "latency_p95_ms",
             "rss_mb",
             "vram_peak_mb",
+            "engine",
+            "kv_mode",
+            "kv_rank",
+            "kv_bytes_est",
+            "shared_expert",
         ]
         return [key for key in required_keys if key not in report]
 
@@ -1013,6 +1048,13 @@ def run_deep_checks(settings: dict, base_dir: Path, *, mock: bool = False) -> di
         else:
             checks["llama_cpp_backend"] = _llama_cpp_backend_check(settings, base_dir)
             if not bool(checks["llama_cpp_backend"].get("ok", False)):
+                report["deep_ok"] = False
+    if backend in {"external", "vllm", "sglang"}:
+        if mock:
+            checks["external_engine"] = {"ok": True, "skipped": "mock"}
+        else:
+            checks["external_engine"] = _external_engine_deep_check(settings)
+            if not bool(checks["external_engine"].get("ok", False)):
                 report["deep_ok"] = False
 
     try:

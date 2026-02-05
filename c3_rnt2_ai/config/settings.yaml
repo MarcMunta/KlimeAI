@@ -444,6 +444,11 @@ profiles:
           required_ctx: 4096
           min_tokens_per_sec: 8.0
           max_vram_peak_mb: 15500
+        # Alias for CLI convenience: `--scenario long_prefill`.
+        long_prefill:
+          required_ctx: 4096
+          min_tokens_per_sec: 8.0
+          max_vram_peak_mb: 15500
         # Stress decode (long decode).
         decode_long:
           required_ctx: 1024
@@ -478,6 +483,19 @@ profiles:
 
             # Explain the function and add a tiny test.
         prefill_long:
+          ctx: 4096
+          max_new_tokens: 16
+          warmup: 1
+          repeat: 2
+          seed: 0
+          prompt: |
+            def normalize_path(path: str) -> str:
+                """Normalize a filesystem path (Windows + Linux) safely."""
+                return path
+
+            # Describe edge cases and propose tests.
+        # Alias for CLI convenience: `--scenario long_prefill`.
+        long_prefill:
           ctx: 4096
           max_new_tokens: 16
           warmup: 1
@@ -611,6 +629,31 @@ profiles:
       max_regression_pct: 15
       max_vram_peak_mb: 15500
       min_tokens_per_sec: 0
+
+  rtx4080_16gb_sglang_fast:
+    # Optional fast path: run inference via an external engine (OpenAI-compatible endpoint),
+    # keeping KlimeAI as the control-plane (safety, gating, ctx policies, logging).
+    #
+    # Doctor fails closed unless the selected engine is installed (vllm/sglang) and configured.
+    base_profile: rtx4080_16gb_safe_windows_core
+    core:
+      backend: external
+      external_engine: sglang
+      external_base_url: "http://127.0.0.1:30000"
+      external_timeout_s: 60
+      external_autostart: false
+    adapters:
+      enabled: false
+    experts:
+      enabled: false
+    tools:
+      web:
+        enabled: false
+        allow_domains: []
+    security:
+      web:
+        strict: true
+        allowlist_domains: []
 
   autonomous_4080_hf:
     # Full autonomous (internet + self-train + autopatch) for 4080 16GB.

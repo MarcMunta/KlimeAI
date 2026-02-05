@@ -29,6 +29,8 @@ class VBlockConfig:
     ssm_state_size: int
     gated_mlp_ratio: int
     kv_quant_bits: int = 0
+    kv_quant: str | None = None
+    kv_lowrank_rank: int | None = None
     dtype: str | None = None
 
 
@@ -81,6 +83,8 @@ class VBlock(nn.Module):
             write_on_surprise=config.lava_write_on_surprise,
             surprise_threshold=config.lava_surprise_threshold,
             kv_quant_bits=int(getattr(config, "kv_quant_bits", 0)),
+            kv_quant=getattr(config, "kv_quant", None),
+            kv_lowrank_rank=getattr(config, "kv_lowrank_rank", None),
         )
         self.mlp = GatedMLP(config.hidden_size, ratio=config.gated_mlp_ratio)
 

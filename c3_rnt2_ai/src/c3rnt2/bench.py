@@ -69,13 +69,118 @@ def _resolve_mix_mode(settings: dict) -> str:
     return "single"
 
 
-def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, prompt: str) -> tuple[list[str], float | None, str | None]:
-    """Best-effort: load+activate adapters for HF bench, returning (selected_names, load_ms, active_adapter_name)."""
+def _kv_mode_from_settings(settings: dict) -> str:
+    runtime = settings.get("runtime", {}) or {}
+    raw = str(runtime.get("kv_quant", "none") or "none").strip().lower()
+    if raw in {"low_rank", "low-rank", "mla"}:
+        return "lowrank"
+    return raw
+
+
+def _kv_telemetry_from_settings(settings: dict) -> dict[str, Any]:
+    kv_mode = _kv_mode_from_settings(settings)
+    kv_rank = None
+    kv_bytes_est = None
+    if kv_mode == "lowrank":
+        runtime = settings.get("runtime", {}) or {}
+        try:
+            rank = int(runtime.get("kv_lowrank_rank", 0) or 0)
+        except Exception:
+            rank = 0
+        kv_rank = int(rank) if rank > 0 else None
+    try:
+        core = settings.get("core", {}) or {}
+        vx = settings.get("vortex_model", {}) or {}
+        hidden = int(core.get("hidden_size", 0) or 0)
+        slots = int(vx.get("latent_slots", vx.get("lava_slots", core.get("lava_slots", 0) or 0)) or 0)
+        elem = 4  # float32
+        if hidden > 0 and slots > 0:
+            if kv_mode == "lowrank":
+                rank = int(kv_rank) if isinstance(kv_rank, int) and kv_rank > 0 else max(8, min(256, hidden // 4))
+                kv_bytes_est = int(slots) * int(rank) * elem + int(hidden) * int(rank) * elem
+            else:
+                kv_bytes_est = int(slots) * int(hidden) * elem
+    except Exception:
+        kv_bytes_est = None
+    return {"kv_mode": kv_mode, "kv_rank": kv_rank, "kv_bytes_est": kv_bytes_est}
+
+
+def _kv_telemetry_from_model(model: Any, settings: dict) -> dict[str, Any]:
+    out = _kv_telemetry_from_settings(settings)
+    try:
+        blocks = getattr(model, "blocks", None)
+        if blocks and hasattr(blocks[0], "lava"):
+            lava = getattr(blocks[0], "lava")
+            mode = str(getattr(lava, "kv_quant", out.get("kv_mode") or "none")).lower()
+            if mode in {"low_rank", "low-rank", "mla"}:
+                mode = "lowrank"
+            out["kv_mode"] = mode
+            if mode == "lowrank":
+                try:
+                    out["kv_rank"] = int(getattr(lava, "kv_lowrank_rank", 0) or 0) or out.get("kv_rank")
+                except Exception:
+                    pass
+            else:
+                out["kv_rank"] = None
+            bytes_est = None
+            if mode == "lowrank" and hasattr(lava, "contents_lr"):
+                try:
+                    bytes_est = int(lava.contents_lr.numel() * lava.contents_lr.element_size())
+                except Exception:
+                    bytes_est = None
+                try:
+                    proj = lava._get_lowrank_projector() if hasattr(lava, "_get_lowrank_projector") else None
+                    if proj is not None and hasattr(proj, "proj"):
+                        bytes_est = int(bytes_est or 0) + int(proj.proj.numel() * proj.proj.element_size())
+                except Exception:
+                    pass
+            elif hasattr(lava, "contents"):
+                try:
+                    bytes_est = int(lava.contents.numel() * lava.contents.element_size())
+                except Exception:
+                    bytes_est = None
+            out["kv_bytes_est"] = bytes_est if bytes_est is not None else out.get("kv_bytes_est")
+    except Exception:
+        return out
+    return out
+
+
+def _resolve_shared_expert_cfg(settings: dict, base_dir: Path) -> dict[str, Any] | None:
+    for section in ("experts", "adapters"):
+        cfg = settings.get(section, {}) or {}
+        raw_path = cfg.get("shared_expert_path")
+        if not raw_path:
+            continue
+        path = Path(str(raw_path))
+        if not path.is_absolute():
+            path = base_dir / path
+        if not path.exists():
+            continue
+        raw_name = cfg.get("shared_expert_name") or "shared_expert"
+        raw_weight = cfg.get("shared_expert_weight")
+        try:
+            weight = float(raw_weight) if raw_weight is not None else 0.2
+        except Exception:
+            weight = 0.2
+        if weight < 0:
+            weight = 0.0
+        return {"section": section, "name": str(raw_name), "path": str(path), "weight": float(weight)}
+    return None
+
+
+def _maybe_prepare_hf_adapters(
+    model: Any, settings: dict, base_dir: Path, prompt: str
+) -> tuple[list[str], float | None, str | None, dict[str, Any] | None]:
+    """Best-effort: load+activate adapters for HF bench.
+
+    Returns (active_adapters, load_ms, active_adapter_name, telemetry).
+    """
     if not bool(getattr(model, "is_hf", False)):
-        return [], None, None
+        return [], None, None, None
 
     registry = None
     router = None
+    chosen_section = None
     for section in ("experts", "adapters"):
         try:
             if section == "experts":
@@ -87,13 +192,15 @@ def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, promp
             registry = _Registry.from_settings(settings, base_dir=base_dir)
             if bool(getattr(registry, "enabled", False)):
                 router = _Router.from_settings(settings)
+                chosen_section = str(section)
                 break
         except Exception:
             registry = None
             router = None
+            chosen_section = None
             continue
     if registry is None or router is None:
-        return [], None, None
+        return [], None, None, None
 
     decision = router.select(prompt or "", registry.names, top_k=None)
     selected: list[str] = []
@@ -103,14 +210,22 @@ def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, promp
         selected = [str(decision.selected_adapter).strip()]
     selected = [name for name in selected if name]
     if not selected:
-        return [], None, None
+        return [], None, None, {"selected_adapters": [], "shared_expert": None, "shared_used": False}
 
     if not hasattr(model, "add_adapter"):
-        return [], None, getattr(model, "active_adapter_name", None)
+        return [], None, getattr(model, "active_adapter_name", None), {"selected_adapters": list(selected), "shared_expert": None, "shared_used": False}
 
     mix_mode = _resolve_mix_mode(settings)
+    shared_cfg = _resolve_shared_expert_cfg(settings, base_dir=base_dir)
+    if shared_cfg is not None and chosen_section and str(shared_cfg.get("section")) != str(chosen_section):
+        shared_cfg = None
+    if shared_cfg is not None and hasattr(model, "set_weighted_adapters"):
+        mix_mode = "weighted"
     start = time.perf_counter()
     loaded: list[str] = []
+    cache_hits = 0
+    shared_name = str(shared_cfg.get("name")) if shared_cfg else None
+    shared_path = str(shared_cfg.get("path")) if shared_cfg else None
     try:
         try:
             setattr(model, "adapter_max_loaded", int(registry.max_loaded))
@@ -124,21 +239,45 @@ def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, promp
             if not Path(path).exists():
                 continue
             try:
-                model.add_adapter(name, path)
+                loaded_new = bool(model.add_adapter(name, path))
+                if not loaded_new:
+                    cache_hits += 1
                 loaded.append(name)
             except Exception:
                 continue
+        if shared_name and shared_path and shared_name not in loaded and Path(shared_path).exists():
+            try:
+                loaded_new = bool(model.add_adapter(shared_name, shared_path))
+                if not loaded_new:
+                    cache_hits += 1
+                loaded.append(shared_name)
+            except Exception:
+                pass
 
         if not loaded:
-            return [], round((time.perf_counter() - start) * 1000.0, 3), getattr(model, "active_adapter_name", None)
+            return [], round((time.perf_counter() - start) * 1000.0, 3), getattr(model, "active_adapter_name", None), {"selected_adapters": list(selected), "shared_expert": None, "shared_used": False}
 
         # Activate selection (single or weighted mix).
+        shared_used = False
+        weights_out = None
         if mix_mode == "weighted" and len(loaded) > 1 and hasattr(model, "set_weighted_adapters"):
-            scores = decision.scores if isinstance(decision.scores, list) and len(decision.scores) == len(loaded) else None
-            weights = _normalize_weights(scores) if scores else [1.0 / float(len(loaded)) for _ in loaded]
-            adapter_weights = {name: float(weight) for name, weight in zip(loaded, weights)}
+            base_names = [n for n in selected if n in loaded]
+            base_scores = decision.scores if isinstance(decision.scores, list) and len(decision.scores) == len(selected) else None
+            weights = _normalize_weights(base_scores) if base_scores else ([1.0 / float(len(base_names)) for _ in base_names] if base_names else [])
+            adapter_weights = {name: float(weight) for name, weight in zip(base_names, weights)}
+            if shared_name and shared_path and shared_name in loaded:
+                try:
+                    shared_w = float(shared_cfg.get("weight", 0.2)) if shared_cfg else 0.2
+                except Exception:
+                    shared_w = 0.2
+                adapter_weights[shared_name] = float(shared_w)
+            total = float(sum(max(0.0, float(v)) for v in adapter_weights.values()))
+            if total > 1e-12:
+                adapter_weights = {k: float(v) / total for k, v in adapter_weights.items()}
             try:
-                _ = bool(model.set_weighted_adapters(adapter_weights))
+                mixed_ok = bool(model.set_weighted_adapters(adapter_weights))
+                shared_used = bool(mixed_ok and shared_name and shared_name in adapter_weights)
+                weights_out = dict(adapter_weights)
             except Exception:
                 pass
         else:
@@ -149,7 +288,16 @@ def _maybe_prepare_hf_adapters(model: Any, settings: dict, base_dir: Path, promp
                     pass
     finally:
         elapsed_ms = round((time.perf_counter() - start) * 1000.0, 3)
-    return loaded, float(elapsed_ms), getattr(model, "active_adapter_name", None)
+    telemetry = {
+        "selected_adapters": list(selected),
+        "active_adapters": list(loaded),
+        "shared_expert": (shared_name if shared_name and shared_name in loaded else None),
+        "shared_used": bool(shared_used),
+        "adapter_cache_hit": int(cache_hits),
+        "weights": weights_out,
+        "mix_mode": mix_mode,
+    }
+    return loaded, float(elapsed_ms), getattr(model, "active_adapter_name", None), telemetry
 
 
 def _rss_mb() -> float | None:
@@ -310,6 +458,10 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
             quant_mode = "gguf"
             offload_enabled = False
 
+    engine = str(core_cfg.get("engine") or core_cfg.get("external_engine") or backend_resolved).strip().lower() or backend_resolved
+    kv_tel = _kv_telemetry_from_settings(settings)
+    shared_expert = None
+
     prompt_text = str(args.prompt or "")
     adapter_load_ms = None
     active_adapters: list[str] = []
@@ -330,9 +482,12 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
             "profile": str(args.profile),
             "backend": backend,
             "backend_resolved": backend_resolved,
+            "engine": engine,
             "quant_mode": quant_mode,
             "offload_enabled": offload_enabled,
             "scenario": scenario,
+            **kv_tel,
+            "shared_expert": shared_expert,
             "seed": int(args.seed),
             "repeat": int(args.repeat),
             "warmup": int(args.warmup),
@@ -368,6 +523,10 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
             "active_adapters": [],
             "adapter_load_ms": None,
             "adapter_active": None,
+            "adapter_cache_hit": None,
+            "selected_adapters": None,
+            "shared_used": None,
+            "adapter_weights": None,
             "stream_topk": stream_topk,
         }
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -403,10 +562,14 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
     elif bool(getattr(model, "is_llama_cpp", False)):
         quant_mode = "gguf"
         offload_enabled = False
+    kv_tel = _kv_telemetry_from_model(model, settings)
+    adapter_tel = None
     try:
-        active_adapters, adapter_load_ms, adapter_active = _maybe_prepare_hf_adapters(model, settings, base_dir, prompt_text)
+        active_adapters, adapter_load_ms, adapter_active, adapter_tel = _maybe_prepare_hf_adapters(model, settings, base_dir, prompt_text)
     except Exception:
-        active_adapters, adapter_load_ms, adapter_active = [], None, getattr(model, "active_adapter_name", None)
+        active_adapters, adapter_load_ms, adapter_active, adapter_tel = [], None, getattr(model, "active_adapter_name", None), None
+    if isinstance(adapter_tel, dict):
+        shared_expert = adapter_tel.get("shared_expert")
     ctx_len_prompt = _ctx_len(model, prompt_text)
     if args.ctx and args.ctx > 0:
         candidate = _prompt_for_ctx(model, int(args.ctx))
@@ -508,9 +671,12 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "profile": str(args.profile),
         "backend": backend_used,
         "backend_resolved": backend_resolved,
+        "engine": engine,
         "quant_mode": quant_mode,
         "offload_enabled": offload_enabled,
         "scenario": scenario,
+        **kv_tel,
+        "shared_expert": shared_expert,
         "stream_topk": stream_topk,
         "seed": int(args.seed),
         "repeat": int(args.repeat),
@@ -542,6 +708,10 @@ def run_bench(settings: dict, base_dir: Path, args: BenchArgs) -> dict[str, Any]
         "active_adapters": list(active_adapters),
         "adapter_load_ms": round(float(adapter_load_ms), 3) if adapter_load_ms is not None else None,
         "adapter_active": adapter_active,
+        "adapter_cache_hit": (adapter_tel.get("adapter_cache_hit") if isinstance(adapter_tel, dict) else None),
+        "selected_adapters": (adapter_tel.get("selected_adapters") if isinstance(adapter_tel, dict) else None),
+        "shared_used": (adapter_tel.get("shared_used") if isinstance(adapter_tel, dict) else None),
+        "adapter_weights": (adapter_tel.get("weights") if isinstance(adapter_tel, dict) else None),
         # Paging counters (required keys, null if not applicable).
         "cache_hit_rate": paging_after.get("cache_hit_rate"),
         "bytes_prefetched": paging_after.get("bytes_prefetched"),

@@ -56,7 +56,7 @@ python -m c3rnt2 doctor --deep --profile rtx4080_16gb_120b_like
 Mock (sin pesos):
 
 ```bash
-python -m c3rnt2 bench --mock --profile rtx4080_16gb_120b_like --max-new-tokens 16 --json-out data\bench\last_120b_like.json
+python -m c3rnt2 bench --mock --profile rtx4080_16gb_120b_like --scenario long_prefill --max-new-tokens 16 --json-out data\bench\last_120b_like.json
 ```
 
 Real:
@@ -65,7 +65,7 @@ Real:
 python -m c3rnt2 bench --profile rtx4080_16gb_120b_like --max-new-tokens 64 --json-out data\bench\last_120b_like.json
 ```
 
-El JSON incluye `tokens_per_sec`, `prefill_tokens_per_sec`, `decode_tokens_per_sec`, `vram_peak_mb` (o `null`), `backend`, `active_adapters` y `adapter_load_ms`.
+El JSON incluye `tokens_per_sec`, `prefill_tokens_per_sec`, `decode_tokens_per_sec`, `vram_peak_mb` (o `null`), `backend`, `engine`, `active_adapters`, `adapter_load_ms`, `shared_expert`, `kv_mode`/`kv_rank`/`kv_bytes_est`.
 
 ### Baseline (regresión cerrada por defecto)
 
@@ -109,6 +109,15 @@ Mock (sin descargar pesos; genera estructura + `manifest.json` por dominio):
 python -m c3rnt2 train-hf-experts --profile rtx4080_16gb_120b_like --data data\\corpora --output data\\experts_hf --domains code,docs --mock
 ```
 
+## Shared expert (opcional, siempre activo)
+
+Si defines `experts.shared_expert_path`, ese adapter se aplica además del `top_k` (mezcla ponderada si está soportado).
+El bench exporta telemetría agregada: `shared_expert`, `shared_used`, `adapter_cache_hit`, `adapter_load_ms`.
+
+## External engine (opcional: sglang/vLLM proxy)
+
+Perfil opcional: `rtx4080_16gb_sglang_fast`.
+
 ## Promoción manual (fail-closed)
 
 Para el perfil 120B-like, la promoción de expertos HF requiere un archivo de aprobación:
@@ -127,8 +136,8 @@ El perfil arranca con `core.backend: hf`, pero:
 
 ## Checklist de aceptación (local)
 
-- ✅ `pip install -e .` y `pip install -e .[api]`
-- ✅ `pytest -q` (sin descargas)
-- ✅ `python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_120b_like`
-- ✅ `python -m c3rnt2 bench --mock --profile rtx4080_16gb_120b_like --max-new-tokens 16`
-- ✅ Gating bloquea promoción si no cumple `bench_thresholds` y deja motivo en `data/logs/`
+- [x] `pip install -e .` y `pip install -e .[api]`
+- [x] `pytest -q` (sin descargas)
+- [x] `python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_120b_like`
+- [x] `python -m c3rnt2 bench --mock --profile rtx4080_16gb_120b_like --max-new-tokens 16`
+- [x] Gating bloquea promoción si no cumple `bench_thresholds` y deja motivo en `data/logs/`

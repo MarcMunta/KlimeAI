@@ -82,6 +82,7 @@ def normalize_settings(settings: dict) -> dict:
                 runtime["kv_quant"] = "none"
     runtime.setdefault("kv_quant", "none")
     runtime.setdefault("kv_quant_2bit_experimental", False)
+    runtime.setdefault("kv_lowrank_rank", 0)
     runtime.setdefault("i_know_what_im_doing", False)
     runtime.setdefault("gpu_decompress", "none")
     normalized["runtime"] = runtime
@@ -465,6 +466,13 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
             missing.append("core.tensorrt_engine_dir")
         if not (core.get("tensorrt_tokenizer") or core.get("hf_model")):
             missing.append("core.tensorrt_tokenizer or core.hf_model")
+    elif backend in {"external", "vllm", "sglang"}:
+        engine = str(core.get("external_engine") or core.get("engine") or backend).strip().lower()
+        if backend == "external" and engine not in {"vllm", "sglang"}:
+            errors.append("core.external_engine must be vllm or sglang when core.backend=external")
+        base_url = core.get("external_base_url") or core.get("external_url")
+        if not base_url:
+            missing.append("core.external_base_url")
     else:
         for key in ("hidden_size", "layers", "heads"):
             if key not in core:
@@ -484,13 +492,32 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         errors.append("runtime.prefetch_depth must be >= 0")
 
     kv_quant = str(runtime.get("kv_quant", "none")).lower()
-    if kv_quant not in {"none", "int8", "2bit"}:
-        errors.append("runtime.kv_quant must be one of none|int8|2bit")
+    if kv_quant in {"low_rank", "low-rank", "mla"}:
+        kv_quant = "lowrank"
+    if kv_quant not in {"none", "int8", "2bit", "lowrank"}:
+        errors.append("runtime.kv_quant must be one of none|int8|2bit|lowrank")
     if kv_quant == "2bit":
         if not bool(runtime.get("kv_quant_2bit_experimental", False)):
             errors.append("runtime.kv_quant=2bit is experimental; set runtime.kv_quant_2bit_experimental=true")
         if not bool(runtime.get("i_know_what_im_doing", False)):
             errors.append("runtime.kv_quant=2bit requires runtime.i_know_what_im_doing=true")
+    if kv_quant == "lowrank":
+        raw_rank = runtime.get("kv_lowrank_rank")
+        try:
+            rank_i = int(raw_rank) if raw_rank is not None else 0
+        except Exception:
+            rank_i = None
+        if rank_i is None:
+            errors.append("runtime.kv_lowrank_rank must be an integer (0 = auto)")
+        elif rank_i < 0:
+            errors.append("runtime.kv_lowrank_rank must be >= 0 (0 = auto)")
+        elif rank_i > 0 and backend not in {"hf", "llama_cpp", "tensorrt"}:
+            try:
+                hidden = int(core.get("hidden_size", 0) or 0)
+            except Exception:
+                hidden = 0
+            if hidden > 0 and rank_i >= hidden:
+                errors.append("runtime.kv_lowrank_rank must be < core.hidden_size")
     gpu_decompress = str(runtime.get("gpu_decompress", "none")).lower()
     if gpu_decompress not in {"none", "triton"}:
         errors.append("runtime.gpu_decompress must be none or triton (CPU decompress + H2D pipeline)")

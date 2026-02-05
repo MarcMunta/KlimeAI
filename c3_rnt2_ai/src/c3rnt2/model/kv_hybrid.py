@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from typing import List, Tuple
 
 import numpy as np
@@ -20,15 +21,51 @@ class QuantizedKV:
 
 
 @dataclass
+class LowRankKV:
+    values_lr: np.ndarray
+    shape: Tuple[int, ...]
+    rank: int
+
+
+def _stable_seed(*parts: object) -> int:
+    text = "|".join(str(p) for p in parts)
+    digest = hashlib.sha1(text.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False) & 0x7FFF_FFFF_FFFF_FFFF
+
+
+@dataclass
 class KVHybridCache:
     window_size: int
     kv_quant_bits: int
     latent_slots: int
+    kv_quant: str | None = None
+    kv_lowrank_rank: int = 0
     exact_k: List[object] = field(default_factory=list)
     exact_v: List[object] = field(default_factory=list)
     quantized: List[QuantizedKV] = field(default_factory=list)
+    lowrank: List[LowRankKV] = field(default_factory=list)
     latent: List[object] = field(default_factory=list)
     _latent_idx: int = 0
+
+    def __post_init__(self) -> None:
+        raw = str(self.kv_quant or "").lower().strip()
+        if raw in {"low_rank", "low-rank", "mla"}:
+            raw = "lowrank"
+        if not raw:
+            if int(self.kv_quant_bits) == 8:
+                raw = "int8"
+            elif int(self.kv_quant_bits) == 2:
+                raw = "2bit"
+            else:
+                raw = "none"
+        self.kv_quant = raw
+        if raw == "int8":
+            self.kv_quant_bits = 8
+        elif raw == "2bit":
+            self.kv_quant_bits = 2
+        else:
+            # none|lowrank
+            self.kv_quant_bits = 0
 
     def add(self, k, v):
         self.exact_k.append(k)
@@ -84,12 +121,42 @@ class KVHybridCache:
             return unpacked.astype(np.float32) * quant.scale
         return quant.values.astype(np.float32)
 
+    def _lowrank_projector(self, hidden: int, rank: int) -> np.ndarray:
+        h = int(hidden)
+        r = int(rank)
+        if h <= 0:
+            raise ValueError("hidden must be > 0")
+        if r <= 0 or r >= h:
+            raise ValueError("rank must be in (0, hidden)")
+        seed = _stable_seed("c3rnt2.kv_hybrid.lowrank", h, r)
+        rng = np.random.default_rng(seed)
+        mat = rng.standard_normal(size=(h, r)).astype(np.float32)
+        denom = np.linalg.norm(mat, axis=0, keepdims=True)
+        denom = np.maximum(denom, 1e-6)
+        return mat / denom
+
     def _quantize_and_store(self, k, v):
         if torch is None:
             return
-        if self.kv_quant_bits <= 0:
+        if str(self.kv_quant or "none") == "none":
             return
         vec = torch.cat([k.flatten(), v.flatten()]).detach().cpu().numpy()
+        mode = str(self.kv_quant or "none")
+        if mode == "lowrank":
+            flat = vec.astype(np.float32).reshape(-1)
+            hidden = int(flat.size)
+            rank = int(self.kv_lowrank_rank or 0)
+            if rank <= 0:
+                rank = max(8, min(256, hidden // 4))
+            if rank >= hidden:
+                rank = max(1, hidden - 1)
+            proj = self._lowrank_projector(hidden, rank)
+            lr = (flat @ proj).astype(np.float16)
+            self.lowrank.append(LowRankKV(values_lr=lr, shape=flat.shape, rank=rank))
+            approx = (lr.astype(np.float32) @ proj.T).astype(np.float32)
+            self._update_latent(approx)
+            return
+
         if self.kv_quant_bits == 8:
             q, scale = self._quantize_int8(vec)
         elif self.kv_quant_bits == 2:
@@ -115,6 +182,14 @@ class KVHybridCache:
         return self.exact_k, self.exact_v, self.latent
 
     def dequantize_latest(self) -> np.ndarray | None:
+        if str(self.kv_quant or "none") == "lowrank":
+            if not self.lowrank:
+                return None
+            item = self.lowrank[-1]
+            total = int(np.prod(item.shape))
+            proj = self._lowrank_projector(total, int(item.rank))
+            full = item.values_lr.astype(np.float32) @ proj.T
+            return full.reshape(item.shape)
         if not self.quantized:
             return None
         return self._dequantize(self.quantized[-1])

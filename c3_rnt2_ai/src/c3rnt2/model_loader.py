@@ -43,6 +43,8 @@ def _llama_cpp_ready(core: dict, *, base_dir: Path | None = None) -> bool:
 def load_inference_model(settings: dict, backend_override: str | None = None) -> Any:
     core = settings.get("core", {}) or {}
     backend = str(backend_override or core.get("backend", "vortex")).lower()
+    if backend in {"vllm", "sglang"}:
+        backend = "external"
     if backend_override is None and backend == "hf" and str(core.get("prefer_llama_cpp_if_available", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
         if _llama_cpp_ready(core):
             backend = "llama_cpp"
@@ -61,6 +63,16 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
                 "Unsafe HF config for rtx4080_16gb_120b_like on Windows. "
                 "Run: python -m vortex prepare-model --profile rtx4080_16gb_120b_like"
             )
+    if backend == "external":
+        try:
+            from .external_engine import load_external_engine_model
+
+            return load_external_engine_model(settings)
+        except Exception:
+            fb = _fallback_backend(core, backend)
+            if fb:
+                return load_inference_model(settings, backend_override=fb)
+            raise
     if backend == "hf":
         try:
             return load_hf_model(settings)

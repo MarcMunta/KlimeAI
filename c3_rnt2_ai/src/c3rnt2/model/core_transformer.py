@@ -121,6 +121,8 @@ class VortexXConfig:
     mtp_k: int
     cuda_graphs: bool
     kv_quant_bits: int = 0
+    kv_quant: str = "none"
+    kv_lowrank_rank: int = 0
     dtype: str | None = None
     device: str | None = None
 
@@ -201,6 +203,8 @@ class CoreTransformer(nn.Module):
                     ssm_state_size=config.ssm_state_size,
                     gated_mlp_ratio=config.gated_mlp_ratio,
                     kv_quant_bits=int(getattr(config, "kv_quant_bits", 0)),
+                    kv_quant=str(getattr(config, "kv_quant", "none") or "none"),
+                    kv_lowrank_rank=int(getattr(config, "kv_lowrank_rank", 0) or 0) or None,
                     dtype=config.dtype,
                 )
             )
@@ -270,6 +274,8 @@ class CoreTransformer(nn.Module):
         lava_ann_mode = str(_vx("lava_ann_mode", vx_cfg.get("lava_ann_mode", "ivf" if int(_vx("lava_clusters", 0)) > 0 else "flat")))
         runtime_cfg = settings.get("runtime", {}) or {}
         kv_quant = str(runtime_cfg.get("kv_quant", "")).lower()
+        if kv_quant in {"low_rank", "low-rank", "mla"}:
+            kv_quant = "lowrank"
         if kv_quant == "2bit" and not bool(runtime_cfg.get("kv_quant_2bit_experimental", False)):
             kv_quant = "none"
         kv_bits = None
@@ -277,10 +283,17 @@ class CoreTransformer(nn.Module):
             kv_bits = 8
         elif kv_quant == "2bit":
             kv_bits = 2
+        elif kv_quant == "lowrank":
+            kv_bits = 0
         elif kv_quant == "none":
             kv_bits = 0
         if kv_bits is None:
             kv_bits = int(settings.get("kv", {}).get("kv_quant_bits", 0) or 0)
+        kv_lowrank_rank = runtime_cfg.get("kv_lowrank_rank")
+        try:
+            kv_lowrank_rank_i = int(kv_lowrank_rank) if kv_lowrank_rank is not None else 0
+        except Exception:
+            kv_lowrank_rank_i = 0
         cfg = VortexXConfig(
             hidden_size=int(core.get("hidden_size", 256)),
             layers=layers,
@@ -307,6 +320,8 @@ class CoreTransformer(nn.Module):
             mtp_k=int(core.get("mtp_k", 0)),
             cuda_graphs=bool(core.get("cuda_graphs", vx_cfg.get("cuda_graphs", False))),
             kv_quant_bits=int(kv_bits),
+            kv_quant=str(kv_quant or "none"),
+            kv_lowrank_rank=int(kv_lowrank_rank_i),
             dtype=dtype_override or device_info.dtype,
             device=device_info.device,
         )
@@ -322,8 +337,15 @@ class CoreTransformer(nn.Module):
         model.depth_gating = settings.get("depth_gating", {}) or {}
         model.runtime_cfg = settings.get("runtime", {}) or {}
         kv_mode = str(model.runtime_cfg.get("kv_quant", "none")).lower()
+        if kv_mode in {"low_rank", "low-rank", "mla"}:
+            kv_mode = "lowrank"
         for block in model.blocks:
             if hasattr(block, "lava") and hasattr(block.lava, "set_kv_quant"):
+                if kv_mode == "lowrank" and int(kv_lowrank_rank_i) > 0:
+                    try:
+                        setattr(block.lava, "kv_lowrank_rank", int(kv_lowrank_rank_i))
+                    except Exception:
+                        pass
                 block.lava.set_kv_quant(kv_mode)
         ckpt = core.get("checkpoint_path")
         if ckpt:
