@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { PanelLeft, Bot, Sparkles, Globe, Zap, MessageSquare, BarChart3, Terminal as TerminalIcon } from 'lucide-react';
+import { PanelLeft, Bot, Sparkles, Globe, Zap, MessageSquare, BarChart3, Terminal as TerminalIcon, FileCode } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import ChatInput from './components/ChatInput';
 import CommandPalette from './components/CommandPalette';
@@ -9,37 +9,22 @@ import HelpModal from './components/HelpModal';
 import ReasoningDrawer from './components/ReasoningDrawer';
 import AnalysisView from './components/AnalysisView';
 import TerminalView from './components/TerminalView';
+import SelfEditsView from './components/SelfEditsView';
 import VirtualizedMessageList from './components/VirtualizedMessageList';
 import ModificationExplorerModal from './components/ModificationExplorerModal';
-import PersonalAIDrawer from './components/PersonalAIDrawer';
 import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language } from './types';
 import { vortexService } from './services/vortexService';
-import { listSelfEditProposals, SelfEditProposalSummary } from './services/selfEditsClient';
 import { translations } from './translations';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'framer-motion';
-
-const _readNumberEnv = (key: string, fallback: number) => {
-  const raw = (import.meta as any).env?.[key];
-  const val = typeof raw === 'string' ? Number(raw) : Number(raw);
-  return Number.isFinite(val) ? val : fallback;
-};
 
 const DEFAULT_SETTINGS: UserSettings = {
   categoryOrder: ['Acciones Rápidas', 'Preferencias', 'Interfaz', 'Datos', 'Chats Recientes', 'Sistema'],
   codeTheme: 'dark',
   fontSize: 'medium',
-  language: 'es',
-  llm: {
-    baseUrl: ((import.meta as any).env?.VITE_API_BASE_URL as string | undefined) ?? '',
-    token: ((import.meta as any).env?.VITE_API_TOKEN as string | undefined) ?? '',
-    model: ((import.meta as any).env?.VITE_DEFAULT_MODEL as string | undefined) ?? 'core',
-    temperature: _readNumberEnv('VITE_DEFAULT_TEMPERATURE', 0.7),
-    topP: _readNumberEnv('VITE_DEFAULT_TOP_P', 1.0),
-    maxTokens: Math.floor(_readNumberEnv('VITE_DEFAULT_MAX_TOKENS', 2048)),
-  }
+  language: 'es'
 };
 
-const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'terminal': 2 };
+const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'edits': 2, 'terminal': 3 };
 
 const getInitialDarkMode = (): boolean => {
   const savedMode = localStorage.getItem('dark-mode');
@@ -53,6 +38,7 @@ const App: React.FC = () => {
   const [activeView, setActiveView] = useState<ViewType>('chat');
   const [prevView, setPrevView] = useState<ViewType>('chat');
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [selfEditsPendingCount, setSelfEditsPendingCount] = useState(0);
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
@@ -74,12 +60,8 @@ const App: React.FC = () => {
   
   const [isReasoningOpen, setIsReasoningOpen] = useState(false);
   const [activeThoughtMessageId, setActiveThoughtMessageId] = useState<string | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const abortControllerRef = useRef<boolean>(false);
   const mainScrollRef = useRef<HTMLDivElement>(null);
-
-  const [isPersonalAIOpen, setIsPersonalAIOpen] = useState(false);
-  const [selfEditProposals, setSelfEditProposals] = useState<SelfEditProposalSummary[]>([]);
-  const [selfEditsError, setSelfEditsError] = useState<string | null>(null);
   
   const { scrollY } = useScroll({ container: mainScrollRef });
   const t = translations[settings.language];
@@ -106,6 +88,28 @@ const App: React.FC = () => {
   }, [isLoading, isSearching, activeView, hasMessages, activeModificationFiles]);
 
   useEffect(() => { resetInactivityTimer(); return () => { if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current); }; }, [resetInactivityTimer]);
+
+  useEffect(() => {
+    let disposed = false;
+    const fetchPending = async () => {
+      try {
+        const resp = await fetch("/v1/self-edits/proposals?status=pending");
+        if (!resp.ok) return;
+        const payload = await resp.json().catch(() => ({}));
+        const nextCount = Array.isArray(payload?.data) ? payload.data.length : 0;
+        if (!disposed) setSelfEditsPendingCount(nextCount);
+      } catch {
+        // ignore
+      }
+    };
+
+    void fetchPending();
+    const interval = window.setInterval(fetchPending, 8000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   useMotionValueEvent(scrollY, "change", (latest) => {
     if (activeModificationFiles) return;
@@ -156,14 +160,7 @@ const App: React.FC = () => {
       setSessions(parsedSessions);
       if (parsedSessions.length > 0) setCurrentSessionId(parsedSessions[0].id);
     } else handleNewChat();
-    if (savedSettings) {
-      const parsed = JSON.parse(savedSettings);
-      setSettings({
-        ...DEFAULT_SETTINGS,
-        ...parsed,
-        llm: { ...DEFAULT_SETTINGS.llm, ...(parsed?.llm || {}) },
-      });
-    }
+    if (savedSettings) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(savedSettings) });
   }, []);
 
   useEffect(() => { document.documentElement.classList.toggle('dark', isDarkMode); localStorage.setItem('dark-mode', String(isDarkMode)); }, [isDarkMode]);
@@ -174,10 +171,10 @@ const App: React.FC = () => {
     if (activeView === 'chat' && currentSession?.messages.length) {
       const container = mainScrollRef.current;
       if (!container) return;
-      const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 100;
-      if (isAtBottom) {
+      const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 400;
+      if (isAtBottom || isLoading) {
         isAutoScrollingRef.current = true;
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        container.scrollTo({ top: container.scrollHeight, behavior: isLoading ? 'auto' : 'smooth' });
         const timer = setTimeout(() => { isAutoScrollingRef.current = false; }, 200);
         return () => clearTimeout(timer);
       }
@@ -212,7 +209,7 @@ const App: React.FC = () => {
     if (!currentSessionId) return;
     const mockSources: Source[] = [
       { url: 'https://react.dev', title: t.analysis_library + ': React Hooks', domain: 'react.dev', index: 0 },
-      { url: 'https://github.com/google/genai', title: 'GitHub - google/genai: SDK JS', domain: 'github.com', index: 1 },
+      { url: 'https://fastapi.tiangolo.com', title: t.analysis_library + ': FastAPI', domain: 'fastapi.tiangolo.com', index: 1 },
       { url: 'https://developer.mozilla.org/es/docs/Web/API/Element/scrollIntoView', title: 'MDN: Element.scrollIntoView()', domain: 'developer.mozilla.org', index: 2 }
     ];
     
@@ -292,64 +289,24 @@ const VORTEX_CONFIG = {
   }, [currentSessionId, addLog, settings.language, t]);
 
   const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true) => {
-    let targetSessionId = currentSessionId;
-    let isNewSession = false;
-    
-    // Check if session actually exists
-    const sessionExists = sessions.some(s => s.id === targetSessionId);
-
-    if (!targetSessionId || !sessionExists) {
-      targetSessionId = Date.now().toString();
-      isNewSession = true;
-      setCurrentSessionId(targetSessionId);
-      handleSelectView('chat');
-    }
-
+    if (!currentSessionId) return;
     setMode(selectedMode);
     if (activeView !== 'chat') handleSelectView('chat');
     setHeaderVisible(true); setFooterVisible(true); resetInactivityTimer();
-    
     const userMessage: Message = { id: Date.now().toString(), role: Role.USER, content, timestamp: Date.now() };
     const aiMessageId = (Date.now() + 1).toString();
     const initialAiMessage: Message = { id: aiMessageId, role: Role.AI, content: "", thought: "", sources: [], groundingSupports: [], timestamp: Date.now() };
-    
-    setSessions(prev => {
-      if (isNewSession) {
-         const newSession: ChatSession = { 
-             id: targetSessionId!, 
-             title: settings.language === 'es' ? 'Nueva Conversación' : 'New Conversation', 
-             messages: [userMessage, initialAiMessage], 
-             updatedAt: Date.now() 
-         };
-         return [newSession, ...prev];
-      }
-      return prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s);
-    });
-
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = new AbortController();
-    setIsLoading(true); setIsSearching(useInternet);
+    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s));
+    setIsLoading(true); setIsSearching(useInternet); abortControllerRef.current = false;
     try {
-      const history = isNewSession ? [] : (sessions.find(s => s.id === targetSessionId)?.messages || []);
-      const stream = vortexService.generateResponseStream({
-        history,
-        prompt: content,
-        api: settings.llm,
-        mode: selectedMode,
-        useInternet,
-        useThinking,
-        signal: abortControllerRef.current!.signal,
-      });
+      const history = sessions.find(s => s.id === currentSessionId)?.messages || [];
+      const stream = vortexService.generateResponseStream(history, content, useInternet, useThinking, selectedMode);
       for await (const chunk of stream) {
+        if (abortControllerRef.current) break;
         setIsSearching(false);
-        setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
+        setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
       }
-    } catch (error: any) {
-      if (error?.name !== 'AbortError') addLog('SYSTEM', 'Interrupción de flujo.');
-    } finally {
-      abortControllerRef.current = null;
-      setIsLoading(false); setIsSearching(false); resetInactivityTimer();
-    }
+    } catch (error) { addLog('SYSTEM', 'Interrupción de flujo.'); } finally { setIsLoading(false); setIsSearching(false); resetInactivityTimer(); }
   };
 
   const handleOpenModificationExplorer = (files: { path: string, diff: string }[]) => {
@@ -358,28 +315,6 @@ const VORTEX_CONFIG = {
     setFooterVisible(false);
   };
 
-  const refreshSelfEdits = useCallback(async () => {
-    const baseUrl = (settings.llm.baseUrl || '').trim();
-    if (!baseUrl) {
-      setSelfEditProposals([]);
-      setSelfEditsError(settings.language === 'es' ? 'Configura VITE_API_BASE_URL (frontend/.env).' : 'Set VITE_API_BASE_URL (frontend/.env).');
-      return;
-    }
-    try {
-      const items = await listSelfEditProposals({ baseUrl, token: settings.llm.token, status: 'pending' });
-      setSelfEditProposals(items);
-      setSelfEditsError(null);
-    } catch (err: any) {
-      setSelfEditsError(err?.message || (settings.language === 'es' ? 'Backend offline' : 'Backend offline'));
-    }
-  }, [settings.llm.baseUrl, settings.llm.token, settings.language]);
-
-  useEffect(() => {
-    refreshSelfEdits();
-    const id = window.setInterval(() => refreshSelfEdits(), 5000);
-    return () => window.clearInterval(id);
-  }, [refreshSelfEdits]);
-
   const springConfig = { type: 'spring' as const, damping: 28, stiffness: 220, mass: 0.9 };
   const direction = VIEW_INDEX[activeView] > VIEW_INDEX[prevView] ? 1 : -1;
 
@@ -387,7 +322,7 @@ const VORTEX_CONFIG = {
     <div className={`flex h-screen w-full bg-background transition-colors duration-1000 overflow-hidden text-foreground accelerated ${mode === 'agent' ? 'ring-[6px] ring-primary/10' : ''}`}>
       <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onNewChat={handleNewChat} onDeleteSession={id => setSessions(p => p.filter(x => x.id !== id))} onClearHistory={() => setSessions([])} onExportChat={() => {}} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} isSidebarOpen={isSidebarOpen} onToggleSidebar={() => { const next = !isSidebarOpen; setIsSidebarOpen(next); if (next) setIsReasoningOpen(false); }} onOpenSettings={() => setIsSettingsOpen(true)} onOpenHelp={() => setIsHelpOpen(true)} categoryOrder={settings.categoryOrder} language={settings.language} onSetFontSize={(size) => setSettings({ ...settings, fontSize: size })} />
       <AnimatePresence initial={false}>{isSidebarOpen && !activeModificationFiles && (
-          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={id => setSessions(p => p.filter(x => x.id !== id))} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} isOpen={true} language={settings.language} /></motion.div>
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={id => setSessions(p => p.filter(x => x.id !== id))} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} isOpen={true} language={settings.language} selfEditsPendingCount={selfEditsPendingCount} /></motion.div>
       )}</AnimatePresence>
       <div className="flex-1 flex overflow-hidden relative">
         <main className="flex-1 flex flex-col h-full bg-background relative z-0 overflow-hidden">
@@ -399,28 +334,14 @@ const VORTEX_CONFIG = {
               </div>
               <div className="flex items-center gap-4">
                 <motion.button whileHover={{ scale: 1.1, backgroundColor: 'hsla(var(--primary) / 0.1)' }} whileTap={{ scale: 0.9 }} onClick={() => setSettings({ ...settings, language: settings.language === 'es' ? 'en' : 'es' })} className="w-12 h-12 flex items-center justify-center bg-muted/40 dark:bg-zinc-900/40 border border-border/50 rounded-2xl hover:border-primary/40 transition-all shadow-sm overflow-hidden"><img src={settings.language === 'es' ? 'https://flagcdn.com/w80/es.png' : 'https://flagcdn.com/w80/us.png'} alt={settings.language} className="w-7 h-auto object-contain rounded-sm select-none" /></motion.button>
-                <div className="flex items-center gap-1 bg-muted/40 dark:bg-zinc-900/40 p-1 rounded-2xl border border-border/50 relative">{['chat', 'analysis', 'terminal'].map(v => (<button key={v} onClick={() => handleSelectView(v as ViewType)} className={`relative p-2.5 rounded-xl transition-all z-10 ${activeView === v ? 'text-primary-foreground' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>{v === 'chat' ? <MessageSquare size={16} /> : v === 'analysis' ? <BarChart3 size={16} /> : <TerminalIcon size={16} />}{activeView === v && <motion.div layoutId="header-nav-indicator" className="absolute inset-0 bg-primary rounded-xl shadow-lg -z-10" transition={springConfig} />}</button>))}</div>
-                <motion.button
-                  whileHover={{ scale: 1.05, y: -2 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => { const next = !isPersonalAIOpen; setIsPersonalAIOpen(next); if (next) setIsReasoningOpen(false); }}
-                  className="relative w-12 h-12 flex items-center justify-center bg-muted/50 dark:bg-zinc-900/50 hover:bg-primary/10 rounded-2xl border border-border/50 transition-all shadow-sm"
-                  title={settings.language === 'es' ? 'Personal AI' : 'Personal AI'}
-                >
-                  <Bot size={18} className="text-primary" />
-                  {selfEditProposals.length > 0 && (
-                    <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[9px] font-black rounded-full shadow-lg">
-                      {selfEditProposals.length}
-                    </span>
-                  )}
-                </motion.button>
+                <div className="flex items-center gap-1 bg-muted/40 dark:bg-zinc-900/40 p-1 rounded-2xl border border-border/50 relative">{['chat', 'analysis', 'edits', 'terminal'].map(v => (<button key={v} onClick={() => handleSelectView(v as ViewType)} className={`relative p-2.5 rounded-xl transition-all z-10 ${activeView === v ? 'text-primary-foreground' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>{v === 'chat' ? <MessageSquare size={16} /> : v === 'analysis' ? <BarChart3 size={16} /> : v === 'edits' ? <FileCode size={16} /> : <TerminalIcon size={16} />}{activeView === v && <motion.div layoutId="header-nav-indicator" className="absolute inset-0 bg-primary rounded-xl shadow-lg -z-10" transition={springConfig} />}</button>))}</div>
                 <motion.button whileHover={{ scale: 1.05, y: -2 }} whileTap={{ scale: 0.95 }} onClick={() => setIsCommandPaletteOpen(true)} className="flex items-center gap-3 px-5 py-2.5 bg-muted/50 dark:bg-zinc-900/50 hover:bg-primary/10 rounded-2xl border border-border/50 transition-all shadow-sm"><Zap size={16} className={'text-primary'} /><kbd className="hidden lg:inline-block px-2 py-0.5 bg-background border rounded-lg text-[8px] font-black opacity-40">ALT+K</kbd></motion.button>
               </div>
             </motion.header>
           )}
 
           <div ref={mainScrollRef} className="flex-1 overflow-y-auto custom-scrollbar flex flex-col relative h-full bg-background scroll-smooth accelerated">
-            {hasMessages && !activeModificationFiles && <div className="pt-32 shrink-0" />}
+            {hasMessages && !activeModificationFiles && <div className="pt-24 shrink-0" />}
             <AnimatePresence mode="popLayout" custom={direction}>
               {activeView === 'chat' && (
                 <motion.div key="chat" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className={`mx-auto w-full flex-1 flex flex-col px-6 lg:px-16 min-h-full transition-all duration-500 ${!hasMessages ? 'justify-center max-w-[1200px]' : 'pt-6 max-w-full'}`}>
@@ -436,7 +357,7 @@ const VORTEX_CONFIG = {
                         messages={currentSession.messages} 
                         fontSize={settings.fontSize} 
                         codeTheme={settings.codeTheme}
-                        onShowReasoning={messageId => { setActiveThoughtMessageId(messageId); setIsReasoningOpen(true); setIsPersonalAIOpen(false); setIsSidebarOpen(false); }} 
+                        onShowReasoning={messageId => { setActiveThoughtMessageId(messageId); setIsReasoningOpen(true); setIsSidebarOpen(false); }} 
                         onOpenModificationExplorer={handleOpenModificationExplorer} 
                         isLoading={isLoading} 
                         language={settings.language} 
@@ -450,40 +371,20 @@ const VORTEX_CONFIG = {
                 </motion.div>
               )}
               {activeView === 'analysis' && <motion.div key="analysis" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><AnalysisView sessions={sessions} onNavigateToChat={handleNavigateToChat} onAddLog={addLog} language={settings.language}/></motion.div>}
+              {activeView === 'edits' && <motion.div key="edits" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><SelfEditsView language={settings.language} onAddLog={addLog} onPendingCountChange={setSelfEditsPendingCount} /></motion.div>}
               {activeView === 'terminal' && <motion.div key="terminal" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><TerminalView logs={logs} onClear={() => setLogs([])} language={settings.language} /></motion.div>}
             </AnimatePresence>
           </div>
 
           {!activeModificationFiles && (
             <motion.div initial={false} animate={{ y: footerVisible ? 0 : 200, opacity: footerVisible ? 1 : 0 }} transition={{ type: 'spring', damping: 30, stiffness: 200 }} className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-8 z-30 pointer-events-auto accelerated ${mode === 'agent' ? 'from-primary/5' : ''}`}>
-              <div className="pointer-events-auto"><ChatInput onSend={handleSendMessage} isLoading={isLoading} isDarkMode={isDarkMode} onStop={() => { abortControllerRef.current?.abort(); }} language={settings.language} onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }} /></div>
+              <div className="pointer-events-auto"><ChatInput onSend={handleSendMessage} isLoading={isLoading} isDarkMode={isDarkMode} onStop={() => { abortControllerRef.current = true; }} language={settings.language} onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }} /></div>
             </motion.div>
           )}
         </main>
-
-        <AnimatePresence>{isPersonalAIOpen && !activeModificationFiles && (
-          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 420, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
-            <PersonalAIDrawer
-              isOpen={isPersonalAIOpen}
-              onClose={() => setIsPersonalAIOpen(false)}
-              language={settings.language}
-              api={settings.llm}
-              fontSize={settings.fontSize}
-              codeTheme={settings.codeTheme}
-              isDarkMode={isDarkMode}
-              proposals={selfEditProposals}
-              pendingCount={selfEditProposals.length}
-              backendError={selfEditsError}
-              onRefreshProposals={refreshSelfEdits}
-              onOpenModificationExplorer={handleOpenModificationExplorer}
-            />
-          </motion.div>
-        )}</AnimatePresence>
-
-        <AnimatePresence>{isReasoningOpen && !isPersonalAIOpen && !activeModificationFiles && (
-          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
-            <ReasoningDrawer isOpen={isReasoningOpen} onClose={() => setIsReasoningOpen(false)} thought={activeThought} language={settings.language} isStreaming={isCurrentThoughtStreaming} />
-          </motion.div>
+        
+        <AnimatePresence>{isReasoningOpen && !activeModificationFiles && (
+            <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full border-l border-border/50 shrink-0 z-50 overflow-hidden bg-zinc-950/95 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]"><ReasoningDrawer isOpen={isReasoningOpen} onClose={() => setIsReasoningOpen(false)} thought={activeThought} language={settings.language} isStreaming={isCurrentThoughtStreaming} /></motion.div>
         )}</AnimatePresence>
       </div>
 

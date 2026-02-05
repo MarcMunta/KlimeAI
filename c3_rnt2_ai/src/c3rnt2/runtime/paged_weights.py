@@ -43,8 +43,12 @@ class PagedWeights:
         self.tile_store = tile_store
         self.cache = cache
         self.device = device
-        self.pin_memory = pin_memory if pin_memory is not None else device.startswith("cuda")
-        self.non_blocking = device.startswith("cuda")
+        use_pin = pin_memory if pin_memory is not None else device.startswith("cuda")
+        cuda_ok = bool(torch is not None and hasattr(torch, "cuda") and torch.cuda.is_available())
+        if use_pin and (not device.startswith("cuda") or not cuda_ok):
+            use_pin = False
+        self.pin_memory = use_pin
+        self.non_blocking = bool(device.startswith("cuda") and cuda_ok)
         self.gpu_decompress = gpu_decompress
         self.stats = PagedWeightsStats()
         self._prefetched: set[int] = set()

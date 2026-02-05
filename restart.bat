@@ -22,11 +22,11 @@ if not defined PS_EXE (
   exit /b 1
 )
 
-%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%stop.ps1"
+%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%stop_cli.ps1"
 set "STOP_RC=%errorlevel%"
 if not "%STOP_RC%"=="0" (
   echo [restart] WARN: stop returned errorlevel %STOP_RC%.
 )
 
-%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%run.ps1" %*
+%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%run_cli.ps1" %*
 exit /b %errorlevel%

@@ -2,7 +2,7 @@
 
 Monorepo con:
 - `c3_rnt2_ai/`: backend **Vortex** (FastAPI) con endpoints estilo OpenAI (`/v1/*`) + streaming SSE.
-- `frontend/`: UI **Vortex** (Vite + React) que llama al backend local (nunca a proveedores LLM desde el navegador).
+- `vortex-chat/`: UI **Vortex** (Vite + React) que llama al backend local (nunca a proveedores LLM desde el navegador).
 
 ## Quickstart Windows (RTX 4080 / 64GB)
 
@@ -38,7 +38,7 @@ Comandos útiles:
 ```
 
 Abrir UI:
-- `http://localhost:5173` (por defecto con `run.bat`)
+- `http://localhost:5173` (por defecto con `run.bat`; abre automÃ¡ticamente en Chrome si estÃ¡ instalado)
 
 ### Doctor / Bench (opcional)
 Perfil recomendado (4080 safe): `C3RNT2_PROFILE=rtx4080_16gb_safe`.
@@ -78,7 +78,7 @@ Detalles:
   - `pytest -q` (repo root)
   - `python -m c3rnt2 skills validate --all`
   - `python -m c3rnt2 doctor --deep --mock --profile <perfil>`
-  - si el patch toca `frontend/`, también `npm run build` (best-effort)
+  - si el patch toca `vortex-chat/`, también `npm run build` (best-effort)
 - `apply` requiere **working tree limpio** (`git status` sin cambios). `logs/` y `.pids/` están ignorados por git.
 
 ## Frontend: “Personal AI”
@@ -111,5 +111,5 @@ curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: applica
 
 - **Puerto ocupado**: cambia `VORTEX_BACKEND_PORT` / `VORTEX_FRONTEND_PORT` y reintenta.
 - **Fallo de deps Python**: borra `.venv/` y ejecuta `.\run.bat` de nuevo.
-- **Fallo de deps frontend**: borra `frontend/node_modules/` y ejecuta `.\run.bat`.
-- **401 Unauthorized**: define `VORTEX_API_TOKEN` (o `KLIMEAI_API_TOKEN`) y pon el mismo valor en `frontend/.env` como `VITE_API_TOKEN`.
+- **Fallo de deps frontend**: borra `vortex-chat/node_modules/` y ejecuta `.\run.bat`.
+- **401 Unauthorized**: define `VORTEX_API_TOKEN` (o `KLIMEAI_API_TOKEN`) y reintenta con `.\run.bat` (el frontend proxya con auth automÃ¡tica).

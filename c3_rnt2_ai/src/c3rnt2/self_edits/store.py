@@ -206,12 +206,12 @@ class SelfEditsStore:
         allowed_paths = [
             "README.md",
             "dev.bat",
-            "dev.ps1",
+            "dev_cli.ps1",
             "run.bat",
             "stop.bat",
             "status.bat",
             "logs.bat",
-            "frontend/",
+            "vortex-chat/",
             "c3_rnt2_ai/src/",
             "c3_rnt2_ai/tests/",
             "c3_rnt2_ai/scripts/",
@@ -223,9 +223,9 @@ class SelfEditsStore:
             ".git/**",
             "data/**",
             "c3_rnt2_ai/data/**",
-            "frontend/node_modules/**",
-            "frontend/dist/**",
-            "frontend/.vite/**",
+            "vortex-chat/node_modules/**",
+            "vortex-chat/dist/**",
+            "vortex-chat/.vite/**",
             "c3_rnt2_ai/skills/_staging/**",
             "c3_rnt2_ai/skills/_proposals/**",
             "*.key",
@@ -500,9 +500,9 @@ class SelfEditsStore:
             checks.append(_run_cmd([sys.executable, "-m", "c3rnt2", "skills", "validate", "--all"], cwd=self.app_dir, timeout_s=120.0, env=env))
             checks.append(_run_cmd([sys.executable, "-m", "c3rnt2", "doctor", "--deep", "--mock", "--profile", self.profile], cwd=self.app_dir, timeout_s=600.0, env=env))
 
-            touched_frontend = any(p.startswith("frontend/") for p in touched)
-            if touched_frontend and (self.repo_root / "frontend" / "package.json").exists():
-                checks.append(_run_cmd(["npm", "run", "build"], cwd=self.repo_root / "frontend", timeout_s=900.0, env=env))
+            touched_frontend = any(p.startswith("vortex-chat/") for p in touched)
+            if touched_frontend and (self.repo_root / "vortex-chat" / "package.json").exists():
+                checks.append(_run_cmd(["npm", "run", "build"], cwd=self.repo_root / "vortex-chat", timeout_s=900.0, env=env))
 
             ok_all = True
             for item in checks:

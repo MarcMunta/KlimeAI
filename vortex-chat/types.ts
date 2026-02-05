@@ -4,7 +4,7 @@ export enum Role {
   AI = 'ai'
 }
 
-export type ViewType = 'chat' | 'analysis' | 'terminal';
+export type ViewType = 'chat' | 'analysis' | 'edits' | 'terminal';
 export type AppMode = 'ask' | 'agent';
 export type FontSize = 'small' | 'medium' | 'large';
 export type Language = 'es' | 'en';
@@ -41,21 +41,11 @@ export interface ChatSession {
   updatedAt: number;
 }
 
-export interface LlmSettings {
-  baseUrl: string;
-  token?: string;
-  model: string;
-  temperature: number;
-  topP: number;
-  maxTokens: number;
-}
-
 export interface UserSettings {
   categoryOrder: string[];
   codeTheme: 'dark' | 'light' | 'match-app';
   fontSize: FontSize;
   language: Language;
-  llm: LlmSettings;
 }
 
 export interface LogEntry {

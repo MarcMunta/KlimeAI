@@ -22,5 +22,5 @@ if not defined PS_EXE (
   exit /b 1
 )
 
-%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%status.ps1" %*
+%PS_EXE% -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%status_cli.ps1" %*
 exit /b %errorlevel%

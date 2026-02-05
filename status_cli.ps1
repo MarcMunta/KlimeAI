@@ -22,7 +22,7 @@ function Is-Alive([int]$ProcId) {
 
 function Port-Listening([int]$Port) {
   try {
-    $out = & netstat -ano | Select-String -Pattern (":" + $Port + "\\s")
+    $out = & netstat -ano | Select-String -Pattern (":" + $Port + "\s.*\sLISTENING\s")
     return $null -ne $out
   } catch {
     return $false

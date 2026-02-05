@@ -24,7 +24,6 @@ interface MessageBubbleProps {
 const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) => {
   const [isHovered, setIsHovered] = useState(false);
   const timeoutRef = useRef<number | null>(null);
-  const safeTitle = source.title || source.domain || source.url;
 
   const handleMouseEnter = () => {
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
@@ -45,11 +44,16 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
         animate={{ opacity: 1, scale: 1 }}
         className="flex items-center gap-2 px-3 py-1.5 bg-background border border-border/60 hover:border-primary/60 rounded-xl transition-all shadow-sm group glass-card relative z-10"
       >
-        <div className="w-4 h-4 rounded-md bg-muted/40 flex items-center justify-center overflow-hidden shrink-0 text-muted-foreground/70">
-          <ExternalLink size={12} />
+        <div className="w-4 h-4 rounded-md bg-muted/40 flex items-center justify-center overflow-hidden shrink-0">
+          <img 
+            src={`https://www.google.com/s2/favicons?domain=${source.domain}&sz=64`} 
+            alt="" 
+            className="w-full h-full object-contain opacity-80"
+            onError={(e) => { (e.target as any).src = 'https://www.google.com/s2/favicons?domain=google.com&sz=64' }}
+          />
         </div>
         <span className="text-[10px] font-bold text-foreground/70 group-hover:text-primary transition-colors truncate max-w-[120px]">
-          {safeTitle}
+          {source.title || source.domain}
         </span>
       </motion.a>
 
@@ -62,20 +66,21 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
             className="absolute bottom-full left-0 mb-4 w-72 z-[2000] pointer-events-none"
           >
             <div className="bg-[#050505] border-[2px] border-black rounded-[2rem] shadow-[0_40px_80px_-15px_rgba(0,0,0,0.8)] overflow-hidden relative ring-1 ring-white/10">
-              <div className="aspect-video w-full bg-zinc-950 overflow-hidden relative flex items-center justify-center">
-                <div className="absolute inset-0 bg-gradient-to-b from-primary/10 to-transparent" />
-                <div className="relative z-10 flex items-center gap-3 text-white/60">
-                  <ExternalLink size={18} />
-                  <span className="text-[10px] font-black uppercase tracking-[0.3em]">Source</span>
-                </div>
+              <div className="aspect-video w-full bg-zinc-900 overflow-hidden relative">
+                <img 
+                  src={`https://s.wordpress.com/mshots/v1/${encodeURIComponent(source.url)}?w=400`} 
+                  alt="Preview" 
+                  className="w-full h-full object-cover opacity-90 transition-opacity"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
               </div>
               <div className="px-4 py-3.5 bg-zinc-950 flex items-center gap-3">
-                <div className="w-8 h-8 bg-white/5 border border-white/10 rounded-lg shrink-0 shadow-sm flex items-center justify-center text-white/70">
-                  <ExternalLink size={16} />
+                <div className="w-8 h-8 bg-white rounded-lg p-1.5 shrink-0 shadow-sm">
+                  <img src={`https://www.google.com/s2/favicons?domain=${source.domain}&sz=64`} alt="" className="w-full h-full object-contain" />
                 </div>
                 <div className="flex flex-col min-w-0">
-                  <div className="text-[11px] font-black text-white truncate leading-tight tracking-tight">{safeTitle}</div>
-                  <div className="text-[9px] font-mono text-zinc-500 truncate mt-0.5">{String(source.url || '').replace(/^https?:\/\/(www\.)?/, '')}</div>
+                  <div className="text-[11px] font-black text-white truncate leading-tight tracking-tight">{source.title}</div>
+                  <div className="text-[9px] font-mono text-zinc-500 truncate mt-0.5">{source.url.replace(/^https?:\/\/(www\.)?/, '')}</div>
                 </div>
               </div>
             </div>
@@ -482,7 +487,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
         <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border transition-all duration-700 group-hover:scale-110 group-hover:rotate-6 ${isUser ? 'bg-primary text-white border-primary/20 shadow-xl' : 'bg-background border-border glass-card shadow-lg'}`}>{isUser ? <User size={20} /> : <Bot size={20} />}</div>
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1`}>
           <div className={`px-8 py-6 rounded-[2.5rem] ${isUser ? 'bg-primary text-white rounded-tr-none shadow-2xl' : 'bg-muted/10 border border-border/40 rounded-tl-none glass-card'} ${fontSizeClass} leading-relaxed w-full relative`}>
-            {!isUser && message.fileChanges && message.fileChanges.length >= 1 && (
+            {!isUser && message.fileChanges && message.fileChanges.length >= 2 && (
               <PatchOverview fileChanges={message.fileChanges} onToggleAll={toggleAll} onToggleSingle={togglePath} onOpenExplorer={() => onOpenModificationExplorer(message.fileChanges!)} collapsedPaths={collapsedPaths} language={language} />
             )}
             <div className="markdown-content relative overflow-visible z-10">
@@ -495,7 +500,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
             {!isUser && (
               <div className="flex gap-6">
                 <button onClick={handleCopyMessage} className="text-[11px] font-black uppercase tracking-widest text-muted-foreground hover:text-primary transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
-                {onShowReasoning && (message.thought || (isStreaming && message.role === Role.AI)) && (
+                {(message.thought || (isStreaming && message.role === Role.AI)) && (
                   <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[11px] font-black uppercase tracking-widest text-primary flex items-center gap-2.5 py-2 px-4 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
                     <div className="relative"><Brain size={14} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
                     <span>{isStreaming && !message.content ? (language === 'es' ? 'Razonando...' : 'Thinking...') : (language === 'es' ? 'Razonamiento' : 'Reasoning')}</span>

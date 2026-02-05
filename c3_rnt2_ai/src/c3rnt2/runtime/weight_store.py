@@ -35,9 +35,9 @@ class WeightStore:
         if torch is None:
             raise RuntimeError("PyTorch not available")
         weight_cpu = weight.detach().to("cpu")
-        if weight_cpu.dtype not in (torch.float16, torch.bfloat16):
-            weight_cpu = weight_cpu.float()
         if weight_cpu.dtype == torch.bfloat16:
+            weight_cpu = weight_cpu.to(dtype=torch.float16)
+        elif weight_cpu.dtype != torch.float16:
             weight_cpu = weight_cpu.to(dtype=torch.float16)
         arr = weight_cpu.numpy()
         if not arr.flags["C_CONTIGUOUS"]:

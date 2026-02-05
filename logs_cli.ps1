@@ -42,4 +42,3 @@ if (-not (Test-Path -LiteralPath $path)) {
 
 Write-Host "[logs] Tailing $path (Ctrl+C to stop)..."
 Get-Content -LiteralPath $path -Tail 100 -Wait
-

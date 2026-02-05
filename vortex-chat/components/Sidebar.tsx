@@ -35,6 +35,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
   isOpen: boolean;
   language: Language;
+  selfEditsPendingCount?: number;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -50,7 +51,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   onClose,
   onOpenSettings,
   isOpen,
-  language
+  language,
+  selfEditsPendingCount
 }) => {
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const t = translations[language];
@@ -65,6 +67,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const mainNav = [
     { id: 'chat', label: t.nav_chat, icon: <MessageSquare size={18} /> },
     { id: 'analysis', label: t.nav_analysis, icon: <BarChart3 size={18} /> },
+    { id: 'edits', label: t.nav_edits, icon: <Layers size={18} />, badge: selfEditsPendingCount || 0 },
     { id: 'terminal', label: t.nav_terminal, icon: <TerminalIcon size={18} /> },
   ];
 
@@ -118,7 +121,12 @@ const Sidebar: React.FC<SidebarProps> = ({
                   >
                     {item.icon}
                   </motion.div>
-                  <span className="relative z-10">{item.label}</span>
+                  <span className="relative z-10 flex-1 text-left">{item.label}</span>
+                  {"badge" in item && item.badge > 0 && (
+                    <span className="relative z-10 px-2 py-0.5 rounded-full bg-red-500 text-white text-[9px] font-black tabular-nums">
+                      {item.badge > 99 ? "99+" : item.badge}
+                    </span>
+                  )}
                   
                   <AnimatePresence>
                     {!isActive && (
