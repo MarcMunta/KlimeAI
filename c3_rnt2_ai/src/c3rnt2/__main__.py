@@ -11,12 +11,12 @@ import threading
 from types import SimpleNamespace
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 try:
     import torch
 except Exception:  # pragma: no cover
-    torch = None
+    torch = None  # type: ignore[assignment,no-redef]
 
 from .config import load_settings, resolve_profile, validate_profile, resolve_web_allowlist, resolve_web_strict
 from .continuous.dataset import ingest_sources, collect_samples
@@ -281,10 +281,12 @@ def _resolve_interval_minutes(args_interval: float | None, settings: dict) -> fl
     if args_interval is not None:
         return float(args_interval)
     cont = settings.get("continuous", {}) or {}
-    if cont.get("run_interval_minutes") is not None:
-        return float(cont.get("run_interval_minutes"))
-    if cont.get("interval_minutes") is not None:
-        return float(cont.get("interval_minutes"))
+    val = cont.get("run_interval_minutes")
+    if val is not None:
+        return float(val)  # type: ignore[arg-type]
+    val = cont.get("interval_minutes")
+    if val is not None:
+        return float(val)  # type: ignore[arg-type]
     return 30.0
 
 
@@ -769,7 +771,7 @@ def cmd_self_train(args: argparse.Namespace) -> None:
 
 
 def _run_self_train_tick(
-    app: object,
+    app: Any,
     settings: dict,
     base_dir: Path,
     *,
@@ -963,9 +965,9 @@ def cmd_serve_self_train(args: argparse.Namespace) -> None:
     maintenance_window_s = float(args.maintenance_window_s or settings.get("server", {}).get("maintenance_window_s", 10))
     reuse_dataset = bool(args.reuse_dataset)
     once = bool(args.once)
-    reload_fn = None
-    app = None
-    train_fn = None
+    reload_fn: Any = None
+    app: Any = None
+    train_fn: Any = None
 
     if args.mock:
         settings.setdefault("server", {})["train_strategy"] = "inprocess"
@@ -1132,7 +1134,7 @@ def cmd_serve_autopilot(args: argparse.Namespace) -> None:
             def write_lock(self):
                 return nullcontext()
 
-        app = SimpleNamespace(state=SimpleNamespace(model_lock=_DummyLock(), models={}, model=None, training_active=False, maintenance_until=0.0))
+        app: Any = SimpleNamespace(state=SimpleNamespace(model_lock=_DummyLock(), models={}, model=None, training_active=False, maintenance_until=0.0))
     else:
         try:
             from .server import create_app
@@ -1608,7 +1610,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
         if raw is None:
             return int(default)
         try:
-            return int(raw)
+            return int(raw)  # type: ignore[call-overload]
         except Exception:
             return int(default)
 

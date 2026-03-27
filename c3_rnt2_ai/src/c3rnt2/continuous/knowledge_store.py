@@ -100,14 +100,14 @@ def _faiss_rank(
     index = faiss.IndexFlatIP(mat.shape[1])
     index.add(mat)
     scores, idxs = index.search(q, min(top_k, len(vecs)))
-    scored: List[KnowledgeChunk] = []
+    result: List[KnowledgeChunk] = []
     for score, idx in zip(scores[0], idxs[0]):
         if idx < 0:
             continue
         text, source_kind, source_ref = meta[int(idx)]
-        scored.append(KnowledgeChunk(text=text, score=float(score), source_kind=source_kind, source_ref=source_ref))
-    scored.sort(key=lambda x: x.score, reverse=True)
-    return scored
+        result.append(KnowledgeChunk(text=text, score=float(score), source_kind=source_kind, source_ref=source_ref))
+    result.sort(key=lambda x: x.score, reverse=True)
+    return result
 
 
 @dataclass
@@ -168,7 +168,7 @@ class EmbeddingBackend:
                 self._model = SentenceTransformer(self.model_name)
                 self.backend = "sentence-transformer"
                 try:
-                    self.dim = int(self._model.get_sentence_embedding_dimension())
+                    self.dim = int(self._model.get_sentence_embedding_dimension() or 384)
                 except Exception:
                     pass
             except Exception:

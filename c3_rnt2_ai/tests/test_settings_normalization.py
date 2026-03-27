@@ -13,7 +13,9 @@ def _assert_profile(profile: str) -> None:
     assert "cache_vram_budget_mb" in runtime
     c3 = settings.get("c3", {})
     if c3.get("paged_lm_head_stream_topk") is not None:
-        assert runtime.get("paged_lm_head_stream_topk") == c3.get("paged_lm_head_stream_topk")
+        assert runtime.get("paged_lm_head_stream_topk") == c3.get(
+            "paged_lm_head_stream_topk"
+        )
     cont = settings.get("continuous", {})
     if cont.get("run_interval_minutes") is not None:
         assert cont.get("interval_minutes") == cont.get("run_interval_minutes")
@@ -23,3 +25,11 @@ def test_settings_normalization_profiles() -> None:
     _assert_profile("dev_small")
     _assert_profile("rtx4080_16gb_vortexx_next")
     _assert_profile("safe_selftrain_4080")
+
+
+def test_settings_safety_defaults() -> None:
+    settings = load_settings("dev_small")
+    autopilot = settings.get("autopilot", {}) or {}
+    autolearn = settings.get("autolearn", {}) or {}
+    assert bool(autopilot.get("autopatch_require_approval", False)) is True
+    assert bool(autolearn.get("enabled", False)) is False

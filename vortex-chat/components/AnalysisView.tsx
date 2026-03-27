@@ -125,14 +125,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({ sessions, onNavigateToChat,
   const [libSearch, setLibSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<KnowledgeCategory>('all');
   const [isAuditing, setIsAuditing] = useState(false);
-  const [learningRate, setLearningRate] = useState(94.5);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLearningRate(prev => Math.min(99.9, Math.max(92.0, prev + (Math.random() - 0.5) * 0.8)));
-    }, 4000);
-    return () => clearInterval(interval);
-  }, []);
 
   const metrics = useMemo(() => {
     const allMessages = sessions.flatMap(s => s.messages);
@@ -182,6 +175,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({ sessions, onNavigateToChat,
     const nodes = Math.max(10, Math.ceil(totalChars / 150));
     const learnedDomains = Array.from(uniqueSourcesMap.values()).sort((a, b) => b.count - a.count);
     const coherence = aiMessages.length > 0 ? (aiMessages.filter(m => !!m.thought).length / aiMessages.length) * 100 : 0;
+    const learningEvents = aiMessages.filter(m => !!m.trainingEvent).length;
 
     return {
       nodes,
@@ -189,6 +183,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({ sessions, onNavigateToChat,
       fileChanges: allFileChanges.sort((a, b) => b.timestamp - a.timestamp),
       totalTrust: learnedDomains.length > 0 ? learnedDomains.reduce((acc, d) => acc + d.trust, 0) / learnedDomains.length : 0,
       coherence,
+      learningEvents,
       totalInteractions: allMessages.length,
       groundingRatio: aiMessages.length > 0 ? (learnedDomains.length / aiMessages.length) * 100 : 0
     };
@@ -322,7 +317,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({ sessions, onNavigateToChat,
               {[
                 { label: 'Densidad Neural', value: metrics.nodes, sub: 'Nodos mapeados', color: 'hsl(var(--primary))', textClass: 'text-primary', icon: <Layers size={22} /> },
                 { label: 'Fuentes de Verdad', value: metrics.learnedDomains.length, sub: 'Dominios contrastados', color: '#c084fc', textClass: 'text-purple-400', icon: <BookOpen size={22} /> },
-                { label: 'Kernel Stability', value: `${learningRate.toFixed(1)}%`, sub: 'Tasa operativa', color: '#fbbf24', textClass: 'text-amber-400', icon: <Zap size={22} /> },
+                { label: 'Eventos de Entrenamiento', value: metrics.learningEvents, sub: 'Self-train confirmados', color: '#fbbf24', textClass: 'text-amber-400', icon: <Zap size={22} /> },
                 { label: 'Índice de Confianza', value: `${metrics.totalTrust.toFixed(0)}%`, sub: 'Integridad Global', color: '#10b981', textClass: 'text-emerald-500', icon: <ShieldCheck size={22} /> }
               ].map((m, i) => (
                 <div key={i} className="p-10 bg-muted/5 border border-border/30 rounded-[3rem] relative overflow-hidden group hover:border-primary/40 transition-all glass-card hover:-translate-y-2 shadow-sm">

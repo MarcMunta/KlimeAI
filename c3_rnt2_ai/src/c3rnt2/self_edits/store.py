@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -390,6 +391,41 @@ class SelfEditsStore:
         }
         _atomic_write_json(pdir / "meta.json", meta)
         return {"ok": True, "id": pid}
+
+    def create_from_diff(
+        self,
+        diff_text: str,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+        author: str | None = None,
+    ) -> dict[str, Any]:
+        diff_text = str(diff_text or "").strip()
+        if not diff_text:
+            raise SelfEditsError("diff_required")
+        self.proposals_dir.mkdir(parents=True, exist_ok=True)
+        pid = uuid.uuid4().hex[:12]
+        pdir = self._proposal_dir(pid)
+        if pdir.exists():
+            raise SelfEditsError("proposal_exists")
+        pdir.mkdir(parents=True, exist_ok=True)
+        patch_path = pdir / "patch.diff"
+        patch_path.write_text(diff_text, encoding="utf-8")
+
+        ok_patch, patch_err, _touched = self._validate_patch(diff_text)
+        status = "pending" if ok_patch else "blocked"
+        meta = {
+            "id": pid,
+            "created_at": _now_ts(),
+            "title": str(title or f"Proposal {pid}"),
+            "summary": str(summary or ""),
+            "author": str(author or "frontend"),
+            "status": status,
+        }
+        if not ok_patch and patch_err:
+            meta["error"] = patch_err
+        _atomic_write_json(pdir / "meta.json", meta)
+        return {"ok": bool(ok_patch), "id": pid, "status": status, "error": patch_err}
 
     def _acquire_lock(self) -> FileLock:
         lock = FileLock(self.lock_path)

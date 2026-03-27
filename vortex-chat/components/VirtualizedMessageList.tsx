@@ -10,6 +10,7 @@ interface VirtualizedMessageListProps {
   codeTheme: 'dark' | 'light' | 'match-app';
   onShowReasoning: (messageId: string) => void;
   onOpenModificationExplorer: (fileChanges: { path: string, diff: string }[]) => void;
+  onSuggestPatch: (messageId: string) => void;
   isLoading: boolean;
   language: Language;
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -24,6 +25,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
   codeTheme,
   onShowReasoning,
   onOpenModificationExplorer,
+  onSuggestPatch,
   isLoading,
   language,
   containerRef
@@ -33,6 +35,8 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
   const heightsMap = useRef<Map<string, number>>(new Map());
   const [totalHeight, setTotalHeight] = useState(0);
   const observerRef = useRef<ResizeObserver | null>(null);
+  const outerRef = useRef<HTMLDivElement | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     observerRef.current = new ResizeObserver((entries) => {
@@ -111,9 +115,20 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
     return { visibleMessages: messages.slice(startIdx, endIdx), offsetTop: accOffset, startIndex: startIdx };
   }, [messages, scrollTop, containerHeight, totalHeight]);
 
+  useEffect(() => {
+    if (!outerRef.current) return;
+    const nextHeight = Math.max(totalHeight, messages.length * ESTIMATED_HEIGHT);
+    outerRef.current.style.height = `${nextHeight}px`;
+  }, [totalHeight, messages.length]);
+
+  useEffect(() => {
+    if (!innerRef.current) return;
+    innerRef.current.style.transform = `translateY(${offsetTop}px)`;
+  }, [offsetTop]);
+
   return (
-    <div className="relative w-full accelerated" style={{ height: `${Math.max(totalHeight, messages.length * ESTIMATED_HEIGHT)}px` }}>
-      <div className="absolute top-0 left-0 w-full flex flex-col will-change-transform" style={{ transform: `translateY(${offsetTop}px)` }}>
+    <div ref={outerRef} className="relative w-full accelerated">
+      <div ref={innerRef} className="absolute top-0 left-0 w-full flex flex-col will-change-transform">
         <AnimatePresence mode="popLayout" initial={false}>
           {visibleMessages.map((msg, index) => {
             const absoluteIndex = startIndex + index;
@@ -126,6 +141,7 @@ const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = ({
                   codeTheme={codeTheme}
                   onShowReasoning={onShowReasoning} 
                   onOpenModificationExplorer={onOpenModificationExplorer} 
+                  onSuggestPatch={onSuggestPatch}
                   isStreaming={isStreaming} 
                   language={language} 
                 />

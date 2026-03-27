@@ -8,7 +8,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Iterable, List
 from urllib.parse import urlsplit, urlunsplit
 
 from ..agent.memory import MemoryStore
@@ -526,14 +526,14 @@ def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
         offset = int(meta.get("offset", 0))
         queue_dir = _resolve_queue_dir(base_dir, settings)
         try:
-            stat = episodes_path.stat()
+            ep_stat = episodes_path.stat()
         except Exception:
-            stat = None
-        if stat is not None:
-            if stat.st_size < offset:
+            ep_stat = None
+        if ep_stat is not None:
+            if ep_stat.st_size < offset:
                 offset = 0
-            if not (stat.st_size == int(meta.get("size", 0)) and offset >= stat.st_size):
-                remaining = stat.st_size - offset
+            if not (ep_stat.st_size == int(meta.get("size", 0)) and offset >= ep_stat.st_size):
+                remaining = ep_stat.st_size - offset
                 if remaining > 0:
                     budget_left = max_total_bytes_per_tick - bytes_used
                     max_bytes = min(max_bytes_per_file, budget_left, remaining)
@@ -570,7 +570,7 @@ def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
                                         new_docs += store.ingest_text("episode", episodes_path.as_posix(), doc_text, quality=0.9)
                                 bytes_used += len(data)
                                 files_used += 1
-                        state.set_json(key, {"size": stat.st_size, "offset": offset})
+                        state.set_json(key, {"size": ep_stat.st_size, "offset": offset})
 
     return new_docs
 
@@ -693,7 +693,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
     return CollectedSamples(samples=samples, stats=stats, gold_samples=gold_samples)
 
 
-def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> tuple[str, list[str]]:
+def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> tuple[str, list[dict]]:
     rag_cfg = settings.get("rag", {})
     max_chars = int(rag_cfg.get("max_chars", 1200))
     knowledge_path = Path(settings.get("continuous", {}).get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
@@ -702,7 +702,10 @@ def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: 
     joined = "\n\n".join(chunk.text for chunk in chunks)
     if max_chars and len(joined) > max_chars:
         joined = joined[:max_chars]
-    refs = [chunk.source_ref for chunk in chunks if chunk.source_ref]
+    refs = [
+        {"kind": chunk.source_kind, "ref": chunk.source_ref}
+        for chunk in chunks if chunk.source_ref
+    ]
     return joined, refs
 
 

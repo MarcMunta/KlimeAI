@@ -16,17 +16,39 @@ def _normalize_messages(messages: Iterable[dict], default_system: str | None) ->
 
 
 def _fallback_prompt(messages: Iterable[dict]) -> str:
-    parts = []
+    """Build a minimal prompt for models without a chat template.
+
+    System instructions go at the top without special markers.
+    Only the user question is presented last, so the model continues
+    with its answer directly.
+    """
+    system_parts: List[str] = []
+    conversation: List[dict] = []
     for msg in messages:
         role = (msg.get("role") or "user").lower()
-        content = msg.get("content") or ""
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
         if role == "system":
-            parts.append(f"### System:\n{content}")
-        elif role == "assistant":
-            parts.append(f"### Assistant:\n{content}")
+            system_parts.append(content)
         else:
-            parts.append(f"### User:\n{content}")
-    parts.append("### Assistant:\n")
+            conversation.append({"role": role, "content": content})
+
+    parts: List[str] = []
+    if system_parts:
+        # Single line instruction, no special markers to echo
+        parts.append(" ".join(system_parts))
+        parts.append("")
+
+    for msg in conversation:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "assistant":
+            parts.append(f"A: {content}")
+        else:
+            parts.append(f"Q: {content}")
+
+    parts.append("A:")
     return "\n".join(parts).strip()
 
 

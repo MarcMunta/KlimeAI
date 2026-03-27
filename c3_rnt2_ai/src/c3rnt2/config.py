@@ -26,7 +26,9 @@ def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
     return merged
 
 
-def _resolve_profile(profiles: dict[str, Any], name: str, stack: list[str]) -> dict[str, Any]:
+def _resolve_profile(
+    profiles: dict[str, Any], name: str, stack: list[str]
+) -> dict[str, Any]:
     if name in stack:
         cycle = " -> ".join(stack + [name])
         raise ValueError(f"base_profile cycle detected: {cycle}")
@@ -39,8 +41,6 @@ def _resolve_profile(profiles: dict[str, Any], name: str, stack: list[str]) -> d
         override = {k: v for k, v in profile.items() if k != "base_profile"}
         return _merge_dicts(base_profile, override)
     return deepcopy(profile)
-
-
 
 
 def normalize_settings(settings: dict) -> dict:
@@ -60,7 +60,9 @@ def normalize_settings(settings: dict) -> dict:
         runtime.setdefault("paged_tile_out", c3.get("tile_size"))
         runtime.setdefault("paged_tile_in", c3.get("tile_in"))
         runtime.setdefault("cache_vram_budget_mb", c3.get("cache_vram_budget_mb"))
-        runtime.setdefault("paged_lm_head_stream_topk", c3.get("paged_lm_head_stream_topk"))
+        runtime.setdefault(
+            "paged_lm_head_stream_topk", c3.get("paged_lm_head_stream_topk")
+        )
         runtime.setdefault("prefetch_depth", c3.get("prefetch_depth"))
         runtime.setdefault("compression", c3.get("compression"))
         runtime.setdefault("pinned_memory", c3.get("pinned_memory"))
@@ -69,7 +71,10 @@ def normalize_settings(settings: dict) -> dict:
     if "cache_vram_budget_mb" not in runtime:
         runtime["cache_vram_budget_mb"] = 2048
     runtime.setdefault("prefetch_depth", 2)
-    runtime.setdefault("paged_lm_head_stream_topk", runtime.get("paged_lm_head_stream_topk", False) or False)
+    runtime.setdefault(
+        "paged_lm_head_stream_topk",
+        runtime.get("paged_lm_head_stream_topk", False) or False,
+    )
     kv = normalized.get("kv", {}) or {}
     if "kv_quant" not in runtime:
         kv_bits = kv.get("kv_quant_bits")
@@ -193,7 +198,9 @@ def normalize_settings(settings: dict) -> dict:
     adapter_router.setdefault("mode", "keyword_map")
     adapter_router.setdefault("keyword_map", {})
     adapter_router.setdefault("default", adapters.get("default"))
-    adapter_router.setdefault("embedding_backend", knowledge.get("embedding_backend", "hash"))
+    adapter_router.setdefault(
+        "embedding_backend", knowledge.get("embedding_backend", "hash")
+    )
     adapter_router.setdefault("embedding_dim", 128)
     adapter_router.setdefault("embedding_min_score", 0.0)
     adapter_router.setdefault("top_k", 1)
@@ -300,9 +307,15 @@ def normalize_settings(settings: dict) -> dict:
     cont = normalized.get("continuous", {}) or {}
     if cont:
         if cont.get("run_interval_minutes") is not None:
-            warnings.warn("continuous.run_interval_minutes is deprecated; use continuous.interval_minutes", DeprecationWarning)
+            warnings.warn(
+                "continuous.run_interval_minutes is deprecated; use continuous.interval_minutes",
+                DeprecationWarning,
+            )
             cont.setdefault("interval_minutes", cont.get("run_interval_minutes"))
-        if "run_interval_minutes" not in cont and cont.get("interval_minutes") is not None:
+        if (
+            "run_interval_minutes" not in cont
+            and cont.get("interval_minutes") is not None
+        ):
             cont["run_interval_minutes"] = cont.get("interval_minutes")
         if "max_steps_per_tick" not in cont and cont.get("max_steps") is not None:
             cont["max_steps_per_tick"] = cont.get("max_steps")
@@ -323,7 +336,9 @@ def normalize_settings(settings: dict) -> dict:
 
     autopilot = normalized.get("autopilot", {}) or {}
     autopilot.setdefault("enabled", False)
-    autopilot.setdefault("interval_minutes", cont.get("interval_minutes", 30) if cont else 30)
+    autopilot.setdefault(
+        "interval_minutes", cont.get("interval_minutes", 30) if cont else 30
+    )
     autopilot.setdefault("ingest_cooldown_minutes", 10)
     autopilot.setdefault("train_cooldown_minutes", 60)
     autopilot.setdefault("eval_cooldown_minutes", 60)
@@ -337,7 +352,7 @@ def normalize_settings(settings: dict) -> dict:
     autopilot.setdefault("autopatch_on_doctor_fail", True)
     autopilot.setdefault("autopatch_require_eval", True)
     autopilot.setdefault("autopatch_strategy", "subprocess_cpu")
-    autopilot.setdefault("autopatch_require_approval", False)
+    autopilot.setdefault("autopatch_require_approval", True)
     autopilot.setdefault("approval_file", "data/APPROVE_AUTOPATCH")
     autopilot.setdefault("restart_after_patch", False)
     autopilot.setdefault("bench_enabled", False)
@@ -348,7 +363,9 @@ def normalize_settings(settings: dict) -> dict:
     autopilot.setdefault("min_new_samples_per_tick", 0)
     autopilot.setdefault("max_consecutive_failures", 3)
     autopilot.setdefault("safe_mode_cooldown_minutes", 0)
-    autopilot.setdefault("todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL")
+    autopilot.setdefault(
+        "todo_regex", r"TODO\((P1|PRIORITY)\)|TODO!|TODO:HIGH|TODO:CRITICAL"
+    )
     normalized["autopilot"] = autopilot
 
     if lava:
@@ -409,7 +426,9 @@ def _clamp_int(settings: dict, keys: list[str], *, max_value: int, label: str) -
     except Exception:
         return
     if val > int(max_value):
-        warnings.warn(f"{label} clamped to {int(max_value)} for rtx4080_16gb_safe (was {val})")
+        warnings.warn(
+            f"{label} clamped to {int(max_value)} for rtx4080_16gb_safe (was {val})"
+        )
         _set_nested(settings, keys, int(max_value))
 
 
@@ -420,20 +439,50 @@ def _apply_rtx4080_16gb_safe_clamps(settings: dict) -> dict:
     if profile != "rtx4080_16gb_safe":
         return settings
 
-    _clamp_int(settings, ["decode", "max_new_tokens"], max_value=128, label="decode.max_new_tokens")
-    _clamp_int(settings, ["core", "local_window"], max_value=2048, label="core.local_window")
+    _clamp_int(
+        settings,
+        ["decode", "max_new_tokens"],
+        max_value=128,
+        label="decode.max_new_tokens",
+    )
+    _clamp_int(
+        settings, ["core", "local_window"], max_value=2048, label="core.local_window"
+    )
     _clamp_int(settings, ["kv", "window_size"], max_value=2048, label="kv.window_size")
-    _clamp_int(settings, ["runtime", "cache_vram_budget_mb"], max_value=4096, label="runtime.cache_vram_budget_mb")
-    _clamp_int(settings, ["c3", "cache_vram_budget_mb"], max_value=4096, label="c3.cache_vram_budget_mb")
-    _clamp_int(settings, ["runtime", "prefetch_depth"], max_value=4, label="runtime.prefetch_depth")
-    _clamp_int(settings, ["continuous", "batch_tokens"], max_value=8192, label="continuous.batch_tokens")
+    _clamp_int(
+        settings,
+        ["runtime", "cache_vram_budget_mb"],
+        max_value=4096,
+        label="runtime.cache_vram_budget_mb",
+    )
+    _clamp_int(
+        settings,
+        ["c3", "cache_vram_budget_mb"],
+        max_value=4096,
+        label="c3.cache_vram_budget_mb",
+    )
+    _clamp_int(
+        settings,
+        ["runtime", "prefetch_depth"],
+        max_value=4,
+        label="runtime.prefetch_depth",
+    )
+    _clamp_int(
+        settings,
+        ["continuous", "batch_tokens"],
+        max_value=8192,
+        label="continuous.batch_tokens",
+    )
 
     runtime = dict(settings.get("runtime", {}) or {})
-    if str(runtime.get("kv_quant_2bit_experimental", "")).lower() not in {"1", "true", "yes"}:
+    if str(runtime.get("kv_quant_2bit_experimental", "")).lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
         runtime["kv_quant_2bit_experimental"] = False
     settings["runtime"] = runtime
     return settings
-
 
 
 def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
@@ -467,9 +516,15 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         if not (core.get("tensorrt_tokenizer") or core.get("hf_model")):
             missing.append("core.tensorrt_tokenizer or core.hf_model")
     elif backend in {"external", "vllm", "sglang"}:
-        engine = str(core.get("external_engine") or core.get("engine") or backend).strip().lower()
+        engine = (
+            str(core.get("external_engine") or core.get("engine") or backend)
+            .strip()
+            .lower()
+        )
         if backend == "external" and engine not in {"vllm", "sglang"}:
-            errors.append("core.external_engine must be vllm or sglang when core.backend=external")
+            errors.append(
+                "core.external_engine must be vllm or sglang when core.backend=external"
+            )
         base_url = core.get("external_base_url") or core.get("external_url")
         if not base_url:
             missing.append("core.external_base_url")
@@ -498,9 +553,13 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         errors.append("runtime.kv_quant must be one of none|int8|2bit|lowrank")
     if kv_quant == "2bit":
         if not bool(runtime.get("kv_quant_2bit_experimental", False)):
-            errors.append("runtime.kv_quant=2bit is experimental; set runtime.kv_quant_2bit_experimental=true")
+            errors.append(
+                "runtime.kv_quant=2bit is experimental; set runtime.kv_quant_2bit_experimental=true"
+            )
         if not bool(runtime.get("i_know_what_im_doing", False)):
-            errors.append("runtime.kv_quant=2bit requires runtime.i_know_what_im_doing=true")
+            errors.append(
+                "runtime.kv_quant=2bit requires runtime.i_know_what_im_doing=true"
+            )
     if kv_quant == "lowrank":
         raw_rank = runtime.get("kv_lowrank_rank")
         try:
@@ -520,13 +579,21 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
                 errors.append("runtime.kv_lowrank_rank must be < core.hidden_size")
     gpu_decompress = str(runtime.get("gpu_decompress", "none")).lower()
     if gpu_decompress not in {"none", "triton"}:
-        errors.append("runtime.gpu_decompress must be none or triton (CPU decompress + H2D pipeline)")
+        errors.append(
+            "runtime.gpu_decompress must be none or triton (CPU decompress + H2D pipeline)"
+        )
 
     if web_cfg:
         if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_domains"):
-            errors.append("tools.web.allow_domains required when tools.web.enabled is true")
-        if bool(web_cfg.get("enabled", False)) and not web_cfg.get("allow_content_types"):
-            errors.append("tools.web.allow_content_types required when tools.web.enabled is true")
+            errors.append(
+                "tools.web.allow_domains required when tools.web.enabled is true"
+            )
+        if bool(web_cfg.get("enabled", False)) and not web_cfg.get(
+            "allow_content_types"
+        ):
+            errors.append(
+                "tools.web.allow_content_types required when tools.web.enabled is true"
+            )
         try:
             if int(web_cfg.get("rate_limit_per_min", 1)) <= 0:
                 errors.append("tools.web.rate_limit_per_min must be > 0")
@@ -554,7 +621,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
 
     if hf_train_cfg and bool(hf_train_cfg.get("enabled", False)):
         if not (hf_train_cfg.get("model_name") or core.get("hf_model")):
-            errors.append("hf_train.model_name or core.hf_model required for hf training")
+            errors.append(
+                "hf_train.model_name or core.hf_model required for hf training"
+            )
         try:
             if int(hf_train_cfg.get("micro_batch_size", 1)) <= 0:
                 errors.append("hf_train.micro_batch_size must be > 0")
@@ -570,7 +639,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         paths = adapters_cfg.get("paths", {}) or {}
         allow_empty = bool(adapters_cfg.get("allow_empty", False))
         if not paths and not allow_empty:
-            errors.append("adapters.paths must not be empty when adapters.enabled is true")
+            errors.append(
+                "adapters.paths must not be empty when adapters.enabled is true"
+            )
         router_cfg = adapters_cfg.get("router", {}) or {}
         keyword_map = router_cfg.get("keyword_map", {}) or {}
         try:
@@ -584,7 +655,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
             errors.append("adapters.router.mix_mode must be one of single|weighted")
         for _kw, name in keyword_map.items():
             if name and name not in paths:
-                errors.append(f"adapters.router.keyword_map references unknown adapter: {name}")
+                errors.append(
+                    f"adapters.router.keyword_map references unknown adapter: {name}"
+                )
         default = adapters_cfg.get("default") or router_cfg.get("default")
         if default and default not in paths:
             errors.append(f"adapters.default unknown: {default}")
@@ -667,7 +740,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
 
     _check_data_path(cont.get("knowledge_path"), "continuous.knowledge_path")
     _check_data_path(cont.get("replay", {}).get("path"), "continuous.replay.path")
-    _check_data_path(cont.get("eval", {}).get("anchors_path"), "continuous.eval.anchors_path")
+    _check_data_path(
+        cont.get("eval", {}).get("anchors_path"), "continuous.eval.anchors_path"
+    )
     if web_cfg.get("cache_dir"):
         _check_data_path(web_cfg.get("cache_dir"), "tools.web.cache_dir")
     if self_patch_cfg.get("queue_dir"):
@@ -694,7 +769,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         raise ValueError("; ".join(message))
 
 
-def load_settings(profile: str | None = None, settings_path: str | Path | None = None) -> dict[str, Any]:
+def load_settings(
+    profile: str | None = None, settings_path: str | Path | None = None
+) -> dict[str, Any]:
     path = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
     if not path.exists():
         raise FileNotFoundError(f"Settings file not found: {path}")

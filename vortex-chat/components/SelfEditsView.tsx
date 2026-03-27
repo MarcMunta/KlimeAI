@@ -155,6 +155,31 @@ const SelfEditsView: React.FC<SelfEditsViewProps> = ({ language, onAddLog, onPen
     [language, loadDetail, onAddLog, refreshList, selectedId]
   );
 
+  const autoApplyPending = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const payload = await fetchJson<{ object: string; data: ProposalSummary[] }>("/v1/self-edits/proposals?status=pending");
+      const pending = payload.data || [];
+      for (const item of pending) {
+        try {
+          await fetchJson(`/v1/self-edits/proposals/${encodeURIComponent(item.id)}/accept`, { method: "POST" });
+          await fetchJson(`/v1/self-edits/proposals/${encodeURIComponent(item.id)}/apply`, { method: "POST" });
+          onAddLog("SYSTEM", `${language === "es" ? "Aplicado" : "Applied"}: ${item.id}`);
+        } catch (e: any) {
+          onAddLog("SYSTEM", `${language === "es" ? "Falló" : "Failed"}: ${item.id}`);
+        }
+      }
+      await refreshList();
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      setError(msg);
+      onAddLog("SYSTEM", msg);
+    } finally {
+      setBusy(false);
+    }
+  }, [language, onAddLog, refreshList]);
+
   const statusPill = (st: ProposalStatus) => {
     const base = "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-[0.25em] border";
     if (st === "accepted") return <span className={`${base} bg-primary/10 border-primary/20 text-primary`}>accepted</span>;
@@ -214,6 +239,15 @@ const SelfEditsView: React.FC<SelfEditsViewProps> = ({ language, onAddLog, onPen
           >
             <FlaskConical size={16} />
             {language === "es" ? "Demo" : "Demo"}
+          </button>
+
+          <button
+            onClick={() => void autoApplyPending()}
+            disabled={busy}
+            className="flex items-center gap-3 px-6 py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-black uppercase tracking-[0.25em] hover:bg-emerald-500/20 transition-all disabled:opacity-50"
+          >
+            <PlayCircle size={16} />
+            {language === "es" ? "Auto-aplicar" : "Auto-apply"}
           </button>
         </div>
       </header>

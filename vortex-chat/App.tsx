@@ -62,11 +62,17 @@ const App: React.FC = () => {
   const [activeThoughtMessageId, setActiveThoughtMessageId] = useState<string | null>(null);
   const abortControllerRef = useRef<boolean>(false);
   const mainScrollRef = useRef<HTMLDivElement>(null);
+  const AUTO_APPLY_SELF_EDITS = false;
   
   const { scrollY } = useScroll({ container: mainScrollRef });
   const t = translations[settings.language];
   const currentSession = sessions.find(s => s.id === currentSessionId);
   const hasMessages = currentSession && currentSession.messages && currentSession.messages.length > 0;
+
+  const addLog = useCallback((level: LogEntry['level'], message: string) => {
+    const newLog: LogEntry = { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), level, message };
+    setLogs(prev => [...prev.slice(-149), newLog]);
+  }, []);
 
   const activeThought = React.useMemo(() => {
     if (!activeThoughtMessageId || !currentSessionId) return undefined;
@@ -79,15 +85,215 @@ const App: React.FC = () => {
     return lastMsg.id === activeThoughtMessageId;
   }, [isLoading, currentSession, activeThoughtMessageId]);
 
+  const extractDiffBlocks = useCallback((content: string): string => {
+    const blocks: string[] = [];
+    const regex = /```(?:diff|patch)\n([\s\S]*?)```/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(content)) !== null) {
+      if (match[1]) blocks.push(match[1].trim());
+    }
+    return blocks.filter(Boolean).join("\n\n");
+  }, []);
+
+  const acceptAndApplyProposal = useCallback(async (proposalId: string) => {
+    const resp = await fetch(`/v1/self-edits/proposals/${encodeURIComponent(proposalId)}/accept`, { method: 'POST' });
+    if (!resp.ok) return { ok: false, stage: 'accept' };
+    const apply = await fetch(`/v1/self-edits/proposals/${encodeURIComponent(proposalId)}/apply`, { method: 'POST' });
+    if (!apply.ok) return { ok: false, stage: 'apply' };
+    return { ok: true };
+  }, []);
+
+  const suggestPatchFromMessage = useCallback(async (messageId: string, reason: string) => {
+    const session = sessions.find(s => s.id === currentSessionId);
+    const msg = session?.messages.find(m => m.id === messageId);
+    if (!msg || !msg.content) {
+      addLog('SYSTEM', settings.language === 'es' ? 'No hay contenido para sugerir parche.' : 'No content available to suggest a patch.');
+      return;
+    }
+    const diffText = extractDiffBlocks(msg.content);
+    if (!diffText) {
+      addLog('SYSTEM', settings.language === 'es' ? 'No se detectó un bloque diff en la respuesta.' : 'No diff block detected in the response.');
+      return;
+    }
+    const title = settings.language === 'es' ? 'Parche sugerido (frontend)' : 'Suggested patch (frontend)';
+    const summary = settings.language === 'es' ? `Generado desde chat · ${reason}` : `Generated from chat · ${reason}`;
+    const proposal = await vortexService.proposeSelfEditFromDiff(diffText, title, summary);
+    if (!proposal.ok || !proposal.id) {
+      addLog('SYSTEM', settings.language === 'es' ? `No se pudo crear propuesta: ${proposal.error || 'error'}` : `Failed to create proposal: ${proposal.error || 'error'}`);
+      return;
+    }
+    addLog('LEARN', settings.language === 'es' ? `Propuesta creada: ${proposal.id}` : `Proposal created: ${proposal.id}`);
+    if (AUTO_APPLY_SELF_EDITS) {
+      const applyRes = await acceptAndApplyProposal(proposal.id);
+      if (applyRes.ok) {
+        addLog('LEARN', settings.language === 'es' ? `Parche aplicado: ${proposal.id}` : `Patch applied: ${proposal.id}`);
+      } else {
+        addLog('SYSTEM', settings.language === 'es' ? `No se pudo aplicar: ${proposal.id}` : `Failed to apply: ${proposal.id}`);
+      }
+    }
+  }, [acceptAndApplyProposal, addLog, currentSessionId, extractDiffBlocks, sessions, settings.language]);
+
   const resetInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current);
     if (activeModificationFiles) return;
     if (isLoading || isSearching) { setFooterVisible(true); setHeaderVisible(true); return; }
     if (hasMessages) setFooterVisible(true);
-    inactivityTimerRef.current = window.setTimeout(() => { if (activeView === 'chat') { setFooterVisible(false); setHeaderVisible(false); } }, 6000);
+    inactivityTimerRef.current = window.setTimeout(() => { if (activeView === 'chat') { setFooterVisible(false); setHeaderVisible(false); } else { setHeaderVisible(false); } }, 6000);
   }, [isLoading, isSearching, activeView, hasMessages, activeModificationFiles]);
 
   useEffect(() => { resetInactivityTimer(); return () => { if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current); }; }, [resetInactivityTimer]);
+
+  // --- Poll backend /v1/status for REAL kernel activity ---
+  useEffect(() => {
+    let disposed = false;
+    let prevEpisodes = -1;
+    let prevRequests = -1;
+    let prevKnowledge = -1;
+    let prevBackendKey = '';
+    let prevWebChunks = -1;
+    let prevCodeChunks = -1;
+    let prevAnalyses = -1;
+    let prevProposals = -1;
+    let prevDiscoveredUrls = -1;
+
+    const poll = async () => {
+      try {
+        const resp = await fetch('/v1/status');
+        if (!resp.ok || disposed) return;
+        const data = await resp.json().catch(() => null);
+        if (!data || disposed) return;
+
+        const lang = settings.language;
+        const backends = data.backends || [];
+        const adaptersLoaded = data.adapters
+          ? Object.values(data.adapters).filter(Boolean).length
+          : 0;
+        const metrics = data.metrics || {};
+        const episodes = data.episodes || 0;
+        const knowledge = data.knowledge_chunks || 0;
+        const al = data.autolearn || {};
+
+        // -- Backend & adapter status (only on CHANGE) --
+        const backendKey = `${backends.join(',')}|${adaptersLoaded}`;
+        if (backendKey !== prevBackendKey) {
+          prevBackendKey = backendKey;
+          if (adaptersLoaded > 0) {
+            addLog('LEARN', lang === 'es'
+              ? `Adaptadores LoRA activos: ${adaptersLoaded} en ${backends.join(', ')}.`
+              : `Active LoRA adapters: ${adaptersLoaded} on ${backends.join(', ')}.`);
+          } else if (backends.length > 0) {
+            addLog('INFO', lang === 'es'
+              ? `Backend: ${backends.join(', ')} — modelo cargado y listo.`
+              : `Backend: ${backends.join(', ')} — model loaded and ready.`);
+          }
+        }
+
+        // -- Episode growth --
+        if (prevEpisodes >= 0 && episodes > prevEpisodes) {
+          const diff = episodes - prevEpisodes;
+          addLog('LEARN', lang === 'es'
+            ? `+${diff} episodio${diff > 1 ? 's' : ''} registrado${diff > 1 ? 's' : ''} (total: ${episodes}).`
+            : `+${diff} new episode${diff > 1 ? 's' : ''} logged (total: ${episodes}).`);
+        } else if (prevEpisodes < 0 && episodes > 0) {
+          addLog('INFO', lang === 'es'
+            ? `Episodios almacenados: ${episodes}.`
+            : `Stored episodes: ${episodes}.`);
+        }
+        prevEpisodes = episodes;
+
+        // -- Knowledge chunks growth --
+        if (prevKnowledge >= 0 && knowledge > prevKnowledge) {
+          const diff = knowledge - prevKnowledge;
+          addLog('LEARN', lang === 'es'
+            ? `+${diff} chunk${diff > 1 ? 's' : ''} de conocimiento indexado${diff > 1 ? 's' : ''} (total: ${knowledge}).`
+            : `+${diff} knowledge chunk${diff > 1 ? 's' : ''} indexed (total: ${knowledge}).`);
+        } else if (prevKnowledge < 0 && knowledge > 0) {
+          addLog('INFO', lang === 'es'
+            ? `Base de conocimiento: ${knowledge} chunks indexados.`
+            : `Knowledge base: ${knowledge} chunks indexed.`);
+        }
+        prevKnowledge = knowledge;
+
+        // -- Autolearn: web ingest activity --
+        const webChunks = al.total_web_chunks || 0;
+        if (prevWebChunks >= 0 && webChunks > prevWebChunks) {
+          const diff = webChunks - prevWebChunks;
+          addLog('SEARCH', lang === 'es'
+            ? `Autolearn: +${diff} fragmentos web ingestados (total: ${webChunks}).`
+            : `Autolearn: +${diff} web chunks ingested (total: ${webChunks}).`);
+        } else if (prevWebChunks < 0 && webChunks > 0) {
+          addLog('SEARCH', lang === 'es'
+            ? `Autolearn: ${webChunks} fragmentos web en base de conocimiento.`
+            : `Autolearn: ${webChunks} web chunks in knowledge base.`);
+        }
+        prevWebChunks = webChunks;
+
+        // -- Autolearn: code index activity --
+        const codeChunks = al.total_code_chunks || 0;
+        if (prevCodeChunks >= 0 && codeChunks > prevCodeChunks) {
+          const diff = codeChunks - prevCodeChunks;
+          addLog('LEARN', lang === 'es'
+            ? `Autolearn: +${diff} fragmentos de código propio indexados.`
+            : `Autolearn: +${diff} self-code chunks indexed.`);
+        } else if (prevCodeChunks < 0 && codeChunks > 0) {
+          addLog('LEARN', lang === 'es'
+            ? `Autolearn: ${codeChunks} fragmentos de código propio indexados.`
+            : `Autolearn: ${codeChunks} self-code chunks indexed.`);
+        }
+        prevCodeChunks = codeChunks;
+
+        // -- Autolearn: analysis & proposals --
+        const analyses = al.total_analyses || 0;
+        const proposals = al.total_proposals || 0;
+        if (prevAnalyses >= 0 && analyses > prevAnalyses) {
+          const diff = analyses - prevAnalyses;
+          addLog('LEARN', lang === 'es'
+            ? `Autolearn: ${diff} archivo${diff > 1 ? 's' : ''} analizado${diff > 1 ? 's' : ''} — ${proposals} propuestas generadas.`
+            : `Autolearn: ${diff} file${diff > 1 ? 's' : ''} analyzed — ${proposals} proposals generated.`);
+        }
+        prevAnalyses = analyses;
+        if (prevProposals >= 0 && proposals > prevProposals) {
+          const diff = proposals - prevProposals;
+          addLog('SYSTEM', lang === 'es'
+            ? `Autolearn: +${diff} propuesta${diff > 1 ? 's' : ''} de auto-mejora generada${diff > 1 ? 's' : ''}.`
+            : `Autolearn: +${diff} self-improvement proposal${diff > 1 ? 's' : ''} generated.`);
+        }
+        prevProposals = proposals;
+
+        // -- Autolearn: URL discovery --
+        const discoveredUrls = (al.discovered_urls || []).length;
+        if (prevDiscoveredUrls >= 0 && discoveredUrls > prevDiscoveredUrls) {
+          const diff = discoveredUrls - prevDiscoveredUrls;
+          addLog('SEARCH', lang === 'es'
+            ? `Autolearn: +${diff} URL${diff > 1 ? 's' : ''} descubierta${diff > 1 ? 's' : ''} por el modelo (total: ${discoveredUrls}).`
+            : `Autolearn: +${diff} URL${diff > 1 ? 's' : ''} discovered by model (total: ${discoveredUrls}).`);
+        } else if (prevDiscoveredUrls < 0 && discoveredUrls > 0) {
+          addLog('SEARCH', lang === 'es'
+            ? `Autolearn: ${discoveredUrls} URLs descubiertas para aprendizaje autónomo.`
+            : `Autolearn: ${discoveredUrls} URLs discovered for autonomous learning.`);
+        }
+        prevDiscoveredUrls = discoveredUrls;
+
+        // -- Request metrics (only show when new requests arrived) --
+        if (prevRequests >= 0 && metrics.chat_requests > prevRequests) {
+          const diff = metrics.chat_requests - prevRequests;
+          const lat = metrics.avg_latency_ms || 0;
+          const tokens = metrics.completion_tokens_est || 0;
+          addLog('INFO', lang === 'es'
+            ? `+${diff} petición${diff > 1 ? 'es' : ''} procesada${diff > 1 ? 's' : ''} — latencia media: ${lat}ms, tokens generados: ${tokens}.`
+            : `+${diff} request${diff > 1 ? 's' : ''} processed — avg latency: ${lat}ms, tokens generated: ${tokens}.`);
+        }
+        prevRequests = metrics.chat_requests || 0;
+
+      } catch { /* backend offline */ }
+    };
+
+    // Initial poll after short delay
+    const t1 = setTimeout(poll, 2000);
+    // Then every 20s
+    const interval = setInterval(poll, 20000);
+    return () => { disposed = true; clearTimeout(t1); clearInterval(interval); };
+  }, [addLog, settings.language]);
 
   useEffect(() => {
     let disposed = false;
@@ -181,11 +387,6 @@ const App: React.FC = () => {
     }
   }, [sessions, isLoading, isSearching, activeView, currentSessionId, currentSession]);
 
-  const addLog = useCallback((level: LogEntry['level'], message: string) => {
-    const newLog: LogEntry = { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), level, message };
-    setLogs(prev => [...prev.slice(-149), newLog]);
-  }, []);
-
   const handleNewChat = useCallback(() => {
     const newSession: ChatSession = { id: Date.now().toString(), title: settings.language === 'es' ? 'Nueva Conversación' : 'New Conversation', messages: [], updatedAt: Date.now() };
     setSessions(prev => [newSession, ...prev]);
@@ -208,9 +409,9 @@ const App: React.FC = () => {
   const handleLoadDemo = useCallback(() => {
     if (!currentSessionId) return;
     const mockSources: Source[] = [
-      { url: 'https://react.dev', title: t.analysis_library + ': React Hooks', domain: 'react.dev', index: 0 },
-      { url: 'https://fastapi.tiangolo.com', title: t.analysis_library + ': FastAPI', domain: 'fastapi.tiangolo.com', index: 1 },
-      { url: 'https://developer.mozilla.org/es/docs/Web/API/Element/scrollIntoView', title: 'MDN: Element.scrollIntoView()', domain: 'developer.mozilla.org', index: 2 }
+      { url: 'https://react.dev', title: t.analysis_library + ': React Hooks', domain: 'react.dev', kind: 'web', index: 0 },
+      { url: 'https://fastapi.tiangolo.com', title: t.analysis_library + ': FastAPI', domain: 'fastapi.tiangolo.com', kind: 'web', index: 1 },
+      { url: 'https://developer.mozilla.org/es/docs/Web/API/Element/scrollIntoView', title: 'MDN: Element.scrollIntoView()', domain: 'developer.mozilla.org', kind: 'web', index: 2 }
     ];
     
     const demoContentEs = `Protocolo activado. He analizado la estructura actual y optimizado los parámetros del kernel.
@@ -288,25 +489,46 @@ const VORTEX_CONFIG = {
     addLog('SYSTEM', settings.language === 'es' ? 'Carga de demostración completada.' : 'Demo load complete.');
   }, [currentSessionId, addLog, settings.language, t]);
 
-  const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true) => {
+  const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true, autoTrain: boolean = true) => {
     if (!currentSessionId) return;
     setMode(selectedMode);
     if (activeView !== 'chat') handleSelectView('chat');
     setHeaderVisible(true); setFooterVisible(true); resetInactivityTimer();
     addLog('INFO', settings.language === 'es' ? `Prompt enviado (${content.length} chars) · modo=${selectedMode}` : `Prompt sent (${content.length} chars) · mode=${selectedMode}`);
     if (useInternet) {
-      addLog('SEARCH', settings.language === 'es' ? 'Grounding web activado (include_sources).' : 'Web grounding enabled (include_sources).');
+      addLog('SEARCH', settings.language === 'es' ? 'Internet activado: ingest + grounding.' : 'Internet enabled: ingest + grounding.');
     }
     const userMessage: Message = { id: Date.now().toString(), role: Role.USER, content, timestamp: Date.now() };
     const aiMessageId = (Date.now() + 1).toString();
-    const initialAiMessage: Message = { id: aiMessageId, role: Role.AI, content: "", thought: "", sources: [], groundingSupports: [], timestamp: Date.now() };
+    const initialAiMessage: Message = { id: aiMessageId, role: Role.AI, content: "", thought: "", requestId: undefined, sources: [], groundingSupports: [], timestamp: Date.now() };
     setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s));
+
+    // Auto-name the chat on first message
+    const currentMessages = sessions.find(s => s.id === currentSessionId)?.messages || [];
+    if (currentMessages.length === 0) {
+      vortexService.generateChatTitle(content, settings.language).then(result => {
+        if (result.ok && result.title) {
+          setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title: result.title! } : s));
+        }
+      }).catch(() => {});
+    }
+
     setIsLoading(true); setIsSearching(useInternet); abortControllerRef.current = false;
     try {
+      if (useInternet) {
+        const ingest: any = await vortexService.ingestOnce().catch((error) => ({ ok: false, error: String(error) }));
+        if (ingest.ok) {
+          addLog('SEARCH', settings.language === 'es' ? `Ingest web: ${ingest.newDocs ?? 0} docs.` : `Web ingest: ${ingest.newDocs ?? 0} docs.`);
+        } else {
+          addLog('SYSTEM', settings.language === 'es' ? `Ingest web falló: ${ingest.error || 'error'}` : `Web ingest failed: ${ingest.error || 'error'}`);
+        }
+      }
       const history = sessions.find(s => s.id === currentSessionId)?.messages || [];
-      const stream = vortexService.generateResponseStream(history, content, useInternet, useThinking, selectedMode);
+      const stream = vortexService.generateResponseStream(history, content, useInternet, useThinking, selectedMode, settings.language);
       let started = false;
       let aborted = false;
+      let lastText = '';
+      let lastRequestId: string | undefined;
       for await (const chunk of stream) {
         if (abortControllerRef.current) { aborted = true; break; }
         if (!started) {
@@ -314,12 +536,28 @@ const VORTEX_CONFIG = {
           addLog('INFO', settings.language === 'es' ? 'Stream SSE conectado.' : 'SSE stream connected.');
         }
         setIsSearching(false);
-        setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
+        lastText = chunk.text || lastText;
+        if (chunk.requestId) lastRequestId = chunk.requestId;
+        setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, requestId: chunk.requestId || m.requestId, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
       }
       if (aborted) {
         addLog('SYSTEM', settings.language === 'es' ? 'Ejecución abortada por el usuario.' : 'Run aborted by user.');
       } else {
-        addLog('LEARN', settings.language === 'es' ? 'Episodio registrado para self-train (data/episodes/chat.jsonl).' : 'Episode recorded for self-train (data/episodes/chat.jsonl).');
+        if (autoTrain && lastRequestId && lastText) {
+          addLog('LEARN', settings.language === 'es' ? 'Auto-train: enviando feedback...' : 'Auto-train: sending feedback...');
+          const feedback = await vortexService.submitFeedback(lastRequestId, lastText);
+          if (feedback.ok && feedback.trainingEvent) {
+            addLog('LEARN', settings.language === 'es' ? 'Auto-train registrado (training_event creado).' : 'Auto-train logged (training_event created).');
+            setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, trainingEvent: true } : m) } : s));
+            await suggestPatchFromMessage(aiMessageId, 'auto-train');
+          } else if (feedback.ok) {
+            addLog('SYSTEM', settings.language === 'es' ? 'Auto-train OK, pero sin training_event.' : 'Auto-train OK, but no training_event.');
+          } else {
+            addLog('SYSTEM', settings.language === 'es' ? `Auto-train falló: ${feedback.error || 'error'}` : `Auto-train failed: ${feedback.error || 'error'}`);
+          }
+        } else if (autoTrain) {
+          addLog('SYSTEM', settings.language === 'es' ? 'Auto-train omitido: request_id ausente.' : 'Auto-train skipped: missing request_id.');
+        }
       }
     } catch (error) { addLog('SYSTEM', 'Interrupción de flujo.'); } finally { setIsLoading(false); setIsSearching(false); resetInactivityTimer(); }
   };
@@ -374,6 +612,7 @@ const VORTEX_CONFIG = {
                         codeTheme={settings.codeTheme}
                         onShowReasoning={messageId => { setActiveThoughtMessageId(messageId); setIsReasoningOpen(true); setIsSidebarOpen(false); }} 
                         onOpenModificationExplorer={handleOpenModificationExplorer} 
+                        onSuggestPatch={messageId => { void suggestPatchFromMessage(messageId, 'manual'); }}
                         isLoading={isLoading} 
                         language={settings.language} 
                         containerRef={mainScrollRef} 
@@ -391,7 +630,7 @@ const VORTEX_CONFIG = {
             </AnimatePresence>
           </div>
 
-          {!activeModificationFiles && (
+          {!activeModificationFiles && activeView === 'chat' && (
             <motion.div initial={false} animate={{ y: footerVisible ? 0 : 200, opacity: footerVisible ? 1 : 0 }} transition={{ type: 'spring', damping: 30, stiffness: 200 }} className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-8 z-30 pointer-events-auto accelerated ${mode === 'agent' ? 'from-primary/5' : ''}`}>
               <div className="pointer-events-auto"><ChatInput onSend={handleSendMessage} isLoading={isLoading} isDarkMode={isDarkMode} onStop={() => { abortControllerRef.current = true; }} language={settings.language} onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }} /></div>
             </motion.div>

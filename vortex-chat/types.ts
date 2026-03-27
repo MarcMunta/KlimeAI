@@ -13,6 +13,7 @@ export interface Source {
   title: string;
   url: string;
   domain: string;
+  kind: 'web' | 'file' | 'unknown';
   index: number;
 }
 
@@ -28,6 +29,8 @@ export interface Message {
   role: Role;
   content: string;
   thought?: string;
+  requestId?: string;
+  trainingEvent?: boolean;
   sources?: Source[];
   groundingSupports?: GroundingSupport[];
   timestamp: number;

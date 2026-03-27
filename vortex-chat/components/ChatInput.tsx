@@ -1,12 +1,12 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Square, ArrowUp, Globe, Timer } from 'lucide-react';
+import { Square, ArrowUp, Globe, Timer, FlaskConical } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AppMode, Language } from '../types';
 import { translations } from '../translations';
 
 interface ChatInputProps {
-  onSend: (message: string, useInternet: boolean, mode: AppMode, useThinking: boolean) => void;
+  onSend: (message: string, useInternet: boolean, mode: AppMode, useThinking: boolean, autoTrain: boolean) => void;
   isLoading: boolean;
   isDarkMode: boolean;
   language: Language;
@@ -19,6 +19,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
   const [input, setInput] = useState('');
   const [isInternetEnabled, setIsInternetEnabled] = useState(false);
   const [useThinking, setUseThinking] = useState(true);
+  const [autoTrainEnabled, setAutoTrainEnabled] = useState(true);
   const [mode, setMode] = useState<AppMode>('ask');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,7 +43,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
   const handleSend = () => {
     if (input.trim() && !isLoading) {
       onInteraction?.();
-      onSend(input.trim(), isInternetEnabled, mode, useThinking);
+      onSend(input.trim(), isInternetEnabled, mode, useThinking, autoTrainEnabled);
       setInput('');
       if (textareaRef.current) textareaRef.current.style.height = 'auto';
     }
@@ -146,6 +147,19 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
             }`}
           >
             <Globe size={18} className={isInternetEnabled ? 'animate-pulse' : ''} />
+          </button>
+
+          <button
+            onClick={() => { setAutoTrainEnabled(!autoTrainEnabled); onInteraction?.(); }}
+            aria-label={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activo' : 'Auto-training active') : (language === 'es' ? 'Auto-entrenamiento inactivo' : 'Auto-training inactive')}
+            title={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activado' : 'Auto-training enabled') : (language === 'es' ? 'Auto-entrenamiento desactivado' : 'Auto-training disabled')}
+            className={`p-2.5 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
+              autoTrainEnabled
+                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20 shadow-inner'
+                : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted dark:hover:bg-zinc-800 hover:text-foreground'
+            }`}
+          >
+            <FlaskConical size={18} className={autoTrainEnabled ? 'animate-pulse' : ''} />
           </button>
 
           {isLoading ? (

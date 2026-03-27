@@ -17,6 +17,7 @@ interface MessageBubbleProps {
   codeTheme?: 'dark' | 'light' | 'match-app';
   onShowReasoning?: (messageId: string) => void;
   onOpenModificationExplorer: (fileChanges: { path: string, diff: string }[]) => void;
+  onSuggestPatch?: (messageId: string) => void;
   isStreaming?: boolean;
   language: Language;
 }
@@ -34,31 +35,59 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
     timeoutRef.current = window.setTimeout(() => setIsHovered(false), 150);
   };
 
+  const isWeb = source.kind === 'web';
+  const isFile = source.kind === 'file';
+
+  const pillIcon = isWeb ? (
+    <img
+      src={`https://www.google.com/s2/favicons?domain=${source.domain}&sz=64`}
+      alt=""
+      className="w-full h-full object-contain opacity-80"
+      onError={(e) => { (e.target as any).src = 'https://www.google.com/s2/favicons?domain=google.com&sz=64' }}
+    />
+  ) : (
+    <svg className="w-3 h-3 text-foreground/50" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M4.5 1A1.5 1.5 0 003 2.5v11A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5v-8l-4-4h-4.5zM9 2l3.5 3.5H10A1 1 0 019 4.5V2z"/>
+    </svg>
+  );
+
+  const displayTitle = isWeb
+    ? (source.title || source.domain)
+    : (source.title || source.url.split(/[\/\\]/).pop() || source.url);
+
   return (
     <div className="relative inline-block" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
       <motion.a
-        href={source.url}
-        target="_blank"
-        rel="noopener noreferrer"
+        href={isWeb ? source.url : undefined}
+        target={isWeb ? "_blank" : undefined}
+        rel={isWeb ? "noopener noreferrer" : undefined}
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="flex items-center gap-2 px-3 py-1.5 bg-background border border-border/60 hover:border-primary/60 rounded-xl transition-all shadow-sm group glass-card relative z-10"
+        className={`flex items-center gap-2 px-3 py-1.5 border rounded-xl transition-all shadow-sm group glass-card relative z-10 ${
+          isWeb
+            ? 'bg-background border-border/60 hover:border-primary/60 cursor-pointer'
+            : 'bg-background/80 border-border/40 hover:border-emerald-500/50 cursor-default'
+        }`}
       >
-        <div className="w-4 h-4 rounded-md bg-muted/40 flex items-center justify-center overflow-hidden shrink-0">
-          <img 
-            src={`https://www.google.com/s2/favicons?domain=${source.domain}&sz=64`} 
-            alt="" 
-            className="w-full h-full object-contain opacity-80"
-            onError={(e) => { (e.target as any).src = 'https://www.google.com/s2/favicons?domain=google.com&sz=64' }}
-          />
+        <div className={`w-4 h-4 rounded-md flex items-center justify-center overflow-hidden shrink-0 ${
+          isWeb ? 'bg-muted/40' : 'bg-emerald-500/10'
+        }`}>
+          {pillIcon}
         </div>
-        <span className="text-[10px] font-bold text-foreground/70 group-hover:text-primary transition-colors truncate max-w-[120px]">
-          {source.title || source.domain}
+        <span className={`text-[10px] font-bold transition-colors truncate max-w-[140px] ${
+          isWeb
+            ? 'text-foreground/70 group-hover:text-primary'
+            : 'text-emerald-400/80 group-hover:text-emerald-300'
+        }`}>
+          {displayTitle}
         </span>
+        {isFile && (
+          <span className="text-[8px] font-mono text-emerald-500/40 uppercase tracking-wider">src</span>
+        )}
       </motion.a>
 
       <AnimatePresence>
-        {isHovered && (
+        {isHovered && isWeb && (
           <motion.div
             initial={{ opacity: 0, y: 15, scale: 0.95 }}
             animate={{ opacity: 1, y: -12, scale: 1 }}
@@ -83,6 +112,19 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
                   <div className="text-[9px] font-mono text-zinc-500 truncate mt-0.5">{source.url.replace(/^https?:\/\/(www\.)?/, '')}</div>
                 </div>
               </div>
+            </div>
+          </motion.div>
+        )}
+        {isHovered && isFile && (
+          <motion.div
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: -8, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            className="absolute bottom-full left-0 mb-3 z-[2000] pointer-events-none"
+          >
+            <div className="bg-zinc-950 border border-emerald-500/20 rounded-lg px-3 py-2 shadow-lg max-w-xs">
+              <div className="text-[10px] font-mono text-emerald-400/90 truncate">{source.url}</div>
+              <div className="text-[9px] text-zinc-500 mt-0.5">Archivo fuente analizado</div>
             </div>
           </motion.div>
         )}
@@ -455,7 +497,7 @@ const PatchOverview: React.FC<{
   );
 };
 
-const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medium', codeTheme = 'dark', onShowReasoning, onOpenModificationExplorer, isStreaming = false, language }) => {
+const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medium', codeTheme = 'dark', onShowReasoning, onOpenModificationExplorer, onSuggestPatch, isStreaming = false, language }) => {
   const isUser = message.role === Role.USER;
   const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
   const [msgCopied, setMsgCopied] = useState(false);
@@ -494,6 +536,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
   }), [collapsedPaths, togglePath, codeTheme, language]);
 
   const isThinking = isStreaming && !message.content && !!message.thought;
+  const hasDiffBlock = useMemo(() => /```(?:diff|patch)\n[\s\S]*?```/i.test(message.content || ''), [message.content]);
 
   return (
     <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-10 accelerated`}>
@@ -514,6 +557,11 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
             {!isUser && (
               <div className="flex gap-6">
                 <button onClick={handleCopyMessage} className="text-[11px] font-black uppercase tracking-widest text-muted-foreground hover:text-primary transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
+                {hasDiffBlock && (
+                  <button onClick={() => onSuggestPatch?.(message.id)} className="text-[11px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-amber-500/10">
+                    <GitBranch size={14} /> {language === 'es' ? 'Sugerir parche' : 'Suggest patch'}
+                  </button>
+                )}
                 {(message.thought || (isStreaming && message.role === Role.AI)) && (
                   <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[11px] font-black uppercase tracking-widest text-primary flex items-center gap-2.5 py-2 px-4 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
                     <div className="relative"><Brain size={14} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>

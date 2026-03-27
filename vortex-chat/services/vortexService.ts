@@ -6,6 +6,7 @@ type StreamChunk = {
   sources: Source[];
   groundingSupports: GroundingSupport[];
   fileChanges?: { path: string; diff: string }[];
+  requestId?: string;
   done: boolean;
 };
 
@@ -19,18 +20,35 @@ const extractDomain = (rawUrl: string): string => {
 
 const toSources = (refs: unknown): Source[] => {
   if (!Array.isArray(refs)) return [];
-  return refs
-    .map((r, index) => {
-      const url = typeof r === "string" ? r : JSON.stringify(r);
-      const domain = extractDomain(url);
-      return {
-        url,
-        domain,
-        title: domain === "local" ? url : domain,
-        index,
-      } satisfies Source;
-    })
-    .filter(Boolean);
+  const results: Source[] = [];
+  for (let index = 0; index < refs.length; index++) {
+    const r = refs[index];
+    // New format: { kind: "web", ref: "https://..." }
+    const isRich = r && typeof r === 'object' && 'ref' in r;
+    const rawRef = isRich ? String(r.ref) : (typeof r === 'string' ? r : JSON.stringify(r));
+    const rawKind = isRich ? String(r.kind || '') : '';
+
+    // Determine kind
+    const isUrl = /^https?:\/\//.test(rawRef);
+    let kind: 'web' | 'file' | 'unknown';
+    if (rawKind === 'web' || isUrl) kind = 'web';
+    else if (rawKind === 'self_code' || /\.(py|ts|tsx|js|jsx|json|yaml|yml|md|toml)$/i.test(rawRef)) kind = 'file';
+    else kind = 'unknown';
+
+    // Filter: only show web pages and source code files
+    if (kind === 'unknown') continue;
+    if (kind === 'file') {
+      if (/^data[\/\\]|[\/\\]data[\/\\]|episodes|feedback|\blog|checkpoint|lock|\.sqlite|\.db/i.test(rawRef)) continue;
+    }
+
+    const domain = isUrl ? extractDomain(rawRef) : 'local';
+    const title = isUrl
+      ? domain
+      : rawRef.split(/[\/\\]/).pop() || rawRef;
+
+    results.push({ url: rawRef, domain, title, kind, index });
+  }
+  return results;
 };
 
 const extractFileChanges = (content: string): { path: string; diff: string }[] => {
@@ -47,19 +65,18 @@ const extractFileChanges = (content: string): { path: string; diff: string }[] =
   return changes;
 };
 
-const buildMessages = (history: Message[], prompt: string, mode: AppMode) => {
+const buildMessages = (history: Message[], prompt: string, mode: AppMode, useThinking: boolean, language: "es" | "en" = "es") => {
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
+  // Keep the system prompt VERY short — small models echo long instructions
+  const lang = language === "es" ? "Responde en español." : "Reply in English.";
+  let sys = `Eres Vortex, asistente experto. ${lang}`;
+
   if (mode === "agent") {
-    messages.push({
-      role: "system",
-      content:
-        "Eres Vortex, un asistente de ingeniería. " +
-        "Cuando propongas cambios de código, usa bloques con este formato:\n\n" +
-        "```file:ruta/al/archivo\n- línea eliminada\n+ línea añadida\n```\n\n" +
-        "No inventes rutas. Sé preciso y minimalista.",
-    });
+    sys += " Usa bloques ```diff``` para cambios de código.";
   }
+
+  messages.push({ role: "system", content: sys });
 
   for (const msg of history) {
     const content = (msg.content ?? "").trim();
@@ -70,6 +87,159 @@ const buildMessages = (history: Message[], prompt: string, mode: AppMode) => {
 
   messages.push({ role: "user", content: prompt });
   return messages;
+};
+
+const summarizeReasoning = (raw: string): string => {
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const parts = normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [normalized];
+  const brief = parts.slice(0, 3).join(" ").trim();
+  const maxChars = 600;
+  if (brief.length <= maxChars) return brief;
+  return `${brief.slice(0, maxChars).trim()}...`;
+};
+
+/**
+ * Nuclear cleanup: strip ALL leaked system prompts, context, role markers,
+ * JSON blobs, and prompt echoes that small local models produce.
+ *
+ * Strategy: the model frequently echoes the ENTIRE prompt verbatim.
+ * The real answer always comes after the LAST "assistant" role marker.
+ * We find it (anywhere — start-of-line, inline, with/without colon)
+ * and keep only the tail.
+ */
+const cleanLeakedSystemContent = (text: string): string => {
+  let cleaned = text;
+
+  // ==== 0. Quick bail: if it looks clean already, skip heavy processing ====
+  const looksLeaky =
+    /^\s*(system|user|assistant)\b/im.test(cleaned) ||
+    /\bCONTEXT\b/i.test(cleaned) ||
+    /"request_id"|"rating"|"train"/i.test(cleaned) ||
+    /\\{2,}"/.test(cleaned) ||
+    /\[INST\]/i.test(cleaned);
+  if (!looksLeaky) return cleaned;
+
+  // ==== 1. Detect prompt echo: find the LAST "assistant" marker anywhere ====
+  //         Handles:  "assistant ", "assistant:", "\nassistant\n", inline "...user Hola assistant Según..."
+  const assistantPattern = /\bassistant\b\s*:?\s*/gi;
+  let lastMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = assistantPattern.exec(cleaned)) !== null) {
+    lastMatch = m;
+  }
+  if (lastMatch && lastMatch.index !== undefined) {
+    const after = cleaned.slice(lastMatch.index + lastMatch[0].length).trim();
+    // Use the tail if there's meaningful content (or even short answers > 5 chars)
+    if (after.length > 5) {
+      cleaned = after;
+    }
+  }
+
+  // ==== 2. Strip known context / RAG blocks ====
+  cleaned = cleaned.replace(/UNTRUSTED CONTEXT[\s\S]*?END_CONTEXT/gi, "");
+  cleaned = cleaned.replace(/CONTEXT \(use to inform[\s\S]*?---/gi, "");
+  cleaned = cleaned.replace(/\bCONTEXT:[\s\S]*?END_CONTEXT/gi, "");
+  cleaned = cleaned.replace(/\bCONTEXT[\s\S]*?---/g, "");
+  cleaned = cleaned.replace(/\[INST\][\s\S]*?\[\/INST\]/gi, "");
+
+  // ==== 3. Strip JSON blobs (feedback/episode data leaked from RAG) ====
+  cleaned = cleaned.replace(/^.*\\{3,}.*$/gm, "");
+  // Full JSON objects with typical episode keys
+  cleaned = cleaned.replace(/\{[^{}]*"(?:request_id|rating|train|episode|feedback|timestamp)"[^{}]*\}/g, "");
+  // Escaped-quotes JSON
+  cleaned = cleaned.replace(/\{[^{}]*\\"[^{}]*\}/g, "");
+  cleaned = cleaned.replace(/\\+"/g, ""); // stray \\\" fragments
+  // Stray key-value pairs from leaked JSON
+  cleaned = cleaned.replace(/"(?:request_id|rating|train|episode|feedback|timestamp)"\s*:\s*"[^"]*"/g, "");
+
+  // ==== 4. Strip leaked system prompt fragments (any language) ====
+  const leakedPhrases = [
+    /Eres Vortex[^.\n]*\.?/gi,
+    /You are Vortex[^.\n]*\.?/gi,
+    /Responde en español\.?/gi,
+    /Reply in English\.?/gi,
+    /Usa bloques ```diff```[^.\n]*\.?/gi,
+    /Provide a brief rationale[^.\n]*\.?/gi,
+    /Do not reveal chain[^.\n]*\.?/gi,
+    /Keep it high-level\.?/gi,
+    /Fuera de esas etiquetas[^.\n]*\.?/gi,
+    /IMPORTANT[AE]?:?\s*(Si necesitas|If you need)[^.\n]*\.?/gi,
+    /SIEMPRE responde[^.\n]*\.?/gi,
+    /NUNCA repitas[^.\n]*\.?/gi,
+    /NEVER repeat[^.\n]*\.?/gi,
+    /Reply ONLY with[^.\n]*\.?/gi,
+    /Responde SOLO[^.\n]*\.?/gi,
+    /CONTEXT \(use to inform[^)\n]*\):/gi,
+    /Never repeat system instructions[^.\n]*\.?/gi,
+    /Si necesitas razonar[^.\n]*\.?/gi,
+    /pon tu razonamiento DENTRO[^.\n]*\.?/gi,
+    /ANTE:?\s*(Si necesitas|If you)[^.\n]*\.?/gi,
+    /You are a helpful assistant[^.\n]*\.?/gi,
+    /Responde siempre en[^.\n]*\.?/gi,
+  ];
+  for (const re of leakedPhrases) {
+    cleaned = cleaned.replace(re, "");
+  }
+
+  // ==== 5. Strip role markers (only when they look like role markers, not normal words) ====
+  // Beginning of line: "system ..." or "user ..." or "system: ..."
+  cleaned = cleaned.replace(/^\s*(system|user)\b\s*:?\s*/gim, "");
+  cleaned = cleaned.replace(/###\s*(System|User|Assistant):[^\n]*/gi, "");
+  cleaned = cleaned.replace(/\[(SYSTEM|USER|ASSISTANT|INST)\][^\n]*/gi, "");
+  // Q:/A: fallback markers
+  cleaned = cleaned.replace(/^\s*[QA]:\s*/gm, "");
+
+  // ==== 6. Strip lines that are just whitespace or punctuation debris ====
+  cleaned = cleaned
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !/^[\s.,;:!?-]+$/.test(line.trim()))
+    .join("\n");
+
+  // ==== 7. Collapse whitespace ====
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+
+  return cleaned;
+};
+
+const extractReasoning = (raw: string, isStreaming: boolean = false): { cleanText: string; thought: string } => {
+  const parts: string[] = [];
+
+  // 1. Extract COMPLETE tagged reasoning blocks
+  const tagRegex = /<(reasoning|think)>([\s\S]*?)<\/\1>/gi;
+  let cleanText = raw
+    .replace(tagRegex, (_match, _tag, body) => {
+      if (typeof body === "string") parts.push(body);
+      return "";
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // 2. Hide UNCLOSED reasoning/think tags (still streaming)
+  //    e.g. "<reasoning>partial text here" → hide it all, it'll appear in the reasoning panel
+  const unclosedMatch = cleanText.match(/<(reasoning|think)>([\s\S]*)$/i);
+  if (unclosedMatch) {
+    // Capture the partial thought content for the reasoning panel
+    if (unclosedMatch[2]) parts.push(unclosedMatch[2]);
+    // Remove the unclosed tag + content from the chat text
+    cleanText = cleanText.slice(0, unclosedMatch.index).trim();
+  }
+
+  // 3. Also hide standalone opening tags that might linger
+  cleanText = cleanText.replace(/<(reasoning|think)>\s*/gi, "");
+
+  // 4. Some models emit "reasoning: <text>" without tags
+  const reasoningPrefixMatch = cleanText.match(/^\s*reasoning:\s*(.+)/im);
+  if (reasoningPrefixMatch && parts.length === 0) {
+    parts.push(reasoningPrefixMatch[1].trim());
+    cleanText = cleanText.replace(/^\s*reasoning:\s*.+/im, "").trim();
+  }
+
+  // 5. Always clean leaked system/context content — even during streaming
+  cleanText = cleanLeakedSystemContent(cleanText);
+
+  const thought = summarizeReasoning(parts.join("\n\n"));
+  return { cleanText, thought };
 };
 
 const parseSseLines = (rawEvent: string): string[] => {
@@ -89,7 +259,8 @@ export class VortexService {
     prompt: string,
     includeSources: boolean = false,
     useThinking: boolean = true,
-    mode: AppMode = "ask"
+    mode: AppMode = "ask",
+    language: "es" | "en" = "es"
   ): AsyncGenerator<StreamChunk> {
     const abortController = new AbortController();
 
@@ -98,8 +269,9 @@ export class VortexService {
         model: this.model,
         stream: true,
         include_sources: includeSources,
+        web_ingest: includeSources,
         temperature: useThinking ? 0.7 : 0.2,
-        messages: buildMessages(history, prompt, mode),
+        messages: buildMessages(history, prompt, mode, useThinking, language),
       };
 
       const resp = await fetch("/v1/chat/completions", {
@@ -128,7 +300,10 @@ export class VortexService {
       const decoder = new TextDecoder();
 
       let buffer = "";
+      let rawText = "";
       let fullText = "";
+      let thought = "";
+      let requestId: string | undefined;
       let sources: Source[] = [];
 
       while (true) {
@@ -146,6 +321,19 @@ export class VortexService {
           for (const data of parseSseLines(rawEvent)) {
             if (!data) continue;
             if (data === "[DONE]") {
+              // Final cleanup before finishing
+              const finalExtracted = extractReasoning(rawText, false);
+              fullText = finalExtracted.cleanText;
+              if (finalExtracted.thought) thought = finalExtracted.thought;
+              yield {
+                text: fullText,
+                thought,
+                sources,
+                groundingSupports: [],
+                fileChanges: extractFileChanges(fullText),
+                requestId,
+                done: true,
+              };
               return;
             }
 
@@ -156,22 +344,34 @@ export class VortexService {
               continue;
             }
 
+            if (typeof parsed?.request_id === "string") {
+              requestId = parsed.request_id;
+            }
+
             if (parsed?.sources) {
               sources = toSources(parsed.sources);
             }
 
             const delta = parsed?.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta.length > 0) {
-              fullText += delta;
+              rawText += delta;
+            }
+
+            // Streaming: extract reasoning + clean leaked content on every chunk
+            const extracted = extractReasoning(rawText, /* isStreaming */ true);
+            fullText = extracted.cleanText;
+            if (extracted.thought) {
+              thought = extracted.thought;
             }
 
             if (typeof fullText === "string") {
               yield {
                 text: fullText,
-                thought: "",
+                thought,
                 sources,
                 groundingSupports: [],
                 fileChanges: extractFileChanges(fullText),
+                requestId,
                 done: false,
               };
             }
@@ -179,16 +379,120 @@ export class VortexService {
         }
       }
 
+      // Final pass: full cleanup including leaked system content stripping
+      const finalExtracted = extractReasoning(rawText, /* isStreaming */ false);
+      fullText = finalExtracted.cleanText;
+      if (finalExtracted.thought) thought = finalExtracted.thought;
+
       yield {
         text: fullText,
-        thought: "",
+        thought,
         sources,
         groundingSupports: [],
         fileChanges: extractFileChanges(fullText),
+        requestId,
         done: true,
       };
     } finally {
       abortController.abort();
+    }
+  }
+
+  async ingestOnce(): Promise<{ ok: boolean; newDocs?: number; error?: string }> {
+    const resp = await fetch("/v1/ingest", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const text = await resp.text().catch(() => "");
+    try {
+      const parsed = JSON.parse(text);
+      if (resp.ok && parsed?.ok) {
+        return { ok: true, newDocs: parsed?.new_docs };
+      }
+      return { ok: false, error: parsed?.error || text || `HTTP ${resp.status}` };
+    } catch {
+      return { ok: false, error: text || `HTTP ${resp.status}` };
+    }
+  }
+
+  async submitFeedback(
+    requestId: string,
+    idealResponse: string
+  ): Promise<{ ok: boolean; trainingEvent?: boolean; error?: string }> {
+    const payload = {
+      request_id: requestId,
+      rating: "up",
+      ideal_response: idealResponse,
+    };
+    const resp = await fetch("/v1/feedback", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await resp.text().catch(() => "");
+    try {
+      const parsed = JSON.parse(text);
+      if (resp.ok && parsed?.ok) {
+        return { ok: true, trainingEvent: Boolean(parsed?.training_event) };
+      }
+      return { ok: false, error: parsed?.error || text || `HTTP ${resp.status}` };
+    } catch {
+      return { ok: false, error: text || `HTTP ${resp.status}` };
+    }
+  }
+
+  async proposeSelfEditFromDiff(
+    diffText: string,
+    title: string,
+    summary: string
+  ): Promise<{ ok: boolean; id?: string; status?: string; error?: string }> {
+    const payload = {
+      diff_text: diffText,
+      title,
+      summary,
+      author: "frontend",
+    };
+    const resp = await fetch("/v1/self-edits/proposals/from-diff", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await resp.text().catch(() => "");
+    try {
+      const parsed = JSON.parse(text);
+      if (resp.ok && parsed?.ok) {
+        return { ok: true, id: parsed?.id, status: parsed?.status };
+      }
+      return { ok: false, error: parsed?.error || text || `HTTP ${resp.status}` };
+    } catch {
+      return { ok: false, error: text || `HTTP ${resp.status}` };
+    }
+  }
+
+  async generateChatTitle(
+    message: string,
+    language: "es" | "en" = "es"
+  ): Promise<{ ok: boolean; title?: string }> {
+    try {
+      const resp = await fetch("/v1/chat/title", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, language }),
+      });
+      const data = await resp.json();
+      if (data?.ok && data?.title) {
+        return { ok: true, title: data.title };
+      }
+      return { ok: false };
+    } catch {
+      return { ok: false };
     }
   }
 }
