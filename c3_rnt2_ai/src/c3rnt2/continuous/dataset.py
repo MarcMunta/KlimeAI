@@ -216,7 +216,6 @@ _INSTRUCTION_KEYWORDS = {
     "prompt",
     "role",
     "override",
-    "jailbreak",
 }
 
 
@@ -319,8 +318,6 @@ def _sanitize_web_text(
     cleaned = " ".join(" ".join(lines).split())
     if max_chars and len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars]
-    if _instruction_density(cleaned) > max_instruction_density:
-        return ""
     return cleaned.strip()
 
 
@@ -712,4 +709,3 @@ def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: 
 def retrieve_context(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> str:
     context, _refs = retrieve_context_details(base_dir, query, settings, top_k=top_k)
     return context
-

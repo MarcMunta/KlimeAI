@@ -22,7 +22,7 @@ const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose, isDarkMode, lang
   const chatCommands = useMemo(() => [
     { cmd: '/new', desc: 'Iniciar un nuevo chat' },
     { cmd: '/clear', desc: 'Borrar todo el historial' },
-    { cmd: isDarkMode ? '/light' : '/dark', desc: isDarkMode ? 'Modo claro' : 'Modo oscuro' },
+    { cmd: isDarkMode ? '/light' : '/dark', desc: isDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro' },
     { cmd: '/export', desc: 'Exportar chat actual' },
     { cmd: '/settings', desc: 'Abrir configuración' },
     { cmd: '/help', desc: 'Mostrar esta ayuda' },

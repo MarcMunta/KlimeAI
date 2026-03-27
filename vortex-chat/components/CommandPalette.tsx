@@ -64,10 +64,11 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const toggleThemeTitle = isDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro';
 
   const actions = useMemo(() => [
     { id: 'new-chat', title: 'Nuevo Chat', icon: <Plus size={18} />, action: onNewChat, category: 'Acciones Rápidas' },
-    { id: 'toggle-dark', title: isDarkMode ? 'Modo Claro' : 'Modo Oscuro', icon: isDarkMode ? <Sun size={18} /> : <Moon size={18} />, action: toggleDarkMode, category: 'Preferencias' },
+    { id: 'toggle-dark', title: toggleThemeTitle, icon: isDarkMode ? <Sun size={18} /> : <Moon size={18} />, action: toggleDarkMode, category: 'Preferencias' },
     { id: 'toggle-sidebar', title: isSidebarOpen ? 'Ocultar Lateral' : 'Mostrar Lateral', icon: <Layout size={18} />, action: onToggleSidebar, category: 'Interfaz' },
     { id: 'font-small', title: 'Fuente: Pequeña', icon: <Type size={14} />, action: () => onSetFontSize('small'), category: 'Interfaz' },
     { id: 'font-medium', title: 'Fuente: Normal', icon: <Type size={18} />, action: () => onSetFontSize('medium'), category: 'Interfaz' },
@@ -90,7 +91,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
     },
     { id: 'settings', title: 'Configuración Avanzada', icon: <Settings size={18} />, action: onOpenSettings, category: 'Sistema' },
     { id: 'help', title: 'Ayuda y Atajos', icon: <HelpCircle size={18} />, action: onOpenHelp, category: 'Sistema' },
-  ], [isDarkMode, isSidebarOpen, currentSessionId, sessions.length, onNewChat, toggleDarkMode, onToggleSidebar, onExportChat, onClearHistory, onOpenSettings, onOpenHelp, onSetFontSize]);
+  ], [toggleThemeTitle, isDarkMode, isSidebarOpen, currentSessionId, sessions.length, onNewChat, toggleDarkMode, onToggleSidebar, onExportChat, onClearHistory, onOpenSettings, onOpenHelp, onSetFontSize]);
 
   const filteredItems = useMemo(() => {
     const search = query.toLowerCase();

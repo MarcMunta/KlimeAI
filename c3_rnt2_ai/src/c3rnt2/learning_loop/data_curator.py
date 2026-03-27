@@ -11,7 +11,6 @@ from ..continuous.types import Sample
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"\b(?:\+?\d{1,3})?[-.\s]?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b")
-_INJECTION_RE = re.compile(r"(ignore previous|system prompt|developer message|exfiltrate|jailbreak|sudo)", re.IGNORECASE)
 _DANGEROUS_URL_RE = re.compile(r"\b(file://|data:|javascript:|ftp://)", re.IGNORECASE)
 
 
@@ -41,11 +40,6 @@ def _iter_raw(path: Path) -> Iterable[dict]:
 
 def _has_pii(text: str) -> bool:
     return bool(_EMAIL_RE.search(text) or _PHONE_RE.search(text))
-
-
-def _has_injection(text: str) -> bool:
-    return bool(_INJECTION_RE.search(text))
-
 
 def _has_dangerous_url(text: str) -> bool:
     return bool(_DANGEROUS_URL_RE.search(text))
@@ -86,7 +80,7 @@ def curate_dataset(base_dir: Path, settings: dict) -> CurateResult:
                     skipped += 1
                     continue
                 joined = f"{prompt}\n{response}"
-                if _has_pii(joined) or _has_injection(joined) or _has_dangerous_url(joined):
+                if _has_pii(joined) or _has_dangerous_url(joined):
                     skipped += 1
                     continue
                 if not _quality_ok(response, min_chars=min_chars, max_chars=max_chars):

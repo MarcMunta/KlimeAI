@@ -26,6 +26,13 @@ const DEFAULT_SETTINGS: UserSettings = {
 
 const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'edits': 2, 'terminal': 3 };
 
+const createEmptySession = (language: Language): ChatSession => ({
+  id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  title: language === 'es' ? 'Nueva Conversacion' : 'New Conversation',
+  messages: [],
+  updatedAt: Date.now(),
+});
+
 const getInitialDarkMode = (): boolean => {
   const savedMode = localStorage.getItem('dark-mode');
   if (savedMode !== null) return savedMode === 'true';
@@ -362,9 +369,31 @@ const App: React.FC = () => {
     const savedSessions = localStorage.getItem('chat-sessions');
     const savedSettings = localStorage.getItem('user-settings');
     if (savedSessions) {
-      const parsedSessions = JSON.parse(savedSessions);
-      setSessions(parsedSessions);
-      if (parsedSessions.length > 0) setCurrentSessionId(parsedSessions[0].id);
+      try {
+        const parsedSessions = JSON.parse(savedSessions);
+        const normalizedSessions = Array.isArray(parsedSessions)
+          ? parsedSessions.filter((session, index, all) => {
+              if (!session || typeof session !== 'object' || !Array.isArray(session.messages)) return false;
+              const isEmptyDraft = session.messages.length === 0;
+              if (!isEmptyDraft) return true;
+              return all.findIndex(candidate =>
+                candidate
+                && typeof candidate === 'object'
+                && candidate.title === session.title
+                && Array.isArray(candidate.messages)
+                && candidate.messages.length === 0
+              ) === index;
+            })
+          : [];
+        if (normalizedSessions.length > 0) {
+          setSessions(normalizedSessions);
+          setCurrentSessionId(normalizedSessions[0].id);
+        } else {
+          handleNewChat();
+        }
+      } catch {
+        handleNewChat();
+      }
     } else handleNewChat();
     if (savedSettings) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(savedSettings) });
   }, []);
@@ -372,6 +401,15 @@ const App: React.FC = () => {
   useEffect(() => { document.documentElement.classList.toggle('dark', isDarkMode); localStorage.setItem('dark-mode', String(isDarkMode)); }, [isDarkMode]);
   useEffect(() => { if (sessions.length > 0) localStorage.setItem('chat-sessions', JSON.stringify(sessions)); }, [sessions]);
   useEffect(() => { localStorage.setItem('user-settings', JSON.stringify(settings)); }, [settings]);
+  useEffect(() => {
+    if (sessions.length === 0) {
+      setCurrentSessionId(null);
+      return;
+    }
+    if (!currentSessionId || !sessions.some(session => session.id === currentSessionId)) {
+      setCurrentSessionId(sessions[0].id);
+    }
+  }, [sessions, currentSessionId]);
 
   useEffect(() => {
     if (activeView === 'chat' && currentSession?.messages.length) {
@@ -388,12 +426,39 @@ const App: React.FC = () => {
   }, [sessions, isLoading, isSearching, activeView, currentSessionId, currentSession]);
 
   const handleNewChat = useCallback(() => {
-    const newSession: ChatSession = { id: Date.now().toString(), title: settings.language === 'es' ? 'Nueva Conversación' : 'New Conversation', messages: [], updatedAt: Date.now() };
+    const newSession = createEmptySession(settings.language);
     setSessions(prev => [newSession, ...prev]);
     setCurrentSessionId(newSession.id);
     handleSelectView('chat');
     setHeaderVisible(false); setFooterVisible(false);
     addLog('SYSTEM', settings.language === 'es' ? 'Sincronización de núcleo completada.' : 'Kernel sync complete.');
+  }, [addLog, settings.language]);
+
+  const handleDeleteSession = useCallback((sessionId: string) => {
+    const remainingSessions = sessions.filter(session => session.id !== sessionId);
+    if (remainingSessions.length === 0) {
+      const replacementSession = createEmptySession(settings.language);
+      setSessions([replacementSession]);
+      setCurrentSessionId(replacementSession.id);
+      setActiveView(prev => { setPrevView(prev); return 'chat'; });
+      setHeaderVisible(false);
+      setFooterVisible(false);
+      return;
+    }
+    setSessions(remainingSessions);
+    if (!remainingSessions.some(session => session.id === currentSessionId)) {
+      setCurrentSessionId(remainingSessions[0].id);
+    }
+  }, [sessions, currentSessionId, settings.language]);
+
+  const handleClearHistory = useCallback(() => {
+    const freshSession = createEmptySession(settings.language);
+    setSessions([freshSession]);
+    setCurrentSessionId(freshSession.id);
+    setActiveView(prev => { setPrevView(prev); return 'chat'; });
+    setHeaderVisible(false);
+    setFooterVisible(false);
+    addLog('SYSTEM', settings.language === 'es' ? 'Historial purgado. Conversación reiniciada.' : 'History cleared. Conversation reset.');
   }, [addLog, settings.language]);
 
   const handleSelectView = useCallback((newView: ViewType) => {
@@ -490,7 +555,15 @@ const VORTEX_CONFIG = {
   }, [currentSessionId, addLog, settings.language, t]);
 
   const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true, autoTrain: boolean = true) => {
-    if (!currentSessionId) return;
+    let targetSessionId = currentSessionId;
+    let targetSession = sessions.find(session => session.id === targetSessionId);
+    if (!targetSession) {
+      targetSession = createEmptySession(settings.language);
+      targetSessionId = targetSession.id;
+      setSessions(prev => [targetSession!, ...prev]);
+      setCurrentSessionId(targetSessionId);
+    }
+    if (!targetSessionId) return;
     setMode(selectedMode);
     if (activeView !== 'chat') handleSelectView('chat');
     setHeaderVisible(true); setFooterVisible(true); resetInactivityTimer();
@@ -501,14 +574,14 @@ const VORTEX_CONFIG = {
     const userMessage: Message = { id: Date.now().toString(), role: Role.USER, content, timestamp: Date.now() };
     const aiMessageId = (Date.now() + 1).toString();
     const initialAiMessage: Message = { id: aiMessageId, role: Role.AI, content: "", thought: "", requestId: undefined, sources: [], groundingSupports: [], timestamp: Date.now() };
-    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s));
+    setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s));
 
     // Auto-name the chat on first message
-    const currentMessages = sessions.find(s => s.id === currentSessionId)?.messages || [];
+    const currentMessages = targetSession.messages || [];
     if (currentMessages.length === 0) {
       vortexService.generateChatTitle(content, settings.language).then(result => {
         if (result.ok && result.title) {
-          setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title: result.title! } : s));
+          setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, title: result.title! } : s));
         }
       }).catch(() => {});
     }
@@ -523,7 +596,7 @@ const VORTEX_CONFIG = {
           addLog('SYSTEM', settings.language === 'es' ? `Ingest web falló: ${ingest.error || 'error'}` : `Web ingest failed: ${ingest.error || 'error'}`);
         }
       }
-      const history = sessions.find(s => s.id === currentSessionId)?.messages || [];
+      const history = targetSession.messages || [];
       const stream = vortexService.generateResponseStream(history, content, useInternet, useThinking, selectedMode, settings.language);
       let started = false;
       let aborted = false;
@@ -538,7 +611,7 @@ const VORTEX_CONFIG = {
         setIsSearching(false);
         lastText = chunk.text || lastText;
         if (chunk.requestId) lastRequestId = chunk.requestId;
-        setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, requestId: chunk.requestId || m.requestId, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
+        setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, content: chunk.text, thought: chunk.thought || m.thought, requestId: chunk.requestId || m.requestId, sources: chunk.sources.length > 0 ? chunk.sources : m.sources, fileChanges: chunk.fileChanges || m.fileChanges } : m) } : s));
       }
       if (aborted) {
         addLog('SYSTEM', settings.language === 'es' ? 'Ejecución abortada por el usuario.' : 'Run aborted by user.');
@@ -548,7 +621,7 @@ const VORTEX_CONFIG = {
           const feedback = await vortexService.submitFeedback(lastRequestId, lastText);
           if (feedback.ok && feedback.trainingEvent) {
             addLog('LEARN', settings.language === 'es' ? 'Auto-train registrado (training_event creado).' : 'Auto-train logged (training_event created).');
-            setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, trainingEvent: true } : m) } : s));
+            setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, trainingEvent: true } : m) } : s));
             await suggestPatchFromMessage(aiMessageId, 'auto-train');
           } else if (feedback.ok) {
             addLog('SYSTEM', settings.language === 'es' ? 'Auto-train OK, pero sin training_event.' : 'Auto-train OK, but no training_event.');
@@ -573,9 +646,9 @@ const VORTEX_CONFIG = {
 
   return (
     <div className={`flex h-screen w-full bg-background transition-colors duration-1000 overflow-hidden text-foreground accelerated ${mode === 'agent' ? 'ring-[6px] ring-primary/10' : ''}`}>
-      <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onNewChat={handleNewChat} onDeleteSession={id => setSessions(p => p.filter(x => x.id !== id))} onClearHistory={() => setSessions([])} onExportChat={() => {}} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} isSidebarOpen={isSidebarOpen} onToggleSidebar={() => { const next = !isSidebarOpen; setIsSidebarOpen(next); if (next) setIsReasoningOpen(false); }} onOpenSettings={() => setIsSettingsOpen(true)} onOpenHelp={() => setIsHelpOpen(true)} categoryOrder={settings.categoryOrder} language={settings.language} onSetFontSize={(size) => setSettings({ ...settings, fontSize: size })} />
+      <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} onClearHistory={handleClearHistory} onExportChat={() => {}} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} isSidebarOpen={isSidebarOpen} onToggleSidebar={() => { const next = !isSidebarOpen; setIsSidebarOpen(next); if (next) setIsReasoningOpen(false); }} onOpenSettings={() => setIsSettingsOpen(true)} onOpenHelp={() => setIsHelpOpen(true)} categoryOrder={settings.categoryOrder} language={settings.language} onSetFontSize={(size) => setSettings({ ...settings, fontSize: size })} />
       <AnimatePresence initial={false}>{isSidebarOpen && !activeModificationFiles && (
-          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={id => setSessions(p => p.filter(x => x.id !== id))} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} isOpen={true} language={settings.language} selfEditsPendingCount={selfEditsPendingCount} /></motion.div>
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} isOpen={true} language={settings.language} selfEditsPendingCount={selfEditsPendingCount} /></motion.div>
       )}</AnimatePresence>
       <div className="flex-1 flex overflow-hidden relative">
         <main className="flex-1 flex flex-col h-full bg-background relative z-0 overflow-hidden">

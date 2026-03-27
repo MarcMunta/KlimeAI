@@ -63,13 +63,6 @@ class SkillsRouter:
         for rec in self.store.list():
             if not rec.enabled:
                 continue
-            if strict:
-                if not rec.trusted:
-                    continue
-                safety = rec.spec.safety
-                if safety.network or safety.filesystem_write or safety.shell:
-                    continue
-
             trig = rec.spec.triggers
             score = 0.0
             for kw in trig.keywords:
@@ -109,4 +102,3 @@ class SkillsRouter:
             used += need
 
         return selected
-

@@ -56,6 +56,9 @@ const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const t = translations[language];
+  const themeToggleLabel = language === 'es'
+    ? (isDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro')
+    : (isDarkMode ? 'Switch to light mode' : 'Switch to dark mode');
 
   const handleDeleteConfirm = () => {
     if (sessionToDelete) {
@@ -224,12 +227,14 @@ const Sidebar: React.FC<SidebarProps> = ({
             whileHover={{ y: -3, backgroundColor: 'hsla(var(--background) / 0.8)', boxShadow: '0 10px 25px -10px rgba(0,0,0,0.1)' }}
             whileTap={{ scale: 0.98 }}
             onClick={toggleDarkMode}
+            aria-label={themeToggleLabel}
+            title={themeToggleLabel}
             className="flex items-center gap-4 w-full px-5 py-3.5 rounded-2xl text-[12px] font-bold transition-all text-muted-foreground dark:text-zinc-300 hover:text-foreground border border-transparent hover:border-border/60 group glass-card"
           >
             <div className="w-8 h-8 rounded-xl bg-muted/50 dark:bg-zinc-800 flex items-center justify-center group-hover:bg-primary/10 group-hover:text-primary transition-all group-hover:rotate-12">
               {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
             </div>
-            <span className="flex-1 text-left uppercase tracking-widest">{isDarkMode ? t.interface_light : t.interface_dark}</span>
+            <span className="flex-1 text-left uppercase tracking-widest">{themeToggleLabel}</span>
           </motion.button>
           
           <motion.button 

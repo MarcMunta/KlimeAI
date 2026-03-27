@@ -24,36 +24,6 @@ class WebIngestItem:
     chunk_hash: str
     ts: float
 
-
-_INJECTION_PATTERNS = [
-    r"ignore (all|previous) instructions",
-    r"do not follow",
-    r"system prompt",
-    r"role:\s*system",
-    r"developer message",
-    r"you are (an|a) (assistant|system)",
-    r"override (the|all) instructions",
-]
-_IMPERATIVE_TOKENS = {
-    "ignore",
-    "follow",
-    "must",
-    "instruction",
-    "instructions",
-    "system",
-    "assistant",
-    "developer",
-    "user",
-    "prompt",
-    "override",
-    "jailbreak",
-    "execute",
-    "run",
-    "always",
-    "never",
-}
-
-
 def canonicalize_url(url: str) -> str:
     try:
         parts = urlsplit(url)
@@ -68,20 +38,6 @@ def canonicalize_url(url: str) -> str:
             path = "/"
     return urlunsplit((scheme, netloc, path, parts.query or "", ""))
 
-
-def _instruction_density(text: str) -> float:
-    tokens = re.findall(r"[a-zA-Z']+", text.lower())
-    if not tokens:
-        return 0.0
-    hits = sum(1 for tok in tokens if tok in _IMPERATIVE_TOKENS)
-    pattern_hits = 0
-    lowered = text.lower()
-    for pat in _INJECTION_PATTERNS:
-        if re.search(pat, lowered):
-            pattern_hits += 1
-    return (hits + pattern_hits * 3) / max(1, len(tokens))
-
-
 def sanitize_text(
     text: str,
     *,
@@ -95,14 +51,6 @@ def sanitize_text(
     cleaned = re.sub(r"<style.*?>.*?</style>", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"<[^>]+>", " ", cleaned)
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    if lines:
-        filtered: list[str] = []
-        for line in lines:
-            lowered = line.lower()
-            if any(re.search(pat, lowered) for pat in _INJECTION_PATTERNS):
-                continue
-            filtered.append(line)
-        lines = filtered
     if max_repeat_lines > 0 and lines:
         seen: dict[str, int] = {}
         deduped: list[str] = []
@@ -117,8 +65,6 @@ def sanitize_text(
     cleaned = " ".join(" ".join(lines).split())
     if max_chars and len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars]
-    if _instruction_density(cleaned) > max_instruction_density:
-        return ""
     return cleaned.strip()
 
 

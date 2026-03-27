@@ -51,7 +51,7 @@ class SkillsConfig:
     @staticmethod
     def from_env() -> "SkillsConfig":
         enabled = _read_env_bool("KLIMEAI_SKILLS_ENABLED", "VORTEX_SKILLS_ENABLED", "C3RNT2_SKILLS_ENABLED", default=False)
-        strict = _read_env_bool("KLIMEAI_SKILLS_STRICT", "VORTEX_SKILLS_STRICT", "C3RNT2_SKILLS_STRICT", default=True)
+        strict = _read_env_bool("KLIMEAI_SKILLS_STRICT", "VORTEX_SKILLS_STRICT", "C3RNT2_SKILLS_STRICT", default=False)
         max_k = _read_env_int("KLIMEAI_SKILLS_MAX_K", "VORTEX_SKILLS_MAX_K", "C3RNT2_SKILLS_MAX_K", default=3, min_value=1, max_value=10)
         token_budget_total = _read_env_int(
             "KLIMEAI_SKILLS_TOKEN_BUDGET",
