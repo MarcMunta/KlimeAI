@@ -57,3 +57,29 @@ export interface LogEntry {
   level: 'INFO' | 'LEARN' | 'SEARCH' | 'SYSTEM';
   message: string;
 }
+
+export interface OperationalStatus {
+  ok: boolean;
+  offline_ready: boolean;
+  engine_ready: boolean;
+  engine_kind?: string | null;
+  engine_base_url?: string | null;
+  model_ready: boolean;
+  active_backend?: string | null;
+  active_model?: string | null;
+  training_ready: boolean;
+  web_disabled: boolean;
+  docker_ready?: boolean;
+  degraded_reason?: string | null;
+  offline_reason?: string | null;
+  engine_reason?: string | null;
+  model_reason?: string | null;
+  training_reason?: string | null;
+  docker_reason?: string | null;
+  wsl_ready?: boolean;
+  wsl_reason?: string | null;
+  instructions?: {
+    digest?: string | null;
+    sources?: string[];
+  };
+}

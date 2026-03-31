@@ -38,4 +38,32 @@ def test_wsl_subprocess_strategy_builds_wsl_exe_command(tmp_path: Path, monkeypa
     assert " -m " in script
     assert "c3rnt2" in script
     assert "train-once" in script
+    assert "C3RNT2_INTERNAL_TRAIN_SUBPROCESS=1" in script
 
+
+def test_cmd_train_once_respects_wsl_strategy(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3RNT2_INTERNAL_TRAIN_SUBPROCESS", raising=False)
+
+    monkeypatch.setattr(
+        main_mod,
+        "_load_and_validate",
+        lambda profile: {
+            "_profile": profile or "rtx4080_16gb_programming_train_wsl",
+            "server": {"train_strategy": "wsl_subprocess_unload"},
+        },
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_run_train_subprocess_wsl",
+        lambda settings, reuse_dataset=False, timeout_s=None, env=None: {
+            "ok": True,
+            "ok_train": True,
+            "ok_eval": True,
+            "adapter_dir": None,
+        },
+    )
+
+    main_mod.cmd_train_once(type("Args", (), {"profile": "rtx4080_16gb_programming_train_wsl", "reuse_dataset": False})())
+    payload = capsys.readouterr().out.strip()
+    assert payload.startswith("{") and payload.endswith("}")

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught
+# ruff: noqa: BLE001
+
 import json
 import sqlite3
 import time
 import hashlib
 import math
 import re
+import threading
+from fnmatch import fnmatchcase
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Iterable, List
 from urllib.parse import urlsplit, urlunsplit
 
 from ..agent.memory import MemoryStore
@@ -16,6 +21,10 @@ from ..agent.tools import AgentTools
 from .knowledge_store import KnowledgeStore, IngestPolicy, EmbeddingBackend, embed_text
 from .replay_buffer import ReplayBuffer, ReplayItem
 from .types import Sample
+
+
+_RETRIEVE_STORE_CACHE: dict[tuple[str, str, str, str], KnowledgeStore] = {}
+_RETRIEVE_STORE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -87,6 +96,144 @@ def _iter_log_files(data_dir: Path) -> Iterable[Path]:
         suffix = path.suffix.lower()
         if suffix in {".log", ".txt", ".jsonl"}:
             yield path
+
+
+def _match_any_glob(path_str: str, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    norm = path_str.replace("\\", "/")
+    for pattern in patterns:
+        if fnmatchcase(norm, pattern):
+            return True
+        if fnmatchcase(Path(norm).name, pattern):
+            return True
+    return False
+
+
+def _is_probably_text_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(4096)
+    except Exception:
+        return False
+    if b"\x00" in chunk:
+        return False
+    return True
+
+
+def _iter_local_source_files(
+    base_dir: Path,
+    roots: list[tuple[str, Path]],
+    *,
+    include_globs: list[str],
+    exclude_globs: list[str],
+) -> Iterable[tuple[str, Path, str]]:
+    seen: set[str] = set()
+    for source_kind, root in roots:
+        if not root.exists():
+            continue
+        candidates = [root] if root.is_file() else [p for p in root.rglob("*") if p.is_file()]
+        for path in candidates:
+            try:
+                rel = path.resolve().relative_to(base_dir.resolve()).as_posix()
+            except Exception:
+                rel = path.resolve().as_posix()
+            if rel in seen:
+                continue
+            if include_globs and not _match_any_glob(rel, include_globs):
+                continue
+            if exclude_globs and _match_any_glob(rel, exclude_globs):
+                continue
+            if not _is_probably_text_file(path):
+                continue
+            seen.add(rel)
+            yield source_kind, path, rel
+
+
+def _ingest_local_sources(
+    *,
+    base_dir: Path,
+    state: IngestState,
+    store: KnowledgeStore,
+    settings: dict,
+    max_files_per_tick: int,
+    max_bytes_per_file: int,
+    max_total_bytes_per_tick: int,
+    files_used: int,
+    bytes_used: int,
+) -> tuple[int, int, int]:
+    continuous = settings.get("continuous", {}) or {}
+    local_cfg = continuous.get("local_sources", {}) or {}
+    if not bool(local_cfg.get("enabled", False)):
+        return 0, files_used, bytes_used
+
+    repo_paths = local_cfg.get("repo_paths", []) if bool(local_cfg.get("include_repo", False)) else []
+    corpus_paths = local_cfg.get("corpus_paths", []) if bool(local_cfg.get("include_local_corpus", False)) else []
+    lesson_paths = local_cfg.get("lesson_paths", []) if bool(local_cfg.get("include_lessons", False)) else []
+    include_globs = [str(item) for item in (local_cfg.get("include_globs", []) or []) if item]
+    exclude_globs = [str(item) for item in (local_cfg.get("exclude_globs", []) or []) if item]
+
+    roots: list[tuple[str, Path]] = []
+    for raw in repo_paths:
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        roots.append(("repo", path))
+    for raw in corpus_paths:
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        roots.append(("docs", path))
+    for raw in lesson_paths:
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        roots.append(("lesson", path))
+
+    new_docs = 0
+    for source_kind, path, rel in _iter_local_source_files(
+        base_dir,
+        roots,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    ):
+        if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
+            break
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        key = f"local:{source_kind}:{rel}"
+        meta = state.get_json(key, {"mtime": 0.0, "size": 0})
+        if (
+            float(meta.get("mtime", 0.0)) == float(stat.st_mtime)
+            and int(meta.get("size", 0)) == int(stat.st_size)
+        ):
+            continue
+        budget_left = max_total_bytes_per_tick - bytes_used
+        if budget_left <= 0:
+            break
+        max_bytes = min(max_bytes_per_file, budget_left, int(stat.st_size))
+        if max_bytes <= 0:
+            break
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not text.strip():
+            state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size})
+            continue
+        payload = f"Path: {rel}\n\n{text}"
+        payload_bytes = payload.encode("utf-8", errors="ignore")
+        if len(payload_bytes) > max_bytes:
+            payload_bytes = payload_bytes[:max_bytes]
+            payload = payload_bytes.decode("utf-8", errors="ignore")
+        quality = 0.95 if source_kind == "repo" else 0.9
+        new_docs += store.ingest_text(source_kind, rel, payload, quality=quality)
+        bytes_used += len(payload_bytes)
+        files_used += 1
+        state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size})
+    return new_docs, files_used, bytes_used
 
 
 def _load_logs(data_dir: Path) -> Iterable[str]:
@@ -171,11 +318,30 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
 
 
 def _novelty_score(text: str, recent_vecs: List[List[float]]) -> float:
+    vec = embed_text(text)
+    return _novelty_score_from_vec(vec, recent_vecs)
+
+
+def _novelty_score_from_vec(vec: List[float], recent_vecs: List[List[float]]) -> float:
     if not recent_vecs:
         return 1.0
-    vec = embed_text(text)
     sims = [_cosine_sim(vec, other) for other in recent_vecs]
     return max(0.0, 1.0 - max(sims))
+
+
+def _semantic_dedup_threshold(filter_cfg: dict, default: float = 0.97) -> float:
+    raw = filter_cfg.get("semantic_dedup_threshold", default)
+    try:
+        threshold = float(raw)
+    except Exception:
+        threshold = float(default)
+    return max(0.0, min(1.0, threshold))
+
+
+def _is_semantic_duplicate(vec: List[float], recent_vecs: List[List[float]], threshold: float) -> bool:
+    if not recent_vecs:
+        return False
+    return max(_cosine_sim(vec, other) for other in recent_vecs) >= threshold
 
 
 def _quality_score(text: str, source_kind: str, max_repeat_ratio: float) -> float:
@@ -197,6 +363,10 @@ def _quality_score(text: str, source_kind: str, max_repeat_ratio: float) -> floa
         base *= 0.9
     if source_kind == "episode":
         base *= 1.2
+    if source_kind == "repo":
+        base *= 1.3
+    if source_kind in {"docs", "lesson"}:
+        base *= 1.15
     if repeat_ratio > max_repeat_ratio:
         base *= 0.4
     return max(0.0, min(1.0, base))
@@ -316,6 +486,10 @@ def _sanitize_web_text(
             deduped.append(line)
         lines = deduped
     cleaned = " ".join(" ".join(lines).split())
+    if max_instruction_density > 0:
+        density = _instruction_density(cleaned)
+        if density > max_instruction_density:
+            return ""
     if max_chars and len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars]
     return cleaned.strip()
@@ -346,8 +520,61 @@ def _promote_web_quarantine(
     return promoted
 
 
+def _resolve_knowledge_store(
+    base_dir: Path,
+    settings: dict,
+    *,
+    cache_for_retrieval: bool,
+) -> KnowledgeStore:
+    continuous = settings.get("continuous", {}) or {}
+    knowledge_path = Path(
+        continuous.get(
+            "knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"
+        )
+    )
+    knowledge_cfg = settings.get("knowledge", {}) or {}
+    embed_backend = str(knowledge_cfg.get("embedding_backend", "auto"))
+    embed_model = knowledge_cfg.get("embedding_model")
+    index_backend = str(knowledge_cfg.get("index_backend", "auto"))
+    embedder: str | EmbeddingBackend
+    embedder = (
+        EmbeddingBackend(backend=embed_backend, model_name=embed_model)
+        if embed_model
+        else embed_backend
+    )
+    if not cache_for_retrieval:
+        return KnowledgeStore(
+            knowledge_path,
+            embedding_backend=embedder,
+            index_backend=index_backend,
+        )
+
+    cache_key = (
+        str(knowledge_path.resolve()),
+        embed_backend,
+        str(embed_model or ""),
+        index_backend,
+    )
+    with _RETRIEVE_STORE_LOCK:
+        cached = _RETRIEVE_STORE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        store = KnowledgeStore(
+            knowledge_path,
+            embedding_backend=embedder,
+            index_backend=index_backend,
+        )
+        _RETRIEVE_STORE_CACHE[cache_key] = store
+        return store
+
+
 def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
     continuous = settings.get("continuous", {})
+    filter_cfg = continuous.get("filter", {}) or {}
+    semantic_dedup_threshold = _semantic_dedup_threshold(filter_cfg)
+    local_sources_cfg = continuous.get("local_sources", {}) or {}
+    include_memory = bool(local_sources_cfg.get("include_memory", True))
+    include_logs = bool(local_sources_cfg.get("include_logs", True))
     ingest_cfg = continuous.get("ingest", {}) or {}
     max_files_per_tick = int(ingest_cfg.get("max_files_per_tick", 200))
     max_bytes_per_file = int(ingest_cfg.get("max_bytes_per_file", 2_000_000))
@@ -381,58 +608,72 @@ def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
 
     # Memory store (small; dedup via hash)
     memory_path = base_dir / "data" / "memory" / "agent_memory.sqlite"
-    if memory_path.exists():
+    if include_memory and memory_path.exists():
         mem = MemoryStore(memory_path)
         for item in mem.query("summary", top_k=50):
             new_docs += store.ingest_text("memory", str(memory_path), item.text, quality=0.6)
 
+    local_docs, files_used, bytes_used = _ingest_local_sources(
+        base_dir=base_dir,
+        state=state,
+        store=store,
+        settings=settings,
+        max_files_per_tick=max_files_per_tick,
+        max_bytes_per_file=max_bytes_per_file,
+        max_total_bytes_per_tick=max_total_bytes_per_tick,
+        files_used=files_used,
+        bytes_used=bytes_used,
+    )
+    new_docs += local_docs
+
     # Logs (incremental)
-    for path in _iter_log_files(base_dir / "data"):
-        if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
-            break
-        try:
-            stat = path.stat()
-        except Exception:
-            continue
-        key = f"log:{path.as_posix()}"
-        meta = state.get_json(key, {"mtime": 0.0, "size": 0, "offset": 0})
-        prev_mtime = float(meta.get("mtime", 0.0))
-        prev_size = int(meta.get("size", 0))
-        offset = int(meta.get("offset", 0))
-        if stat.st_size < offset:
-            offset = 0
-        if stat.st_mtime == prev_mtime and stat.st_size == prev_size and offset >= stat.st_size:
-            continue
-        remaining = stat.st_size - offset
-        if remaining <= 0:
-            state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
-            continue
-        budget_left = max_total_bytes_per_tick - bytes_used
-        if budget_left <= 0:
-            break
-        max_bytes = min(max_bytes_per_file, budget_left, remaining)
-        if max_bytes <= 0:
-            break
-        try:
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                data = handle.read(max_bytes)
-        except Exception:
-            continue
-        if not data:
-            continue
-        if path.suffix.lower() == ".jsonl":
-            last_nl = data.rfind(b"\n")
-            if last_nl == -1:
+    if include_logs:
+        for path in _iter_log_files(base_dir / "data"):
+            if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
+                break
+            try:
+                stat = path.stat()
+            except Exception:
                 continue
-            data = data[: last_nl + 1]
-        text = data.decode("utf-8", errors="ignore")
-        if text:
-            new_docs += store.ingest_text("logs", path.as_posix(), text, quality=0.2)
-        bytes_used += len(data)
-        files_used += 1
-        offset += len(data)
-        state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
+            key = f"log:{path.as_posix()}"
+            meta = state.get_json(key, {"mtime": 0.0, "size": 0, "offset": 0})
+            prev_mtime = float(meta.get("mtime", 0.0))
+            prev_size = int(meta.get("size", 0))
+            offset = int(meta.get("offset", 0))
+            if stat.st_size < offset:
+                offset = 0
+            if stat.st_mtime == prev_mtime and stat.st_size == prev_size and offset >= stat.st_size:
+                continue
+            remaining = stat.st_size - offset
+            if remaining <= 0:
+                state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
+                continue
+            budget_left = max_total_bytes_per_tick - bytes_used
+            if budget_left <= 0:
+                break
+            max_bytes = min(max_bytes_per_file, budget_left, remaining)
+            if max_bytes <= 0:
+                break
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(offset)
+                    data = handle.read(max_bytes)
+            except Exception:
+                continue
+            if not data:
+                continue
+            if path.suffix.lower() == ".jsonl":
+                last_nl = data.rfind(b"\n")
+                if last_nl == -1:
+                    continue
+                data = data[: last_nl + 1]
+            text = data.decode("utf-8", errors="ignore")
+            if text:
+                new_docs += store.ingest_text("logs", path.as_posix(), text, quality=0.2)
+            bytes_used += len(data)
+            files_used += 1
+            offset += len(data)
+            state.set_json(key, {"mtime": stat.st_mtime, "size": stat.st_size, "offset": offset})
 
     # Web docs (cache + cooldown)
     tools_cfg = settings.get("tools", {}) or {}
@@ -492,9 +733,8 @@ def ingest_sources(base_dir: Path, allowlist: List[str], settings: dict) -> int:
                 if files_used >= max_files_per_tick or bytes_used >= max_total_bytes_per_tick:
                     break
                 vec = embed_text(chunk)
-                if recent_vecs:
-                    if max(_cosine_sim(vec, other) for other in recent_vecs) > 0.97:
-                        continue
+                if _is_semantic_duplicate(vec, recent_vecs, semantic_dedup_threshold):
+                    continue
                 budget_left = max_total_bytes_per_tick - bytes_used
                 if budget_left <= 0:
                     break
@@ -577,8 +817,9 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
     replay_cfg = continuous.get("replay", {})
     filter_cfg = continuous.get("filter", {})
     min_quality = float(filter_cfg.get("min_quality", 0.35))
+    min_novelty = float(filter_cfg.get("min_novelty", 0.2))
     max_repeat_ratio = float(filter_cfg.get("max_repeat_ratio", 0.8))
-    knowledge_path = Path(continuous.get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
+    semantic_dedup_threshold = _semantic_dedup_threshold(filter_cfg)
     replay_path = Path(replay_cfg.get("path", base_dir / "data" / "continuous" / "replay.sqlite"))
     sample_size = int(replay_cfg.get("sample_size", 64))
     top_frac = float(replay_cfg.get("top_frac", 0.7))
@@ -587,7 +828,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
     max_items = replay_cfg.get("max_items")
     max_items = int(max_items) if max_items is not None else None
 
-    store = KnowledgeStore(knowledge_path)
+    store = _resolve_knowledge_store(base_dir, settings, cache_for_retrieval=False)
     replay = ReplayBuffer(replay_path)
     new_docs = ingest_sources(base_dir, allowlist, settings) if ingest else 0
 
@@ -627,12 +868,16 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
         seen_episode_hashes.add(event_id)
         gold_samples.append(sample)
         quality = _quality_score(diff, "episode", max_repeat_ratio)
-        novelty = _novelty_score(diff, recent_vecs)
+        vec = embed_text(diff)
+        novelty = _novelty_score_from_vec(vec, recent_vecs)
         total_candidates += 1
         successes += 1
         digest = replay.hash_sample(sample.prompt, sample.response)
         replay.bump_success_once(digest, event_id, delta=1)
-        if quality >= min_quality:
+        if quality >= min_quality and novelty >= min_novelty:
+            if _is_semantic_duplicate(vec, recent_vecs, semantic_dedup_threshold):
+                filtered += 1
+                continue
             inserted = replay.add(
                 ReplayItem(
                     sample=sample,
@@ -645,6 +890,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
             )
             if inserted:
                 novelty_scores.append(novelty)
+                recent_vecs.append(vec)
         else:
             filtered += 1
 
@@ -658,11 +904,21 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
             prompt = "Read docs"
         elif chunk.source_kind == "episode":
             prompt = "Review"
+        elif chunk.source_kind == "repo":
+            prompt = "Review code"
+        elif chunk.source_kind == "docs":
+            prompt = "Read docs"
+        elif chunk.source_kind == "lesson":
+            prompt = "Study lesson"
         sample = Sample(prompt=prompt, response=chunk.text, source_kind=chunk.source_kind)
         quality = _quality_score(chunk.text, chunk.source_kind, max_repeat_ratio)
-        novelty = _novelty_score(chunk.text, recent_vecs)
+        vec = embed_text(chunk.text)
+        novelty = _novelty_score_from_vec(vec, recent_vecs)
         total_candidates += 1
-        if quality >= min_quality:
+        if quality >= min_quality and novelty >= min_novelty:
+            if _is_semantic_duplicate(vec, recent_vecs, semantic_dedup_threshold):
+                filtered += 1
+                continue
             inserted = replay.add(
                 ReplayItem(
                     sample=sample,
@@ -675,10 +931,26 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
             )
             if inserted:
                 novelty_scores.append(novelty)
+                recent_vecs.append(vec)
         else:
             filtered += 1
 
-    samples = replay.sample(sample_size, top_frac=top_frac, random_frac=random_frac)
+    source_weights_cfg = continuous.get("source_weights", {}) or {}
+    source_weights: dict[str, float] = {}
+    for kind, weight in source_weights_cfg.items():
+        try:
+            parsed = float(weight)
+        except Exception:
+            continue
+        if parsed < 0.0:
+            parsed = 0.0
+        source_weights[str(kind)] = parsed
+    samples = replay.sample(
+        sample_size,
+        top_frac=top_frac,
+        random_frac=random_frac,
+        source_weights=source_weights,
+    )
     novelty_avg = sum(novelty_scores) / max(1, len(novelty_scores))
     stats = CollectStats(
         new_docs=new_docs,
@@ -693,8 +965,7 @@ def collect_samples(base_dir: Path, allowlist: List[str], settings: dict, ingest
 def retrieve_context_details(base_dir: Path, query: str, settings: dict, top_k: int = 3) -> tuple[str, list[dict]]:
     rag_cfg = settings.get("rag", {})
     max_chars = int(rag_cfg.get("max_chars", 1200))
-    knowledge_path = Path(settings.get("continuous", {}).get("knowledge_path", base_dir / "data" / "continuous" / "knowledge.sqlite"))
-    store = KnowledgeStore(knowledge_path)
+    store = _resolve_knowledge_store(base_dir, settings, cache_for_retrieval=True)
     chunks = store.retrieve(query, top_k=top_k, min_quality=0.0)
     joined = "\n\n".join(chunk.text for chunk in chunks)
     if max_chars and len(joined) > max_chars:

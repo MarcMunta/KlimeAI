@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from c3rnt2 import __main__ as main_mod
+from c3rnt2 import prepare as prepare_mod
 
 
 def test_doctor_checks_ok(tmp_path: Path, monkeypatch) -> None:
@@ -116,3 +117,55 @@ def test_doctor_deep_mock_skips_bench(tmp_path: Path, monkeypatch) -> None:
     report = doctor_mod.run_deep_checks(settings, base_dir=tmp_path, mock=True)
     assert report["deep_ok"] is True
     assert (tmp_path / "data" / "doctor" / "last.json").exists()
+
+
+def test_doctor_uses_prepare_contract_flags(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "load_inference_model", lambda _settings: object())
+    monkeypatch.setattr(
+        prepare_mod,
+        "prepare_model_state",
+        lambda settings, base_dir=None: {
+            "ok": False,
+            "offline_ready": False,
+            "offline_reason": "docker_engine_unreachable",
+            "engine_ready": False,
+            "engine_kind": "sglang",
+            "engine_base_url": "http://127.0.0.1:30000",
+            "engine_reason": "external_engine_unreachable",
+            "model_ready": False,
+            "model_reason": "external_model_missing",
+            "active_backend": "external",
+            "active_model": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+            "docker_ready": False,
+            "docker_reason": "docker_not_running",
+            "ollama_ready": False,
+            "ollama_reason": None,
+            "wsl_ready": True,
+            "wsl_reason": "wsl_ready",
+            "web_disabled": True,
+            "web_reason": "web_disabled",
+            "training_ready": False,
+            "training_reason": "hf_train_disabled",
+            "degraded_reason": "docker_not_running",
+            "errors": ["docker_not_running"],
+        },
+    )
+    settings = {
+        "_profile": "rtx4080_16gb_programming_local",
+        "agent": {"tools_enabled": list(main_mod._supported_agent_tools())},
+        "tools": {"web": {"enabled": False, "cache_dir": str(tmp_path / "data" / "web_cache")}},
+        "continuous": {"ingest_web": False, "knowledge_path": str(tmp_path / "data" / "continuous" / "knowledge.sqlite")},
+        "core": {"backend": "external", "external_engine": "sglang", "external_base_url": "http://127.0.0.1:30000"},
+        "decode": {"max_new_tokens": 64},
+        "profile_contract": {
+            "offline_required": True,
+            "require_web_disabled": True,
+            "require_external_engine": "sglang",
+            "require_docker": True,
+        },
+    }
+    report = main_mod._run_doctor_checks(settings, tmp_path)
+    assert report["ok"] is False
+    assert any("prepare:docker_not_running" in err for err in report["errors"])
+    assert any("engine_ready_false:external_engine_unreachable" in err for err in report["errors"])
+    assert any("docker_ready_false:docker_not_running" in err for err in report["errors"])

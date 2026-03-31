@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught,redefined-builtin,raise-missing-from,unused-argument
+# ruff: noqa: BLE001,ARG001,B904,A002
+
 import json
 import os
 import threading
@@ -11,7 +14,7 @@ from dataclasses import dataclass, field
 
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, Iterable, TYPE_CHECKING, cast
+from typing import Any, Iterable, TYPE_CHECKING, cast
 
 torch: ModuleType | None
 try:
@@ -26,6 +29,11 @@ try:
     from starlette.requests import Request as StarletteRequest  # type: ignore
 except Exception:  # pragma: no cover
     StarletteRequest = Any  # type: ignore[misc,assignment]
+
+try:
+    import requests
+except Exception:  # pragma: no cover
+    requests = None
 
 from .model.core_transformer import CoreTransformer
 from .model.vblock import VBlockState
@@ -52,6 +60,21 @@ from .experts.router import ExpertRouter
 from .episodes import EpisodeIndex
 from .logging import get_logger
 from .config import resolve_web_allowlist
+from .lab_guard import evaluate_lab_request
+from .local_lab import (
+    check_lesson,
+    collect_local_lab_status,
+    create_lesson,
+    ensure_host_layout,
+    list_modules,
+    load_progress,
+    next_module,
+    write_bootstrap_plan,
+    write_rag_sources_manifest,
+    write_roadmap,
+)
+from .prepare import prepare_model_state
+from .instructions import load_instruction_bundle
 from .runtime.router import build_features, load_router, log_router_event
 from .runtime.vram_governor import decide_max_new_tokens
 from .utils.oom import is_oom_error, clear_cuda_cache
@@ -63,11 +86,15 @@ LOG = get_logger("vortex.api")
 def _openai_error(
     message: str,
     *,
-    type: str = "invalid_request_error",
+    error_type: str = "invalid_request_error",
     code: str | None = None,
     param: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    err: dict[str, Any] = {"message": str(message), "type": str(type)}
+    legacy_type = kwargs.pop("type", None)
+    if legacy_type is not None:
+        error_type = str(legacy_type)
+    err: dict[str, Any] = {"message": str(message), "type": str(error_type)}
     if code is not None:
         err["code"] = str(code)
     if param is not None:
@@ -837,7 +864,10 @@ def _resolve_fallback_backend(
     settings: dict, current: str, base_dir: Path
 ) -> str | None:
     core = settings.get("core", {}) or {}
+    contract = settings.get("profile_contract", {}) or {}
     cur = _normalize_backend_label(current)
+    if bool(contract.get("disable_fallbacks", False)):
+        return None
 
     fallback = None
     if cur == "hf" and core.get("hf_fallback") is not None:
@@ -845,7 +875,10 @@ def _resolve_fallback_backend(
     if fallback is None:
         fallback = core.get("backend_fallback")
     if fallback is None and cur != "hf":
-        fallback = core.get("hf_fallback")
+        if bool(core.get("allow_implicit_hf_fallback", True)):
+            fallback = core.get("hf_fallback") or (
+                "hf" if core.get("hf_model") else None
+            )
 
     if fallback is not None:
         fb = _normalize_backend_label(fallback)
@@ -855,9 +888,77 @@ def _resolve_fallback_backend(
             if fb:
                 return fb
 
-    if cur != "hf" and core.get("hf_model"):
+    if bool(core.get("allow_implicit_hf_fallback", True)) and cur != "hf" and core.get("hf_model"):
         return "hf"
     return None
+
+
+def _active_model_name(settings: dict, *, backend: str | None = None) -> str | None:
+    core = settings.get("core", {}) or {}
+    active_backend = _normalize_backend_label(backend or core.get("backend", "vortex"))
+    if active_backend == "external":
+        return _safe_str(core.get("external_model"))
+    if active_backend == "hf":
+        return _safe_str(core.get("hf_model"))
+    if active_backend == "llama_cpp":
+        return _safe_str(core.get("llama_cpp_model_path"))
+    return _safe_str(core.get("model_name"))
+
+
+def _build_operational_status(app_state, settings: dict, base_dir: Path) -> dict[str, Any]:
+    prepare_state = prepare_model_state(settings, base_dir=base_dir)
+    models = getattr(app_state, "models", {}) or {}
+    configured_backend = _normalize_backend_label(
+        (settings.get("core", {}) or {}).get("backend", "vortex")
+    )
+    active_backend = configured_backend
+    if active_backend not in models and models:
+        active_backend = next(iter(models.keys()))
+    model_obj = models.get(active_backend) or getattr(app_state, "model", None)
+    payload: dict[str, Any] = {
+        "ok": bool(
+            prepare_state.get("offline_ready", False)
+            and prepare_state.get("engine_ready", False)
+            and prepare_state.get("model_ready", False)
+        ),
+        "offline_ready": bool(prepare_state.get("offline_ready", False)),
+        "engine_ready": bool(prepare_state.get("engine_ready", False)),
+        "engine_kind": prepare_state.get("engine_kind"),
+        "engine_base_url": prepare_state.get("engine_base_url"),
+        "model_ready": bool(prepare_state.get("model_ready", False)),
+        "active_backend": active_backend,
+        "active_model": prepare_state.get("active_model")
+        or _active_model_name(settings, backend=active_backend),
+        "training_ready": bool(prepare_state.get("training_ready", False)),
+        "web_disabled": bool(prepare_state.get("web_disabled", False)),
+        "docker_ready": bool(prepare_state.get("docker_ready", False)),
+        "degraded_reason": prepare_state.get("degraded_reason"),
+        "offline_reason": prepare_state.get("offline_reason"),
+        "engine_reason": prepare_state.get("engine_reason"),
+        "model_reason": prepare_state.get("model_reason"),
+        "training_reason": prepare_state.get("training_reason"),
+        "docker_reason": prepare_state.get("docker_reason"),
+        "wsl_ready": bool(prepare_state.get("wsl_ready", False)),
+        "wsl_reason": prepare_state.get("wsl_reason"),
+        "backends": list(models.keys()),
+        "backend": active_backend,
+        "ollama_ready": prepare_state.get("ollama_ready"),
+        "ollama_reason": prepare_state.get("ollama_reason"),
+    }
+    instructions = getattr(app_state, "instructions", None)
+    if isinstance(instructions, dict):
+        payload["instructions"] = {
+            "digest": instructions.get("digest"),
+            "sources": instructions.get("sources") or [],
+        }
+    if hasattr(model_obj, "runtime_stats"):
+        try:
+            stats = model_obj.runtime_stats()
+        except Exception:
+            stats = None
+        if isinstance(stats, dict):
+            payload["engine_runtime"] = stats
+    return payload
 
 
 def _get_or_load_backend(models: dict, settings: dict, base_dir: Path, backend: str):
@@ -868,6 +969,31 @@ def _get_or_load_backend(models: dict, settings: dict, base_dir: Path, backend: 
     except Exception:
         return None
     return models[backend]
+
+
+def _is_external_recoverable_error(exc: Exception, model: object | None) -> bool:
+    if not bool(getattr(model, "is_external", False)):
+        return False
+    message = str(exc).lower()
+    if "external_engine_circuit_open" in message:
+        return True
+    if requests is not None and isinstance(exc, requests.RequestException):
+        return True
+    hints = (
+        "timeout",
+        "timed out",
+        "connection",
+        "refused",
+        "reset",
+        "temporarily unavailable",
+        "http_status_5",
+        "status=5",
+        "429",
+        "502",
+        "503",
+        "504",
+    )
+    return any(token in message for token in hints)
 
 
 def _maybe_set_stream_topk(
@@ -1593,12 +1719,9 @@ def _inject_rag_context(
 
 
 def create_app(settings: dict, base_dir: Path) -> FastAPI:
-    try:
-        from fastapi import FastAPI, HTTPException, Request
-        from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(f"FastAPI not available: {exc}")
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     app = FastAPI()
     app.state.metrics = _MetricsState()
@@ -1670,6 +1793,67 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             allow_headers=["*"],
         )
 
+    def _guardrail_completion_response(*, message: str, request_id: str, stream: bool):
+        created = int(time.time())
+        resp_id = f"chatcmpl-{request_id}"
+        if not stream:
+            return JSONResponse(
+                content={
+                    "id": resp_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": "vortex-x",
+                    "request_id": request_id,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": str(message)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            )
+
+        async def _iter_guardrail():
+            header = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": "vortex-x",
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                ],
+                "request_id": request_id,
+            }
+            yield f"data: {json.dumps(header)}\n\n"
+            chunk = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": "vortex-x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": str(message)},
+                        "finish_reason": None,
+                    }
+                ],
+                "request_id": request_id,
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+            done = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": "vortex-x",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "request_id": request_id,
+            }
+            yield f"data: {json.dumps(done)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_iter_guardrail(), media_type="text/event-stream")
+
     @app.middleware("http")
     async def _auth_middleware(req: Request, call_next):
         token = getattr(app.state, "api_token", None)
@@ -1691,7 +1875,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         return await call_next(req)
 
     @app.exception_handler(HTTPException)
-    async def _http_exception_handler(req: Request, exc: HTTPException):  # type: ignore[override]
+    async def _http_exception_handler(_req: Request, exc: HTTPException):  # type: ignore[override]
         headers = getattr(exc, "headers", None)
         detail = exc.detail
         if isinstance(detail, dict) and "error" in detail:
@@ -1710,7 +1894,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(req: Request, exc: Exception):  # type: ignore[override]
         try:
-            LOG.exception("unhandled_error path=%s", str(req.url.path))
+            LOG.error("unhandled_error path=%s err=%s", str(req.url.path), exc)
         except Exception:
             pass
         return JSONResponse(
@@ -1765,6 +1949,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
     app.state.episode_index = episode_index
     app.state.router = router
     app.state.router_cfg = router_cfg
+    app.state.instructions = load_instruction_bundle(settings, base_dir=base_dir)
     app.state.adapters_registry = adapters_registry
     app.state.adapters_router = adapters_router
     app.state.training_active = False
@@ -1776,19 +1961,10 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
 
     @app.get("/readyz")
     async def readyz():
-        if getattr(app.state, "model", None) is None:
-            return JSONResponse(
-                status_code=503,
-                content=_openai_error(
-                    "model_not_loaded", type="server_error", code="not_ready"
-                ),
-            )
-        return JSONResponse(
-            content={
-                "ok": True,
-                "backends": list((getattr(app.state, "models", {}) or {}).keys()),
-            }
-        )
+        payload = _build_operational_status(app.state, settings, base_dir)
+        if not bool(payload.get("ok", False)):
+            return JSONResponse(status_code=503, content=payload)
+        return JSONResponse(content=payload)
 
     @app.get("/v1/models")
     async def list_models():
@@ -1906,12 +2082,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             data = store.list_proposals(status=status_filter)
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         try:
             pending_count = len(store.list_proposals(status="pending"))
             ms = getattr(app.state, "metrics", None)
@@ -1943,12 +2114,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                 diff_text, title=title, summary=summary, author=author
             )
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         if result.get("ok") and hasattr(app.state, "metrics"):
             ms = getattr(app.state, "metrics", None)
             if ms is not None and hasattr(ms, "observe_self_edits_pending"):
@@ -1975,12 +2141,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             payload = store.get(proposal_id)
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=404,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="not_found"
-                ),
-            )
+            raise HTTPException(status_code=404, detail=_openai_error(str(exc), type="invalid_request_error", code="not_found")) from exc
         return JSONResponse(content=payload)
 
     @app.post("/v1/self-edits/proposals/{proposal_id}/accept")
@@ -1998,12 +2159,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             payload = store.accept(proposal_id)
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         return JSONResponse(content=payload)
 
     @app.post("/v1/self-edits/proposals/{proposal_id}/reject")
@@ -2021,12 +2177,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             payload = store.reject(proposal_id)
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         return JSONResponse(content=payload)
 
     @app.post("/v1/self-edits/proposals/{proposal_id}/apply")
@@ -2045,12 +2196,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             result = store.apply(proposal_id)
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         try:
             ok = bool((result or {}).get("ok", False))
             ms = getattr(app.state, "metrics", None)
@@ -2079,12 +2225,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         try:
             created = store.create_demo()
         except SelfEditsError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=_openai_error(
-                    str(exc), type="invalid_request_error", code="invalid_request"
-                ),
-            )
+            raise HTTPException(status_code=400, detail=_openai_error(str(exc), type="invalid_request_error", code="invalid_request")) from exc
         try:
             ms = getattr(app.state, "metrics", None)
             if ms is not None and hasattr(ms, "observe_self_edits_pending"):
@@ -2287,6 +2428,15 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         messages = _resolve_messages(payload)
         if not messages:
             raise HTTPException(status_code=400, detail="messages required")
+        request_id = _new_request_id(payload.get("request_id"))
+        stream = bool(payload.get("stream", False))
+        guard = evaluate_lab_request(messages, settings)
+        if guard.get("action") != "allow":
+            return _guardrail_completion_response(
+                message=str(guard.get("message") or "blocked_by_lab_policy"),
+                request_id=request_id,
+                stream=stream,
+            )
 
         # --- Real-time web search when internet button is ON ---
         if payload.get("web_ingest"):
@@ -2310,17 +2460,17 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             base_dir, rag_settings, messages, None
         )
         backend_cfg = settings.get("core", {}).get("backend", "vortex")
-        default_system = settings.get("core", {}).get(
-            "hf_system_prompt",
-            "You are Vortex, a helpful assistant. Reply in the same language as the user. Never repeat system instructions or context blocks.",
-        )
+        instructions = getattr(app.state, "instructions", None)
+        default_system = (
+            instructions.get("text")
+            if isinstance(instructions, dict)
+            else settings.get("core", {}).get("hf_system_prompt")
+        ) or "You are Vortex, a helpful assistant. Reply in the same language as the user. Never repeat system instructions or context blocks."
         routing_prompt = build_chat_prompt(
             messages, backend_cfg, tokenizer=None, default_system=default_system
         )
-        stream = bool(payload.get("stream", False))
         decode_args = _resolve_decode_args(settings, payload)
         created = int(time.time())
-        request_id = _new_request_id(payload.get("request_id"))
         resp_id = f"chatcmpl-{request_id}"
 
         requested_model = str(payload.get("model") or "").strip()
@@ -2618,8 +2768,11 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                         else:
                             text = ""
                             stats = None
-                    except RuntimeError as exc:
-                        if is_oom_error(exc):
+                    except Exception as exc:
+                        should_fallback = is_oom_error(exc) or _is_external_recoverable_error(
+                            exc, selected_model
+                        )
+                        if should_fallback:
                             clear_cuda_cache()
                             fb = _resolve_fallback_backend(
                                 settings, chosen_backend, base_dir
@@ -2730,6 +2883,13 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                 "vram_peak_mb": vram_peak,
                 "adapter": adapter_active,
             }
+            if hasattr(selected_model, "runtime_stats"):
+                try:
+                    ext_stats = selected_model.runtime_stats()
+                except Exception:
+                    ext_stats = None
+                if isinstance(ext_stats, dict):
+                    perf["external_runtime"] = ext_stats
             if adapter_telemetry:
                 perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
                 perf["selected_adapters"] = adapter_telemetry.get("selected_adapters")
@@ -2785,6 +2945,8 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             }
             if payload.get("include_sources"):
                 data["sources"] = rag_info.get("refs", [])
+            if payload.get("include_perf"):
+                data["perf"] = perf
             try:
                 LOG.info(
                     "chat_done request_id=%s model=%s stream=false prompt_tokens=%s completion_tokens=%s latency_ms=%.1f tok_s=%.2f vram_peak_mb=%s",
@@ -2798,7 +2960,16 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                 )
             except Exception:
                 pass
-            return JSONResponse(content=data, headers={"X-Request-Id": str(request_id)})
+            headers = {
+                "X-Request-Id": str(request_id),
+                "X-Vortex-Backend": str(chosen_backend),
+            }
+            ext_stats_header = perf.get("external_runtime")
+            if isinstance(ext_stats_header, dict):
+                retries = ext_stats_header.get("retries_total")
+                if retries is not None:
+                    headers["X-Vortex-External-Retries"] = str(retries)
+            return JSONResponse(content=data, headers=headers)
 
         def event_stream() -> Iterable[str]:
             current_model = selected_model
@@ -2819,6 +2990,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             yield f"data: {json.dumps(header)}\n\n"
             chunks: list[str] = []
             start = time.time()
+            first_token_ms: float | None = None
             with model_lock.read_lock():
                 adapter_ctx = (
                     getattr(current_model, "adapter_lock", None) or nullcontext()
@@ -2835,19 +3007,24 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                             )
                         current_adapter = applied.get("adapter")
                         current_adapter_telemetry = applied
-                    if hasattr(current_model, "stream_generate"):
-                        stream_args = _stream_decode_args_for_model(
-                            current_model, decode_args
-                        )
-                        gen = current_model.stream_generate(prompt, **stream_args)
-                    else:
-                        gen = _stream_generate(current_model, prompt, **decode_args)
                     try:
+                        if hasattr(current_model, "stream_generate"):
+                            stream_args = _stream_decode_args_for_model(
+                                current_model, decode_args
+                            )
+                            gen = current_model.stream_generate(prompt, **stream_args)
+                        else:
+                            gen = _stream_generate(
+                                current_model, prompt, **decode_args
+                            )
                         first = next(gen)
                     except StopIteration:
                         first = None
-                    except RuntimeError as exc:
-                        if is_oom_error(exc):
+                    except Exception as exc:
+                        should_fallback = is_oom_error(exc) or _is_external_recoverable_error(
+                            exc, current_model
+                        )
+                        if should_fallback:
                             clear_cuda_cache()
                             fb = _resolve_fallback_backend(
                                 settings, current_backend, base_dir
@@ -2884,6 +3061,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                         else:
                             raise
                     if first:
+                        first_token_ms = float((time.time() - start) * 1000.0)
                         chunks.append(first)
                         chunk = {
                             "id": resp_id,
@@ -2903,6 +3081,8 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                     for delta in gen:
                         if not delta:
                             continue
+                        if first_token_ms is None:
+                            first_token_ms = float((time.time() - start) * 1000.0)
                         chunks.append(delta)
                         chunk = {
                             "id": resp_id,
@@ -2947,6 +3127,15 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                 "vram_peak_mb": vram_peak,
                 "adapter": current_adapter,
             }
+            if first_token_ms is not None:
+                perf["first_token_ms"] = float(first_token_ms)
+            if hasattr(current_model, "runtime_stats"):
+                try:
+                    ext_stats = current_model.runtime_stats()
+                except Exception:
+                    ext_stats = None
+                if isinstance(ext_stats, dict):
+                    perf["external_runtime"] = ext_stats
             if current_adapter_telemetry:
                 perf["adapter_load_ms"] = current_adapter_telemetry.get(
                     "adapter_load_ms"
@@ -3024,6 +3213,8 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             }
             if payload.get("include_sources"):
                 done["sources"] = rag_info.get("refs", [])
+            if payload.get("include_perf"):
+                done["perf"] = perf
             try:
                 LOG.info(
                     "chat_done request_id=%s model=%s stream=true prompt_tokens=%s completion_tokens=%s latency_ms=%.1f tok_s=%.2f vram_peak_mb=%s",
@@ -3106,6 +3297,18 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         status = 200 if result.get("ok") else 400
         return JSONResponse(content=result, status_code=status)
 
+    @app.post("/v1/instructions/reload")
+    async def reload_instructions():
+        bundle = load_instruction_bundle(settings, base_dir=base_dir)
+        app.state.instructions = bundle
+        return JSONResponse(
+            content={
+                "ok": True,
+                "digest": bundle.get("digest"),
+                "sources": bundle.get("sources") or [],
+            }
+        )
+
     @app.get("/v1/status")
     async def status():
         adapters: dict[str, str | None] = {}
@@ -3180,9 +3383,10 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             autolearn_data = _sts_load_state(base_dir)
         except Exception:
             pass
+        operational = _build_operational_status(app.state, settings, base_dir)
         return JSONResponse(
             content={
-                "ok": True,
+                **operational,
                 "backend": default_backend_label,
                 "backends": list(app.state.models.keys()),
                 "adapter": adapters.get(default_backend_label),
@@ -3198,6 +3402,70 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                 "autolearn": autolearn_data,
             }
         )
+
+    @app.get("/v1/local-lab/status")
+    async def local_lab_status():
+        return JSONResponse(content=collect_local_lab_status(settings, base_dir))
+
+    @app.post("/v1/local-lab/init")
+    async def local_lab_init():
+        return JSONResponse(content=ensure_host_layout(settings, base_dir))
+
+    @app.get("/v1/local-lab/modules")
+    async def local_lab_modules():
+        return JSONResponse(
+            content={"object": "list", "data": list_modules(settings, base_dir)}
+        )
+
+    @app.get("/v1/local-lab/progress")
+    async def local_lab_progress():
+        return JSONResponse(content=load_progress(settings, base_dir))
+
+    @app.get("/v1/local-lab/next")
+    async def local_lab_next():
+        return JSONResponse(content=next_module(settings, base_dir))
+
+    @app.get("/v1/local-lab/roadmap")
+    async def local_lab_roadmap():
+        return JSONResponse(content=write_roadmap(settings, base_dir))
+
+    @app.get("/v1/local-lab/bootstrap-plan")
+    async def local_lab_bootstrap_plan():
+        return JSONResponse(content=write_bootstrap_plan(settings, base_dir))
+
+    @app.get("/v1/local-lab/rag-sources")
+    async def local_lab_rag_sources():
+        return JSONResponse(content=write_rag_sources_manifest(settings, base_dir))
+
+    @app.post("/v1/local-lab/lessons")
+    async def local_lab_lessons(request: StarletteRequest):
+        payload = await request.json()
+        module_id = str(payload.get("module_id") or "").strip()
+        workspace_root = payload.get("workspace_root")
+        if not module_id:
+            raise HTTPException(status_code=400, detail="module_id required")
+        try:
+            result = create_lesson(
+                settings,
+                base_dir,
+                module_id=module_id,
+                workspace_root=workspace_root,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(content=result)
+
+    @app.post("/v1/local-lab/check")
+    async def local_lab_check(request: StarletteRequest):
+        payload = await request.json()
+        workspace = str(payload.get("workspace") or "").strip()
+        if not workspace:
+            raise HTTPException(status_code=400, detail="workspace required")
+        try:
+            result = check_lesson(settings, base_dir, workspace=workspace)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(content=result)
 
     @app.get("/v1/autolearn/status")
     async def autolearn_status():
@@ -3309,9 +3577,6 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
         adapters_router = AdapterRouter.from_settings(settings)
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):  # noqa: N802
-            return
-
         def do_GET(self):  # noqa: N802
             if self.path != "/v1/status":
                 self.send_response(404)
@@ -3342,6 +3607,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
+            nonlocal fallback_model
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -3438,7 +3704,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             )
             backend = settings.get("core", {}).get("backend", "vortex")
             backend_label = _normalize_backend_label(backend)
-            default_system = settings.get("core", {}).get(
+            instructions = load_instruction_bundle(settings, base_dir=base_dir)
+            default_system = instructions.get("text") or settings.get("core", {}).get(
                 "hf_system_prompt",
                 "You are Vortex, a helpful assistant. Reply in the same language as the user. Never repeat system instructions or context blocks.",
             )
@@ -3510,16 +3777,16 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                             repetition_penalty=decode_args["repetition_penalty"],
                             no_repeat_ngram=decode_args["no_repeat_ngram"],
                         )
-                    except RuntimeError as exc:
-                        if is_oom_error(exc) and fallback_backend:
+                    except Exception as exc:
+                        should_fallback = is_oom_error(exc) or _is_external_recoverable_error(
+                            exc, model
+                        )
+                        if should_fallback and fallback_backend:
                             clear_cuda_cache()
                             if fallback_model is None:
-                                try:
-                                    fallback_model = load_inference_model(
-                                        settings, backend_override=fallback_backend
-                                    )
-                                except Exception:
-                                    raise
+                                fallback_model = load_inference_model(
+                                    settings, backend_override=fallback_backend
+                                )
                             adapter_active = None
                             adapter_reason = None
                             adapter_telemetry = None
@@ -3542,6 +3809,13 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                     "vram_peak_mb": None,
                     "adapter": adapter_active,
                 }
+                if hasattr(model, "runtime_stats"):
+                    try:
+                        ext_stats = model.runtime_stats()
+                    except Exception:
+                        ext_stats = None
+                    if isinstance(ext_stats, dict):
+                        perf["external_runtime"] = ext_stats
                 if adapter_telemetry:
                     perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
                     perf["selected_adapters"] = adapter_telemetry.get(
@@ -3586,6 +3860,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 }
                 if payload.get("include_sources"):
                     data["sources"] = rag_info.get("refs", [])
+                if payload.get("include_perf"):
+                    data["perf"] = perf
                 body = json.dumps(data).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -3612,6 +3888,7 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             self.wfile.flush()
             chunks: list[str] = []
             start = time.time()
+            first_token_ms: float | None = None
             with model_lock:
                 adapter_ctx = getattr(model, "adapter_lock", None) or nullcontext()
                 with adapter_ctx:
@@ -3643,6 +3920,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                             "request_id": request_id,
                         }
                         if delta:
+                            if first_token_ms is None:
+                                first_token_ms = float((time.time() - start) * 1000.0)
                             chunks.append(delta)
                         self.wfile.write(
                             f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
@@ -3665,6 +3944,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                             "request_id": request_id,
                         }
                         if delta:
+                            if first_token_ms is None:
+                                first_token_ms = float((time.time() - start) * 1000.0)
                             chunks.append(delta)
                         self.wfile.write(
                             f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
@@ -3680,6 +3961,15 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
                 "vram_peak_mb": None,
                 "adapter": adapter_active,
             }
+            if first_token_ms is not None:
+                perf["first_token_ms"] = float(first_token_ms)
+            if hasattr(model, "runtime_stats"):
+                try:
+                    ext_stats = model.runtime_stats()
+                except Exception:
+                    ext_stats = None
+                if isinstance(ext_stats, dict):
+                    perf["external_runtime"] = ext_stats
             if adapter_telemetry:
                 perf["adapter_load_ms"] = adapter_telemetry.get("adapter_load_ms")
                 perf["selected_adapters"] = adapter_telemetry.get("selected_adapters")
@@ -3714,6 +4004,8 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             }
             if payload.get("include_sources"):
                 done["sources"] = rag_info.get("refs", [])
+            if payload.get("include_perf"):
+                done["perf"] = perf
             self.wfile.write(f"data: {json.dumps(done)}\n\n".encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()

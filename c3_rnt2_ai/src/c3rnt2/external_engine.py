@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught
+# ruff: noqa: BLE001
+
 import json
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -21,6 +25,13 @@ class ExternalEngineConfig:
     start_command: str | None = None
     start_workdir: str | None = None
     startup_wait_s: float = 2.0
+    retry_max_attempts: int = 2
+    retry_backoff_base_s: float = 0.25
+    retry_backoff_max_s: float = 2.0
+    retry_on_statuses: tuple[int, ...] = (408, 429, 500, 502, 503, 504)
+    circuit_enabled: bool = True
+    circuit_fail_threshold: int = 4
+    circuit_open_s: float = 20.0
 
 
 def _extract_text(resp: dict) -> str:
@@ -58,16 +69,94 @@ class ExternalEngineModel:
         self.cfg = cfg
         self.session = requests.Session()
         self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+        self._requests_total = 0
+        self._requests_failed = 0
+        self._requests_succeeded = 0
+        self._retries_total = 0
+        self._consecutive_failures = 0
+        self._circuit_open_until_ts = 0.0
+        self._last_error: str | None = None
+
+    def _is_retryable_status(self, status_code: int) -> bool:
+        if status_code in set(self.cfg.retry_on_statuses):
+            return True
+        return int(status_code) >= 500
+
+    def _is_retryable_exception(self, exc: Exception) -> bool:
+        return isinstance(exc, requests.RequestException)
+
+    def _backoff_sleep(self, attempt: int) -> None:
+        base = max(0.0, float(self.cfg.retry_backoff_base_s))
+        cap = max(base, float(self.cfg.retry_backoff_max_s))
+        delay = min(cap, base * (2 ** max(0, int(attempt) - 1)))
+        if delay > 0:
+            time.sleep(delay)
+
+    def _record_attempt(self) -> None:
+        with self._lock:
+            self._requests_total += 1
+
+    def _record_retry(self) -> None:
+        with self._lock:
+            self._retries_total += 1
+
+    def _record_success(self) -> None:
+        with self._lock:
+            self._requests_succeeded += 1
+            self._consecutive_failures = 0
+            self._last_error = None
+
+    def _record_failure(self, exc: Exception) -> None:
+        now = time.time()
+        with self._lock:
+            self._requests_failed += 1
+            self._consecutive_failures += 1
+            self._last_error = str(exc)
+            if (
+                bool(self.cfg.circuit_enabled)
+                and self._consecutive_failures >= max(1, int(self.cfg.circuit_fail_threshold))
+            ):
+                self._circuit_open_until_ts = now + max(0.0, float(self.cfg.circuit_open_s))
+
+    def _ensure_circuit_closed(self) -> None:
+        if not bool(self.cfg.circuit_enabled):
+            return
+        now = time.time()
+        with self._lock:
+            if now < self._circuit_open_until_ts:
+                raise RuntimeError("external_engine_circuit_open")
+
+    def runtime_stats(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            open_for_s = max(0.0, float(self._circuit_open_until_ts - now))
+            return {
+                "requests_total": int(self._requests_total),
+                "requests_failed": int(self._requests_failed),
+                "requests_succeeded": int(self._requests_succeeded),
+                "retries_total": int(self._retries_total),
+                "consecutive_failures": int(self._consecutive_failures),
+                "circuit_open": bool(open_for_s > 0.0),
+                "circuit_open_for_s": float(open_for_s),
+                "last_error": self._last_error,
+            }
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
+        if self.cfg.engine in {"ollama", "lmstudio"}:
+            return headers
         key = self.cfg.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("VLLM_API_KEY") or os.environ.get("SGLANG_API_KEY")
         if key:
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
     def _url(self, path: str) -> str:
-        return self.cfg.base_url.rstrip("/") + str(path)
+        base = self.cfg.base_url.rstrip("/")
+        suffix = str(path)
+        if base.endswith("/v1") and suffix.startswith("/v1/"):
+            suffix = suffix[3:]
+        return base + suffix
 
     def _ensure_started(self) -> None:
         if not bool(self.cfg.autostart):
@@ -93,12 +182,81 @@ class ExternalEngineModel:
         if self.cfg.model:
             payload["model"] = str(self.cfg.model)
         url = self._url("/v1/chat/completions")
-        resp = self.session.post(url, json=payload, headers=self._headers(), timeout=float(self.cfg.timeout_s))
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, dict):
-            return ""
-        return _extract_text(data)
+        attempts = max(1, int(self.cfg.retry_max_attempts))
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self._ensure_circuit_closed()
+            self._record_attempt()
+            try:
+                resp = self.session.post(
+                    url,
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=float(self.cfg.timeout_s),
+                )
+                status = int(resp.status_code)
+                if self._is_retryable_status(status) and attempt < attempts:
+                    self._record_failure(RuntimeError(f"http_status_{status}"))
+                    self._record_retry()
+                    self._backoff_sleep(attempt)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                self._record_success()
+                if not isinstance(data, dict):
+                    return ""
+                return _extract_text(data)
+            except Exception as exc:
+                self._record_failure(exc)
+                last_exc = exc
+                if attempt < attempts and self._is_retryable_exception(exc):
+                    self._record_retry()
+                    self._backoff_sleep(attempt)
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("external_engine_request_failed")
+
+    def _open_stream_response(self, payload: dict[str, Any]) -> requests.Response:
+        url = self._url("/v1/chat/completions")
+        attempts = max(1, int(self.cfg.retry_max_attempts))
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self._ensure_circuit_closed()
+            self._record_attempt()
+            try:
+                resp = self.session.post(
+                    url,
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=float(self.cfg.timeout_s),
+                    stream=True,
+                )
+                status = int(resp.status_code)
+                if self._is_retryable_status(status) and attempt < attempts:
+                    self._record_failure(RuntimeError(f"http_status_{status}"))
+                    self._record_retry()
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    self._backoff_sleep(attempt)
+                    continue
+                resp.raise_for_status()
+                self._record_success()
+                return resp
+            except Exception as exc:
+                self._record_failure(exc)
+                last_exc = exc
+                if attempt < attempts and self._is_retryable_exception(exc):
+                    self._record_retry()
+                    self._backoff_sleep(attempt)
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("external_engine_request_failed")
 
     def stream_generate(self, prompt: str, *, max_new_tokens: int = 64, temperature: float = 1.0, top_p: float = 1.0, **_kwargs) -> Iterable[str]:
         self._ensure_started()
@@ -111,8 +269,7 @@ class ExternalEngineModel:
         }
         if self.cfg.model:
             payload["model"] = str(self.cfg.model)
-        url = self._url("/v1/chat/completions")
-        with self.session.post(url, json=payload, headers=self._headers(), timeout=float(self.cfg.timeout_s), stream=True) as resp:
+        with self._open_stream_response(payload) as resp:
             resp.raise_for_status()
             for raw in resp.iter_lines(decode_unicode=True):
                 if not raw:
@@ -153,6 +310,24 @@ def load_external_engine_model(settings: dict) -> ExternalEngineModel:
     start_command = core.get("external_start_command")
     workdir = core.get("external_start_workdir") or core.get("external_workdir")
     startup_wait_s = float(core.get("external_startup_wait_s", 2.0) or 2.0)
+    retry_max_attempts = int(core.get("external_retry_max_attempts", 2) or 2)
+    retry_backoff_base_s = float(core.get("external_retry_backoff_base_s", 0.25) or 0.25)
+    retry_backoff_max_s = float(core.get("external_retry_backoff_max_s", 2.0) or 2.0)
+    retry_on_statuses_raw = core.get("external_retry_on_statuses", [408, 429, 500, 502, 503, 504])
+    retry_on_statuses: tuple[int, ...]
+    if isinstance(retry_on_statuses_raw, list):
+        parsed = []
+        for item in retry_on_statuses_raw:
+            try:
+                parsed.append(int(item))
+            except Exception:
+                continue
+        retry_on_statuses = tuple(parsed) if parsed else (408, 429, 500, 502, 503, 504)
+    else:
+        retry_on_statuses = (408, 429, 500, 502, 503, 504)
+    circuit_enabled = bool(core.get("external_circuit_enabled", True))
+    circuit_fail_threshold = int(core.get("external_circuit_fail_threshold", 4) or 4)
+    circuit_open_s = float(core.get("external_circuit_open_s", 20.0) or 20.0)
     cfg = ExternalEngineConfig(
         engine=str(engine),
         base_url=base_url,
@@ -163,5 +338,12 @@ def load_external_engine_model(settings: dict) -> ExternalEngineModel:
         start_command=str(start_command) if start_command else None,
         start_workdir=str(workdir) if workdir else None,
         startup_wait_s=float(startup_wait_s),
+        retry_max_attempts=max(1, int(retry_max_attempts)),
+        retry_backoff_base_s=max(0.0, float(retry_backoff_base_s)),
+        retry_backoff_max_s=max(0.0, float(retry_backoff_max_s)),
+        retry_on_statuses=retry_on_statuses,
+        circuit_enabled=bool(circuit_enabled),
+        circuit_fail_threshold=max(1, int(circuit_fail_threshold)),
+        circuit_open_s=max(0.0, float(circuit_open_s)),
     )
     return ExternalEngineModel(cfg)

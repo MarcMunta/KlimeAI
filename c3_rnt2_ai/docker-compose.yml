@@ -1,0 +1,108 @@
+services:
+  sglang-runtime:
+    image: lmsysorg/sglang:latest-runtime
+    restart: unless-stopped
+    gpus: all
+    shm_size: "32g"
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "30000:30000"
+      - "8000:8000"
+    command:
+      - python3
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - Qwen/Qwen2.5-Coder-14B-Instruct-AWQ
+      - --served-model-name
+      - Qwen/Qwen2.5-Coder-14B-Instruct-AWQ
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30000"
+      - --dtype
+      - half
+      - --mem-fraction-static
+      - "0.80"
+
+  vortex-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    network_mode: "service:sglang-runtime"
+    depends_on:
+      - sglang-runtime
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+    volumes:
+      - .:/workspace
+      - hf-cache:/root/.cache/huggingface
+    command:
+      - python
+      - -m
+      - c3rnt2
+      - serve
+      - --profile
+      - rtx4080_16gb_programming_local
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+  trainer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    profiles: ["manual"]
+    gpus: all
+    ipc: host
+    shm_size: "32g"
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - .:/workspace
+      - hf-cache:/root/.cache/huggingface
+    command:
+      - python
+      - -m
+      - c3rnt2
+      - doctor
+      - --profile
+      - rtx4080_16gb_programming_train_docker
+      - --mock
+
+  eval:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    profiles: ["manual"]
+    network_mode: "service:sglang-runtime"
+    depends_on:
+      - sglang-runtime
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+    volumes:
+      - .:/workspace
+      - hf-cache:/root/.cache/huggingface
+    command:
+      - python
+      - -m
+      - c3rnt2
+      - bench
+      - --profile
+      - rtx4080_16gb_programming_local
+      - --scenario
+      - default
+      - --mock
+
+volumes:
+  hf-cache:

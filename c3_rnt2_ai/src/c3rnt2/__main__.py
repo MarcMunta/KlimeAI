@@ -42,6 +42,8 @@ from .continuous.promotion import promote_quarantine_run
 from .utils.vram import get_vram_free_mb
 from .skills.cli import register_skills_cli
 
+_INTERNAL_TRAIN_SUBPROCESS_ENV = "C3RNT2_INTERNAL_TRAIN_SUBPROCESS"
+
 
 def _load_and_validate(profile: str | None, override: Callable[[dict], dict] | None = None) -> dict:
     settings = load_settings(profile)
@@ -104,6 +106,56 @@ def _coerce_train_result(payload: dict | object) -> SimpleNamespace:
     return SimpleNamespace(ok=False, ok_eval=False, ok_train=False, error="invalid_train_result")
 
 
+def _host_ram_free_mb() -> float | None:
+    try:
+        import psutil  # type: ignore
+
+        return float(psutil.virtual_memory().available / (1024**2))
+    except Exception:
+        return None
+
+
+def _training_resource_gate(settings: dict) -> tuple[str | None, dict[str, object]]:
+    core_cfg = settings.get("core", {}) or {}
+    contract_cfg = settings.get("profile_contract", {}) or {}
+    server_cfg = settings.get("server", {}) or {}
+
+    margin_mb = float(core_cfg.get("vram_safety_margin_mb", 0.0) or 0.0)
+    threshold_mb = float(
+        core_cfg.get(
+            "train_vram_threshold_mb",
+            core_cfg.get("vram_threshold_mb", 0.0) or 0.0,
+        )
+        or 0.0
+    )
+    required_vram_mb = float(margin_mb + threshold_mb)
+    free_vram_mb = get_vram_free_mb()
+    if (
+        free_vram_mb is not None
+        and required_vram_mb > 0
+        and float(free_vram_mb) < required_vram_mb
+    ):
+        return "vram_insufficient", {
+            "vram_free_mb": float(free_vram_mb),
+            "vram_required_mb": float(required_vram_mb),
+        }
+
+    contract_host_ram = float(contract_cfg.get("min_host_ram_free_mb", 0.0) or 0.0)
+    server_host_ram = float(server_cfg.get("train_host_ram_threshold_mb", 0.0) or 0.0)
+    required_host_ram_mb = float(max(contract_host_ram, server_host_ram))
+    free_host_ram_mb = _host_ram_free_mb()
+    if (
+        free_host_ram_mb is not None
+        and required_host_ram_mb > 0
+        and float(free_host_ram_mb) < required_host_ram_mb
+    ):
+        return "host_ram_insufficient", {
+            "host_ram_free_mb": float(free_host_ram_mb),
+            "host_ram_required_mb": float(required_host_ram_mb),
+        }
+    return None, {}
+
+
 def _run_train_subprocess(
     settings: dict,
     reuse_dataset: bool,
@@ -115,8 +167,12 @@ def _run_train_subprocess(
     cmd = [sys.executable, "-m", "c3rnt2", "train-once", "--profile", str(profile)]
     if reuse_dataset:
         cmd.append("--reuse-dataset")
+    child_env = dict(os.environ)
+    if env:
+        child_env.update(env)
+    child_env[_INTERNAL_TRAIN_SUBPROCESS_ENV] = "1"
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_s, env=env)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_s, env=child_env)
     except subprocess.TimeoutExpired:
         return {"ok": False, "ok_train": False, "ok_eval": False, "error": "train_subprocess_timeout"}
     if result.returncode != 0:
@@ -149,7 +205,9 @@ def _run_train_subprocess_wsl(settings: dict, reuse_dataset: bool, *, timeout_s:
     inner_cmd = [wsl_python, "-m", "c3rnt2", "train-once", "--profile", str(profile)]
     if reuse_dataset:
         inner_cmd.append("--reuse-dataset")
-    script = build_bash_lc_script(inner_cmd, workdir=wsl_workdir_str, env=env)
+    child_env = dict(env or {})
+    child_env[_INTERNAL_TRAIN_SUBPROCESS_ENV] = "1"
+    script = build_bash_lc_script(inner_cmd, workdir=wsl_workdir_str, env=child_env)
     cmd = build_wsl_bash_command(script)
 
     try:
@@ -317,6 +375,7 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     info: dict[str, object] = {}
+    contract = settings.get("profile_contract", {}) or {}
 
     profile_name = settings.get("_profile")
     tools_cfg = settings.get("tools", {}) or {}
@@ -360,6 +419,61 @@ def _run_doctor_checks(settings: dict, base_dir: Path) -> dict:
         ok, msg = _check_path_writable(base_dir, value)
         if not ok:
             errors.append(f"{label}: {msg}")
+
+    try:
+        from .prepare import prepare_model_state
+
+        prepare_state = prepare_model_state(settings, base_dir=base_dir)
+        info["prepare"] = {
+            "ok": bool(prepare_state.get("ok", False)),
+            "offline_ready": bool(prepare_state.get("offline_ready", False)),
+            "engine_ready": bool(prepare_state.get("engine_ready", False)),
+            "engine_kind": prepare_state.get("engine_kind"),
+            "engine_base_url": prepare_state.get("engine_base_url"),
+            "model_ready": bool(prepare_state.get("model_ready", False)),
+            "active_backend": prepare_state.get("active_backend"),
+            "active_model": prepare_state.get("active_model"),
+            "docker_ready": bool(prepare_state.get("docker_ready", False)),
+            "wsl_ready": bool(prepare_state.get("wsl_ready", False)),
+            "web_disabled": bool(prepare_state.get("web_disabled", False)),
+            "training_ready": bool(prepare_state.get("training_ready", False)),
+            "offline_reason": prepare_state.get("offline_reason"),
+            "engine_reason": prepare_state.get("engine_reason"),
+            "model_reason": prepare_state.get("model_reason"),
+            "docker_reason": prepare_state.get("docker_reason"),
+            "wsl_reason": prepare_state.get("wsl_reason"),
+            "web_reason": prepare_state.get("web_reason"),
+            "training_reason": prepare_state.get("training_reason"),
+            "degraded_reason": prepare_state.get("degraded_reason"),
+        }
+        if not bool(prepare_state.get("ok", False)):
+            for err in prepare_state.get("errors") or []:
+                errors.append(f"prepare:{err}")
+        if bool(contract.get("offline_required", False)) and not bool(prepare_state.get("offline_ready", False)):
+            errors.append(f"offline_ready_false:{prepare_state.get('offline_reason')}")
+        if bool(contract.get("require_ollama", False)) and not bool(prepare_state.get("ollama_ready", False)):
+            errors.append(f"ollama_ready_false:{prepare_state.get('ollama_reason')}")
+        required_engine = contract.get("require_external_engine")
+        if required_engine and (
+            not bool(prepare_state.get("engine_ready", False))
+            or str(prepare_state.get("engine_kind") or "").lower()
+            != str(required_engine).strip().lower()
+        ):
+            errors.append(
+                f"engine_ready_false:{prepare_state.get('engine_reason') or prepare_state.get('engine_kind')}"
+            )
+        if bool(contract.get("require_docker", False)) and not bool(
+            prepare_state.get("docker_ready", False)
+        ):
+            errors.append(f"docker_ready_false:{prepare_state.get('docker_reason')}")
+        if bool(contract.get("require_wsl_training", False)) and not bool(prepare_state.get("wsl_ready", False)):
+            errors.append(f"wsl_ready_false:{prepare_state.get('wsl_reason')}")
+        if bool(contract.get("require_web_disabled", False)) and not bool(prepare_state.get("web_disabled", False)):
+            errors.append(f"web_disabled_false:{prepare_state.get('web_reason')}")
+        if bool(contract.get("approved_training_sources_only", False)) and not bool(prepare_state.get("training_ready", False)):
+            errors.append(f"training_ready_false:{prepare_state.get('training_reason')}")
+    except Exception as exc:
+        errors.append(f"prepare_check_failed: {exc}")
 
     backend = str((settings.get("core", {}) or {}).get("backend", "vortex")).lower()
     try:
@@ -716,14 +830,37 @@ def cmd_train_once(args: argparse.Namespace) -> None:
         if parsed is not None and parsed > 0:
             max_steps_val = parsed
     base_dir = Path(".")
+    strategy = str((settings.get("server", {}) or {}).get("train_strategy", "subprocess")).lower()
+    internal_subprocess = os.getenv(_INTERNAL_TRAIN_SUBPROCESS_ENV) == "1"
+    child_env = dict(os.environ)
+    if max_steps_val is not None:
+        child_env["C3RNT2_TRAIN_MAX_STEPS"] = str(int(max_steps_val))
     try:
         lock = acquire_exclusive_lock(base_dir, "train")
     except LockUnavailable:
         print({"ok": False, "error": "train lock unavailable (serve/self_patch running?)"})
         return
     try:
-        result = train_once_backend(settings, base_dir, reuse_dataset=bool(args.reuse_dataset), max_steps=max_steps_val)
-        payload = dict(result) if isinstance(result, dict) else dict(getattr(result, "__dict__", {}) or {})
+        if not internal_subprocess and strategy == "wsl_subprocess_unload":
+            payload = _run_train_subprocess_wsl(
+                settings,
+                reuse_dataset=bool(args.reuse_dataset),
+                env=child_env,
+            )
+        elif not internal_subprocess and strategy.startswith("subprocess"):
+            payload = _run_train_subprocess(
+                settings,
+                reuse_dataset=bool(args.reuse_dataset),
+                env=child_env,
+            )
+        else:
+            result = train_once_backend(
+                settings,
+                base_dir,
+                reuse_dataset=bool(args.reuse_dataset),
+                max_steps=max_steps_val,
+            )
+            payload = dict(result) if isinstance(result, dict) else dict(getattr(result, "__dict__", {}) or {})
         adapter_dir = payload.get("adapter_dir")
         if adapter_dir is not None:
             payload["adapter_dir"] = str(adapter_dir)
@@ -752,7 +889,10 @@ def cmd_self_train(args: argparse.Namespace) -> None:
             continue
         try:
             strategy = str((settings.get("server", {}) or {}).get("train_strategy", "subprocess")).lower()
-            if strategy == "wsl_subprocess_unload":
+            skipped, skip_info = _training_resource_gate(settings)
+            if skipped:
+                train_result = {"ok": True, "skipped": skipped, **skip_info}
+            elif strategy == "wsl_subprocess_unload":
                 train_result = _run_train_subprocess_wsl(settings, reuse_dataset=bool(args.reuse_dataset))
             elif strategy.startswith("subprocess"):
                 train_result = _run_train_subprocess(settings, reuse_dataset=bool(args.reuse_dataset))
@@ -857,14 +997,7 @@ def _run_self_train_tick(
             if train_strategy in {"unload_reload", "subprocess_unload", "wsl_subprocess_unload"}:
                 _unload_models_for_train(app)
                 did_unload = True
-            core_cfg = settings.get("core", {}) or {}
-            margin_mb = float(core_cfg.get("vram_safety_margin_mb", 0.0) or 0.0)
-            threshold_mb = float(core_cfg.get("train_vram_threshold_mb", core_cfg.get("vram_threshold_mb", 0.0) or 0.0) or 0.0)
-            required_mb = float(margin_mb + threshold_mb)
-            free_mb = get_vram_free_mb()
-            if free_mb is not None and required_mb > 0 and float(free_mb) < required_mb:
-                skipped = "vram_insufficient"
-                skip_info = {"vram_free_mb": float(free_mb), "vram_required_mb": float(required_mb)}
+            skipped, skip_info = _training_resource_gate(settings)
             if skipped:
                 result = None
                 error = None
@@ -1067,6 +1200,11 @@ def _run_autopilot_train_with_server(
         if train_strategy in {"unload_reload", "subprocess_unload", "wsl_subprocess_unload"}:
             _unload_models_for_train(app)
             did_unload = True
+
+        skipped, skip_info = _training_resource_gate(settings)
+        if skipped:
+            payload = {"ok": True, "ok_train": False, "ok_eval": False, "skipped": skipped, **skip_info}
+            return payload
 
         if train_strategy in {"subprocess", "subprocess_unload"}:
             payload = _run_train_subprocess(settings, reuse_dataset=reuse_dataset, env=env)

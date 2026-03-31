@@ -12,7 +12,42 @@ Nota de rol:
 - **Vortex-Tok** es para los backends Vortex/C3 (no se usa para HF). Bench: `python scripts/bench_tokenizer.py --profile dev_small`.
 
 ## Ruta recomendada (RTX 4080 16GB)
-Ver `docs/rtx4080.md`, `docs/120b_like.md` y `docs/WINDOWS_SELF_TRAIN_WSL.md` (perfil recomendado: `rtx4080_16gb_120b_like`).
+La ruta principal soportada es ahora **Docker-first + SGLang + Qwen2.5-Coder-14B**.
+
+Perfiles principales:
+- `rtx4080_16gb_programming_local`: serving local con `SGLang` en Docker y `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ`.
+- `rtx4080_16gb_programming_train_docker`: training manual en contenedor separado con `Qwen/Qwen2.5-Coder-14B-Instruct` en QLoRA 4-bit.
+
+Los perfiles `120B-like`, `local_lab`, `security-lab` y variantes WSL quedan como secundarios o de compatibilidad. La identidad principal de Vortex sale de:
+- `config/instructions/vortex_system.md`
+- `config/instructions/domain_policy.md`
+
+## Flujo principal (Docker-first)
+
+Levanta runtime + API local:
+
+```bash
+docker compose up -d sglang-runtime vortex-api
+python -m c3rnt2 prepare-model --profile rtx4080_16gb_programming_local
+python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_programming_local
+python -m c3rnt2 bench --profile rtx4080_16gb_programming_local --max-new-tokens 64 --json-out data/bench/programming_local.json
+```
+
+Training manual separado:
+
+```bash
+docker compose run --rm trainer python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_programming_train_docker
+docker compose run --rm trainer python -m c3rnt2 train-once --profile rtx4080_16gb_programming_train_docker
+docker compose run --rm eval python -m c3rnt2 bench --profile rtx4080_16gb_programming_local --scenario default
+```
+
+Notas:
+- El runtime OpenAI-compatible queda expuesto en `http://127.0.0.1:30000`.
+- La API de Vortex queda expuesta en `http://127.0.0.1:8000`.
+- No hay fallback silencioso en los perfiles principales Docker-first.
+- `ingest_web`, `autolearn.web_ingest` y `autolearn.url_discovery` quedan desactivados en el path principal.
+- El corpus local vive en `data/corpora/programming/{python,fastapi,react_ts,pytorch,git_linux,repo_notes}` y puedes ampliar la parte defensiva en `data/corpora/cybersecurity/`.
+- Los adapters HF quedan en cuarentena manual; el training genera `meta.json`, eval y bench, pero no promociona a producción automaticamente.
 
 ## RTX 4080 16GB Quickstart (Windows, perfil safe)
 Comandos recomendados (core backend, sin descargas, web deny-by-default):

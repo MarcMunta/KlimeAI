@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
+# pylint: disable=import-error,no-name-in-module
+
 from pathlib import Path
 
 from c3rnt2.config import load_settings, validate_profile
@@ -25,6 +29,9 @@ def test_settings_normalization_profiles() -> None:
     _assert_profile("dev_small")
     _assert_profile("rtx4080_16gb_vortexx_next")
     _assert_profile("safe_selftrain_4080")
+    _assert_profile("rtx4080_16gb_programming_local")
+    _assert_profile("rtx4080_16gb_programming_train_docker")
+    _assert_profile("rtx4080_16gb_programming_train_wsl")
 
 
 def test_settings_safety_defaults() -> None:
@@ -33,3 +40,89 @@ def test_settings_safety_defaults() -> None:
     autolearn = settings.get("autolearn", {}) or {}
     assert bool(autopilot.get("autopatch_require_approval", False)) is True
     assert bool(autolearn.get("enabled", False)) is False
+
+
+def _assert_security_lab_profile_is_local_and_safe(profile: str) -> None:
+    settings = load_settings(profile)
+    core = settings.get("core", {}) or {}
+    tools = settings.get("tools", {}) or {}
+    web = tools.get("web", {}) or {}
+    continuous = settings.get("continuous", {}) or {}
+    autolearn = settings.get("autolearn", {}) or {}
+    local_lab = settings.get("local_lab", {}) or {}
+
+    assert core.get("backend") == "external"
+    assert core.get("external_engine") == "ollama"
+    assert core.get("external_base_url") == "http://127.0.0.1:11434"
+    assert core.get("external_model") == "qwen3:14b"
+    assert core.get("backend_fallback") is None
+    assert "Security-Lab" in str(core.get("hf_system_prompt") or "")
+    assert bool(web.get("enabled", True)) is False
+    assert bool(continuous.get("ingest_web", True)) is False
+    assert bool(autolearn.get("enabled", True)) is False
+    assert bool(local_lab.get("enabled", False)) is True
+    assert bool(local_lab.get("guardrails_enabled", False)) is True
+
+
+def test_security_lab_profiles_are_local_and_safe() -> None:
+    _assert_security_lab_profile_is_local_and_safe(
+        "ethical_security_lab_4080_offensive_lab"
+    )
+    _assert_security_lab_profile_is_local_and_safe("ethical_security_lab_4080_defensive")
+
+
+def test_legacy_offensive_profile_name_removed() -> None:
+    raw = (Path(__file__).resolve().parents[1] / "config" / "settings.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "ethical_hacking_autolearn_4080" not in raw
+    assert "ethical_security_lab_4080:" not in raw
+    assert "ethical_security_lab_4080_offensive_lab:" in raw
+    assert "ethical_security_lab_4080_defensive:" in raw
+
+
+def test_programming_profiles_are_local_and_offline() -> None:
+    daily = load_settings("rtx4080_16gb_programming_local")
+    train = load_settings("rtx4080_16gb_programming_train_docker")
+    train_wsl = load_settings("rtx4080_16gb_programming_train_wsl")
+
+    assert daily["core"]["backend"] == "external"
+    assert daily["core"]["external_engine"] == "sglang"
+    assert daily["core"]["external_base_url"] == "http://127.0.0.1:30000"
+    assert daily["core"]["external_model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+    assert daily["core"]["backend_fallback"] is None
+    assert daily["core"]["hf_fallback"] is None
+    assert daily["core"]["allow_implicit_hf_fallback"] is False
+    assert daily["docker"]["enabled"] is True
+    assert daily["tools"]["web"]["enabled"] is False
+    assert daily["continuous"]["ingest_web"] is False
+    assert daily["autolearn"]["web_ingest"] is False
+    assert daily["autolearn"]["url_discovery"] is False
+    assert daily["profile_contract"]["require_external_engine"] == "sglang"
+    assert daily["profile_contract"]["require_docker"] is True
+    assert daily["profile_contract"]["disable_fallbacks"] is True
+    assert daily["continuous"]["local_sources"]["include_repo"] is True
+    assert daily["hf_train"]["enabled"] is False
+
+    assert train["core"]["backend"] == "external"
+    assert train["core"]["external_engine"] == "sglang"
+    assert train["core"]["hf_model"] == "Qwen/Qwen2.5-Coder-14B-Instruct"
+    assert train["core"]["backend_fallback"] is None
+    assert train["core"]["hf_fallback"] is None
+    assert train["core"]["allow_implicit_hf_fallback"] is False
+    assert train["server"]["train_strategy"] == "subprocess_unload"
+    assert train["hf_train"]["enabled"] is True
+    assert train["hf_train"]["model_name"] == "Qwen/Qwen2.5-Coder-14B-Instruct"
+    assert train["hf_train"]["manual_promotion_only"] is True
+    assert train["hf_train"]["extra_training_paths"] == [
+        "data/registry/hf_train/sft_samples.jsonl",
+        "data/registry/hf_train/programming_eval.jsonl",
+    ]
+    assert train["profile_contract"]["require_docker"] is True
+    assert train["profile_contract"]["disable_fallbacks"] is True
+    assert train["profile_contract"]["require_wsl_training"] is False
+    assert train["profile_contract"]["approved_training_sources_only"] is True
+
+    assert train_wsl["server"]["train_strategy"] == "wsl_subprocess_unload"
+    assert train_wsl["server"]["wsl_workdir"] == "/mnt/d/Vortex/c3_rnt2_ai"
+    assert train_wsl["profile_contract"]["require_wsl_training"] is True

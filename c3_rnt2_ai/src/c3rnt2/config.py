@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught
+# ruff: noqa: BLE001
+
 import os
 import warnings
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml  # type: ignore[import-untyped]
 
@@ -172,7 +176,23 @@ def normalize_settings(settings: dict) -> dict:
     server_cfg.setdefault("maintenance_window_s", 10)
     server_cfg.setdefault("block_during_training", False)
     server_cfg.setdefault("train_strategy", "subprocess")
+    server_cfg.setdefault("train_host_ram_threshold_mb", 0)
     normalized["server"] = server_cfg
+
+    instructions = normalized.get("instructions", {}) or {}
+    instructions.setdefault("vortex_system_path", "config/instructions/vortex_system.md")
+    instructions.setdefault("domain_policy_path", "config/instructions/domain_policy.md")
+    instructions.setdefault("operator_notes_path", None)
+    normalized["instructions"] = instructions
+
+    docker_cfg = normalized.get("docker", {}) or {}
+    docker_cfg.setdefault("enabled", False)
+    docker_cfg.setdefault("compose_path", "docker-compose.yml")
+    docker_cfg.setdefault("runtime_service", "sglang-runtime")
+    docker_cfg.setdefault("api_service", "vortex-api")
+    docker_cfg.setdefault("trainer_service", "trainer")
+    docker_cfg.setdefault("eval_service", "eval")
+    normalized["docker"] = docker_cfg
 
     knowledge = normalized.get("knowledge", {}) or {}
     knowledge.setdefault("embedding_backend", "auto")
@@ -187,6 +207,18 @@ def normalize_settings(settings: dict) -> dict:
     policy.setdefault("deny_source_kinds", None)
     knowledge["policy"] = policy
     normalized["knowledge"] = knowledge
+
+    local_lab = normalized.get("local_lab", {}) or {}
+    local_lab.setdefault("enabled", False)
+    local_lab.setdefault("track", "python_fastapi_react")
+    local_lab.setdefault("curriculum_path", "config/local_lab_curriculum.yaml")
+    local_lab.setdefault("progress_path", "data/local_lab/progress.json")
+    local_lab.setdefault("lessons_path", "data/local_lab/lessons")
+    local_lab.setdefault("workspaces_path", "data/local_lab/workspaces")
+    local_lab.setdefault("sandbox_root", "data/workspaces")
+    local_lab.setdefault("guardrails_enabled", False)
+    local_lab.setdefault("lab_confirmation_token", "LAB_CONFIRMED")
+    normalized["local_lab"] = local_lab
 
     adapters = normalized.get("adapters", {}) or {}
     adapters.setdefault("enabled", False)
@@ -231,7 +263,9 @@ def normalize_settings(settings: dict) -> dict:
     hf_train.setdefault("lora_rank", 8)
     hf_train.setdefault("lora_alpha", 16)
     hf_train.setdefault("lora_dropout", 0.05)
+    hf_train.setdefault("gradient_checkpointing", True)
     hf_train.setdefault("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
+    hf_train.setdefault("extra_training_paths", [])
     hf_train.setdefault("min_chars", 40)
     hf_train.setdefault("max_repeat_ratio", 0.8)
     hf_train.setdefault("semantic_dedup_threshold", 0.97)
@@ -305,34 +339,87 @@ def normalize_settings(settings: dict) -> dict:
         elif key in core:
             lava[key] = core.get(key)
     cont = normalized.get("continuous", {}) or {}
-    if cont:
-        if cont.get("run_interval_minutes") is not None:
-            warnings.warn(
-                "continuous.run_interval_minutes is deprecated; use continuous.interval_minutes",
-                DeprecationWarning,
-            )
-            cont.setdefault("interval_minutes", cont.get("run_interval_minutes"))
-        if (
-            "run_interval_minutes" not in cont
-            and cont.get("interval_minutes") is not None
-        ):
-            cont["run_interval_minutes"] = cont.get("interval_minutes")
-        if "max_steps_per_tick" not in cont and cont.get("max_steps") is not None:
-            cont["max_steps_per_tick"] = cont.get("max_steps")
-        if "max_steps" not in cont and cont.get("max_steps_per_tick") is not None:
-            cont["max_steps"] = cont.get("max_steps_per_tick")
-        web_disc = cont.get("web_discovery", {}) or {}
-        web_disc.setdefault("enabled", False)
-        web_disc.setdefault("seed_queries", [])
-        web_disc.setdefault("max_urls_per_tick", 10)
-        web_disc.setdefault("max_total_urls", 200)
-        web_disc.setdefault("ttl_hours", 72)
-        web_disc.setdefault("max_queue", 500)
-        web_disc.setdefault("max_crawl_pages_per_tick", 2)
-        web_disc.setdefault("max_links_per_page", 50)
-        web_disc.setdefault("max_sitemap_urls", 200)
-        cont["web_discovery"] = web_disc
-        normalized["continuous"] = cont
+    if cont.get("run_interval_minutes") is not None:
+        warnings.warn(
+            "continuous.run_interval_minutes is deprecated; use continuous.interval_minutes",
+            DeprecationWarning,
+        )
+        cont.setdefault("interval_minutes", cont.get("run_interval_minutes"))
+    if (
+        "run_interval_minutes" not in cont
+        and cont.get("interval_minutes") is not None
+    ):
+        cont["run_interval_minutes"] = cont.get("interval_minutes")
+    if "max_steps_per_tick" not in cont and cont.get("max_steps") is not None:
+        cont["max_steps_per_tick"] = cont.get("max_steps")
+    if "max_steps" not in cont and cont.get("max_steps_per_tick") is not None:
+        cont["max_steps"] = cont.get("max_steps_per_tick")
+    web_disc = cont.get("web_discovery", {}) or {}
+    web_disc.setdefault("enabled", False)
+    web_disc.setdefault("seed_queries", [])
+    web_disc.setdefault("max_urls_per_tick", 10)
+    web_disc.setdefault("max_total_urls", 200)
+    web_disc.setdefault("ttl_hours", 72)
+    web_disc.setdefault("max_queue", 500)
+    web_disc.setdefault("max_crawl_pages_per_tick", 2)
+    web_disc.setdefault("max_links_per_page", 50)
+    web_disc.setdefault("max_sitemap_urls", 200)
+    cont["web_discovery"] = web_disc
+    local_sources = cont.get("local_sources", {}) or {}
+    local_sources.setdefault("enabled", False)
+    local_sources.setdefault("include_repo", False)
+    local_sources.setdefault("include_local_corpus", False)
+    local_sources.setdefault("include_lessons", False)
+    local_sources.setdefault("include_logs", True)
+    local_sources.setdefault("include_memory", True)
+    local_sources.setdefault(
+        "repo_paths",
+        ["README.md", "src", "tests", "scripts", "docs", "config"],
+    )
+    local_sources.setdefault("corpus_paths", ["data/corpora/programming"])
+    local_sources.setdefault("lesson_paths", ["data/local_lab/lessons"])
+    local_sources.setdefault(
+        "include_globs",
+        [
+            "*.py",
+            "*.pyi",
+            "*.md",
+            "*.txt",
+            "*.json",
+            "*.jsonl",
+            "*.yaml",
+            "*.yml",
+            "*.toml",
+            "*.ts",
+            "*.tsx",
+            "*.js",
+            "*.jsx",
+            "*.ps1",
+            "*.sh",
+        ],
+    )
+    local_sources.setdefault(
+        "exclude_globs",
+        [
+            "**/__pycache__/**",
+            "**/.git/**",
+            "**/.venv/**",
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/build/**",
+            "data/web_cache/**",
+            "data/logs/**",
+            "data/checkpoints/**",
+            "data/models/**",
+            "data/hf_offload/**",
+            "*.pt",
+            "*.bin",
+            "*.safetensors",
+            "*.gguf",
+        ],
+    )
+    cont["local_sources"] = local_sources
+    normalized["continuous"] = cont
 
     autopilot = normalized.get("autopilot", {}) or {}
     autopilot.setdefault("enabled", False)
@@ -371,6 +458,19 @@ def normalize_settings(settings: dict) -> dict:
     if lava:
         normalized["lava"] = lava
 
+    profile_contract = normalized.get("profile_contract", {}) or {}
+    profile_contract.setdefault("offline_required", False)
+    profile_contract.setdefault("require_web_disabled", False)
+    profile_contract.setdefault("require_ollama", False)
+    profile_contract.setdefault("require_external_engine", None)
+    profile_contract.setdefault("require_local_base_url", False)
+    profile_contract.setdefault("require_wsl_training", False)
+    profile_contract.setdefault("require_docker", False)
+    profile_contract.setdefault("disable_fallbacks", False)
+    profile_contract.setdefault("approved_training_sources_only", False)
+    profile_contract.setdefault("min_host_ram_free_mb", 0)
+    normalized["profile_contract"] = profile_contract
+
     return normalized
 
 
@@ -395,6 +495,17 @@ def resolve_web_strict(settings: dict) -> bool:
     if strict is None:
         return True
     return bool(strict)
+
+
+def _is_local_base_url(raw: object | None) -> bool:
+    if raw is None:
+        return False
+    try:
+        parsed = urlparse(str(raw).strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 def _get_nested(d: dict, keys: list[str], default: object = None) -> object:
@@ -485,6 +596,144 @@ def _apply_rtx4080_16gb_safe_clamps(settings: dict) -> dict:
     return settings
 
 
+def _validate_profile_contract(settings: dict, errors: list[str]) -> None:
+    contract = settings.get("profile_contract", {}) or {}
+    if not contract:
+        return
+
+    core = settings.get("core", {}) or {}
+    cont = settings.get("continuous", {}) or {}
+    autolearn = settings.get("autolearn", {}) or {}
+    tools_web = (settings.get("tools", {}) or {}).get("web", {}) or {}
+    docker_cfg = settings.get("docker", {}) or {}
+    allowlist = resolve_web_allowlist(settings)
+    strict = resolve_web_strict(settings)
+
+    backend = str(core.get("backend", "vortex")).strip().lower()
+    fallback_backend = core.get("backend_fallback")
+    hf_fallback = core.get("hf_fallback")
+    base_url = core.get("external_base_url") or core.get("external_url")
+    local_base_url_ok = _is_local_base_url(base_url)
+    configured_engine = str(
+        core.get("external_engine") or core.get("engine") or backend
+    ).strip().lower()
+
+    offline_required = bool(contract.get("offline_required", False))
+    require_web_disabled = bool(contract.get("require_web_disabled", False))
+    if offline_required or require_web_disabled:
+        if bool(tools_web.get("enabled", False)):
+            errors.append("profile_contract requires tools.web.enabled=false")
+        if bool(cont.get("ingest_web", False)):
+            errors.append("profile_contract requires continuous.ingest_web=false")
+        if bool(autolearn.get("web_ingest", False)):
+            errors.append("profile_contract requires autolearn.web_ingest=false")
+        if bool(autolearn.get("url_discovery", False)):
+            errors.append("profile_contract requires autolearn.url_discovery=false")
+        if not strict:
+            errors.append("profile_contract requires security.web.strict=true")
+        tools_allow_domains = tools_web.get("allow_domains")
+        if isinstance(tools_allow_domains, list) and any(str(item).strip() for item in tools_allow_domains):
+            errors.append("profile_contract requires tools.web.allow_domains=[]")
+        security_allowlist = ((settings.get("security", {}) or {}).get("web", {}) or {}).get(
+            "allowlist_domains"
+        )
+        if isinstance(security_allowlist, list) and any(
+            str(item).strip() for item in security_allowlist
+        ):
+            errors.append("profile_contract requires security.web.allowlist_domains=[]")
+        agent_allowlist = (settings.get("agent", {}) or {}).get("web_allowlist")
+        if isinstance(agent_allowlist, list) and any(str(item).strip() for item in agent_allowlist):
+            errors.append("profile_contract requires agent.web_allowlist=[]")
+        if allowlist:
+            errors.append("profile_contract requires empty web allowlist")
+    if offline_required:
+        if isinstance(fallback_backend, str):
+            fallback_disabled = fallback_backend.strip().lower() in {"", "none", "null"}
+        else:
+            fallback_disabled = fallback_backend is None
+        if not fallback_disabled:
+            errors.append("profile_contract requires core.backend_fallback=null")
+        if backend == "external" and not local_base_url_ok:
+            errors.append("profile_contract requires localhost external_base_url for external backend")
+
+    disable_fallbacks = bool(contract.get("disable_fallbacks", False))
+    if disable_fallbacks:
+        if isinstance(fallback_backend, str):
+            fallback_disabled = fallback_backend.strip().lower() in {"", "none", "null"}
+        else:
+            fallback_disabled = fallback_backend is None
+        if not fallback_disabled:
+            errors.append("profile_contract requires core.backend_fallback=null")
+        if isinstance(hf_fallback, str):
+            hf_fallback_disabled = hf_fallback.strip().lower() in {"", "none", "null"}
+        else:
+            hf_fallback_disabled = hf_fallback is None
+        if not hf_fallback_disabled:
+            errors.append("profile_contract requires core.hf_fallback=null")
+        if bool(core.get("allow_implicit_hf_fallback", True)):
+            errors.append("profile_contract requires core.allow_implicit_hf_fallback=false")
+
+    require_ollama = bool(contract.get("require_ollama", False))
+    required_engine = contract.get("require_external_engine")
+    require_local_base_url = bool(contract.get("require_local_base_url", False))
+    if require_ollama:
+        if backend != "external":
+            errors.append("profile_contract requires core.backend=external")
+        if configured_engine != "ollama":
+            errors.append("profile_contract requires core.external_engine=ollama")
+    if required_engine:
+        required_engine_s = str(required_engine).strip().lower()
+        if backend != "external":
+            errors.append("profile_contract requires core.backend=external")
+        if configured_engine != required_engine_s:
+            errors.append(
+                f"profile_contract requires core.external_engine={required_engine_s}"
+            )
+    if require_ollama or require_local_base_url:
+        if not local_base_url_ok:
+            errors.append("profile_contract requires a localhost external_base_url")
+
+    require_docker = bool(contract.get("require_docker", False))
+    if require_docker:
+        if not bool(docker_cfg.get("enabled", False)):
+            errors.append("profile_contract requires docker.enabled=true")
+        compose_path = docker_cfg.get("compose_path")
+        if not compose_path:
+            errors.append("profile_contract requires docker.compose_path")
+
+    require_wsl_training = bool(contract.get("require_wsl_training", False))
+    if require_wsl_training:
+        server_cfg = settings.get("server", {}) or {}
+        strategy = str(server_cfg.get("train_strategy", "") or "").strip().lower()
+        if strategy != "wsl_subprocess_unload":
+            errors.append("profile_contract requires server.train_strategy=wsl_subprocess_unload")
+        wsl_workdir = str(server_cfg.get("wsl_workdir", "") or "").strip()
+        if not wsl_workdir:
+            errors.append("profile_contract requires server.wsl_workdir")
+        elif not wsl_workdir.startswith("/mnt/"):
+            errors.append("profile_contract requires server.wsl_workdir under /mnt/")
+
+    approved_training_sources_only = bool(contract.get("approved_training_sources_only", False))
+    hf_train_cfg = settings.get("hf_train", {}) or {}
+    if approved_training_sources_only and bool(hf_train_cfg.get("enabled", False)):
+        local_sources = cont.get("local_sources", {}) or {}
+        if not bool(local_sources.get("enabled", False)):
+            errors.append("profile_contract requires continuous.local_sources.enabled=true")
+        if not bool(local_sources.get("include_repo", False)):
+            errors.append("profile_contract requires local_sources.include_repo=true")
+        if not bool(local_sources.get("include_local_corpus", False)):
+            errors.append("profile_contract requires local_sources.include_local_corpus=true")
+        if not bool(local_sources.get("include_lessons", False)):
+            errors.append("profile_contract requires local_sources.include_lessons=true")
+        if bool(local_sources.get("include_logs", True)):
+            errors.append("profile_contract requires local_sources.include_logs=false")
+        if bool(local_sources.get("include_memory", True)):
+            errors.append("profile_contract requires local_sources.include_memory=false")
+        extra_paths = hf_train_cfg.get("extra_training_paths", []) or []
+        if not isinstance(extra_paths, list) or not extra_paths:
+            errors.append("profile_contract requires hf_train.extra_training_paths")
+
+
 def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     missing: list[str] = []
     errors: list[str] = []
@@ -496,11 +745,13 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     decode = settings.get("decode", {}) or {}
     bad = settings.get("bad", {}) or {}
     cont = settings.get("continuous", {}) or {}
+    local_sources_cfg = cont.get("local_sources", {}) or {}
     tools_cfg = settings.get("tools", {}) or {}
     web_cfg = tools_cfg.get("web", {}) or {}
     self_patch_cfg = settings.get("self_patch", {}) or {}
     hf_train_cfg = settings.get("hf_train", {}) or {}
     adapters_cfg = settings.get("adapters", {}) or {}
+    server_cfg = settings.get("server", {}) or {}
 
     if not tok.get("vortex_tok_path"):
         missing.append("tokenizer.vortex_tok_path")
@@ -521,9 +772,9 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
             .strip()
             .lower()
         )
-        if backend == "external" and engine not in {"vllm", "sglang"}:
+        if backend == "external" and engine not in {"vllm", "sglang", "ollama", "lmstudio"}:
             errors.append(
-                "core.external_engine must be vllm or sglang when core.backend=external"
+                "core.external_engine must be vllm, sglang, ollama, or lmstudio when core.backend=external"
             )
         base_url = core.get("external_base_url") or core.get("external_url")
         if not base_url:
@@ -634,6 +885,16 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
                 errors.append("hf_train.grad_accum_steps must be > 0")
         except Exception:
             errors.append("hf_train.grad_accum_steps must be > 0")
+        try:
+            if int(hf_train_cfg.get("max_steps", 1)) <= 0:
+                errors.append("hf_train.max_steps must be > 0")
+        except Exception:
+            errors.append("hf_train.max_steps must be > 0")
+        try:
+            if float(hf_train_cfg.get("lr", 1e-6)) <= 0:
+                errors.append("hf_train.lr must be > 0")
+        except Exception:
+            errors.append("hf_train.lr must be > 0")
 
     if adapters_cfg and bool(adapters_cfg.get("enabled", False)):
         paths = adapters_cfg.get("paths", {}) or {}
@@ -661,17 +922,6 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         default = adapters_cfg.get("default") or router_cfg.get("default")
         if default and default not in paths:
             errors.append(f"adapters.default unknown: {default}")
-        try:
-            if int(hf_train_cfg.get("max_steps", 1)) <= 0:
-                errors.append("hf_train.max_steps must be > 0")
-        except Exception:
-            errors.append("hf_train.max_steps must be > 0")
-        try:
-            if float(hf_train_cfg.get("lr", 1e-6)) <= 0:
-                errors.append("hf_train.lr must be > 0")
-        except Exception:
-            errors.append("hf_train.lr must be > 0")
-
     top_p = float(decode.get("top_p", bad.get("top_p", 1.0)))
     if not (0.0 < top_p <= 1.0):
         errors.append("decode.top_p must be in (0, 1]")
@@ -700,6 +950,22 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
     batch_tokens = cont.get("batch_tokens")
     if batch_tokens is not None and int(batch_tokens) <= 0:
         errors.append("continuous.batch_tokens must be > 0")
+    train_host_ram_threshold_mb = server_cfg.get("train_host_ram_threshold_mb")
+    if (
+        train_host_ram_threshold_mb is not None
+        and int(train_host_ram_threshold_mb) < 0
+    ):
+        errors.append("server.train_host_ram_threshold_mb must be >= 0")
+
+    if bool(local_sources_cfg.get("enabled", False)):
+        for key in ("repo_paths", "corpus_paths", "lesson_paths"):
+            raw_paths = local_sources_cfg.get(key, [])
+            if not isinstance(raw_paths, list):
+                errors.append(f"continuous.local_sources.{key} must be a list")
+        for key in ("include_globs", "exclude_globs"):
+            raw_globs = local_sources_cfg.get(key, [])
+            if not isinstance(raw_globs, list):
+                errors.append(f"continuous.local_sources.{key} must be a list")
 
     tools = settings.get("tools", {}) or {}
     web = tools.get("web", {}) or {}
@@ -738,6 +1004,20 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         if not os.access(path.parent, os.W_OK):
             errors.append(f"{label} parent not writable")
 
+    def _check_writable_path(path_value: str | Path | None, label: str) -> None:
+        if not path_value:
+            return
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            errors.append(f"{label} parent not writable: {exc}")
+            return
+        if not os.access(path.parent, os.W_OK):
+            errors.append(f"{label} parent not writable")
+
     _check_data_path(cont.get("knowledge_path"), "continuous.knowledge_path")
     _check_data_path(cont.get("replay", {}).get("path"), "continuous.replay.path")
     _check_data_path(
@@ -759,6 +1039,53 @@ def validate_profile(settings: dict, base_dir: Path | None = None) -> None:
         _check_data_path(learning.get("evals_path"), "learning.evals_path")
     if learning.get("canary_path"):
         _check_data_path(learning.get("canary_path"), "learning.canary_path")
+    local_lab = settings.get("local_lab", {}) or {}
+    if local_lab.get("progress_path"):
+        _check_writable_path(local_lab.get("progress_path"), "local_lab.progress_path")
+    if local_lab.get("lessons_path"):
+        _check_writable_path(local_lab.get("lessons_path"), "local_lab.lessons_path")
+    if local_lab.get("workspaces_path"):
+        _check_writable_path(local_lab.get("workspaces_path"), "local_lab.workspaces_path")
+    if local_lab.get("sandbox_root"):
+        _check_data_path(local_lab.get("sandbox_root"), "local_lab.sandbox_root")
+    instructions_cfg = settings.get("instructions", {}) or {}
+    def _check_existing_text_path(path_value: str | Path | None, label: str) -> None:
+        if not path_value:
+            return
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        if not path.exists():
+            errors.append(f"{label} missing")
+            return
+        if not path.is_file():
+            errors.append(f"{label} must be a file")
+    _check_existing_text_path(
+        instructions_cfg.get("vortex_system_path"), "instructions.vortex_system_path"
+    )
+    _check_existing_text_path(
+        instructions_cfg.get("domain_policy_path"), "instructions.domain_policy_path"
+    )
+    _check_existing_text_path(
+        instructions_cfg.get("operator_notes_path"), "instructions.operator_notes_path"
+    )
+    docker_cfg = settings.get("docker", {}) or {}
+    if docker_cfg.get("compose_path"):
+        compose_path = Path(docker_cfg.get("compose_path"))
+        if not compose_path.is_absolute():
+            compose_path = (base_dir / compose_path).resolve()
+        if bool(docker_cfg.get("enabled", False)) and not compose_path.exists():
+            errors.append("docker.compose_path missing")
+    if hf_train_cfg.get("registry_dir"):
+        _check_data_path(hf_train_cfg.get("registry_dir"), "hf_train.registry_dir")
+    if hf_train_cfg.get("dataset_path"):
+        _check_data_path(hf_train_cfg.get("dataset_path"), "hf_train.dataset_path")
+    if hf_train_cfg.get("state_path"):
+        _check_data_path(hf_train_cfg.get("state_path"), "hf_train.state_path")
+    for idx, extra_path in enumerate(hf_train_cfg.get("extra_training_paths", []) or []):
+        _check_writable_path(extra_path, f"hf_train.extra_training_paths[{idx}]")
+
+    _validate_profile_contract(settings, errors)
 
     if missing or errors:
         message = []

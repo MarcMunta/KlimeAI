@@ -10,16 +10,30 @@ interface ChatInputProps {
   isLoading: boolean;
   isDarkMode: boolean;
   language: Language;
+  canUseInternet?: boolean;
+  allowAutoTrain?: boolean;
+  sendDisabledReason?: string;
   isThinking?: boolean;
   onStop?: () => void;
   onInteraction?: () => void;
 }
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, language, isThinking, onStop, onInteraction }) => {
+const ChatInput: React.FC<ChatInputProps> = ({
+  onSend,
+  isLoading,
+  isDarkMode,
+  language,
+  canUseInternet = true,
+  allowAutoTrain = true,
+  sendDisabledReason,
+  isThinking,
+  onStop,
+  onInteraction,
+}) => {
   const [input, setInput] = useState('');
   const [isInternetEnabled, setIsInternetEnabled] = useState(false);
   const [useThinking, setUseThinking] = useState(true);
-  const [autoTrainEnabled, setAutoTrainEnabled] = useState(true);
+  const [autoTrainEnabled, setAutoTrainEnabled] = useState(false);
   const [mode, setMode] = useState<AppMode>('ask');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -40,8 +54,16 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
     adjustHeight();
   }, [input, adjustHeight]);
 
+  useEffect(() => {
+    if (!canUseInternet) setIsInternetEnabled(false);
+  }, [canUseInternet]);
+
+  useEffect(() => {
+    if (!allowAutoTrain) setAutoTrainEnabled(false);
+  }, [allowAutoTrain]);
+
   const handleSend = () => {
-    if (input.trim() && !isLoading) {
+    if (input.trim() && !isLoading && !sendDisabledReason) {
       onInteraction?.();
       onSend(input.trim(), isInternetEnabled, mode, useThinking, autoTrainEnabled);
       setInput('');
@@ -137,27 +159,41 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
           </div>
 
           <button
-            onClick={() => { setIsInternetEnabled(!isInternetEnabled); onInteraction?.(); }}
+            onClick={() => {
+              if (!canUseInternet) return;
+              setIsInternetEnabled(!isInternetEnabled);
+              onInteraction?.();
+            }}
             aria-label={isInternetEnabled ? (language === 'es' ? 'Desactivar Internet' : 'Disable internet') : (language === 'es' ? 'Activar Internet' : 'Enable internet')}
             title={isInternetEnabled ? (language === 'es' ? 'Internet activado' : 'Internet enabled') : (language === 'es' ? 'Internet desactivado' : 'Internet disabled')}
             className={`p-2.5 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
-              isInternetEnabled 
+              !canUseInternet
+                ? 'text-muted-foreground/20 dark:text-zinc-700 cursor-not-allowed'
+                : isInternetEnabled 
                 ? 'bg-primary/15 text-primary border-primary/20 shadow-inner' 
                 : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted dark:hover:bg-zinc-800 hover:text-foreground'
             }`}
+            disabled={!canUseInternet}
           >
             <Globe size={18} className={isInternetEnabled ? 'animate-pulse' : ''} />
           </button>
 
           <button
-            onClick={() => { setAutoTrainEnabled(!autoTrainEnabled); onInteraction?.(); }}
+            onClick={() => {
+              if (!allowAutoTrain) return;
+              setAutoTrainEnabled(!autoTrainEnabled);
+              onInteraction?.();
+            }}
             aria-label={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activo' : 'Auto-training active') : (language === 'es' ? 'Auto-entrenamiento inactivo' : 'Auto-training inactive')}
             title={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activado' : 'Auto-training enabled') : (language === 'es' ? 'Auto-entrenamiento desactivado' : 'Auto-training disabled')}
             className={`p-2.5 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
-              autoTrainEnabled
+              !allowAutoTrain
+                ? 'text-muted-foreground/20 dark:text-zinc-700 cursor-not-allowed'
+                : autoTrainEnabled
                 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20 shadow-inner'
                 : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted dark:hover:bg-zinc-800 hover:text-foreground'
             }`}
+            disabled={!allowAutoTrain}
           >
             <FlaskConical size={18} className={autoTrainEnabled ? 'animate-pulse' : ''} />
           </button>
@@ -174,11 +210,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, isDarkMode, la
           ) : (
             <button
               onClick={handleSend}
-              disabled={!input.trim()}
+              disabled={!input.trim() || Boolean(sendDisabledReason)}
               aria-label={language === 'es' ? 'Enviar mensaje' : 'Send message'}
-              title={language === 'es' ? 'Enviar mensaje' : 'Send message'}
+              title={sendDisabledReason || (language === 'es' ? 'Enviar mensaje' : 'Send message')}
               className={`w-11 h-11 rounded-full transition-all duration-300 shadow-xl flex items-center justify-center group/send ${
-                input.trim()
+                input.trim() && !sendDisabledReason
                   ? mode === 'agent' 
                     ? 'bg-purple-600 text-white hover:scale-110 active:scale-90 shadow-purple-500/20'
                     : 'bg-primary text-white hover:scale-110 active:scale-90 shadow-primary/20'

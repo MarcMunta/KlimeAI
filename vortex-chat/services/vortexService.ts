@@ -1,4 +1,4 @@
-import { AppMode, GroundingSupport, Message, Role, Source } from "../types";
+import { AppMode, GroundingSupport, Message, OperationalStatus, Role, Source } from "../types";
 
 type StreamChunk = {
   text: string;
@@ -8,6 +8,17 @@ type StreamChunk = {
   fileChanges?: { path: string; diff: string }[];
   requestId?: string;
   done: boolean;
+};
+
+const repairMojibakeText = (value: string): string => {
+  if (!/[ÃÂ]/.test(value)) return value;
+  try {
+    const bytes = Uint8Array.from(Array.from(value), (char) => char.charCodeAt(0) & 0xff);
+    const decoded = new TextDecoder("utf-8").decode(bytes);
+    return decoded.includes("\uFFFD") ? value : decoded;
+  } catch {
+    return value;
+  }
 };
 
 const extractDomain = (rawUrl: string): string => {
@@ -66,7 +77,19 @@ const extractFileChanges = (content: string): { path: string; diff: string }[] =
 };
 
 const buildMessages = (history: Message[], prompt: string, mode: AppMode, useThinking: boolean, language: "es" | "en" = "es") => {
+  void mode;
+  void useThinking;
+  void language;
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+  for (const msg of history) {
+    const content = (msg.content ?? "").trim();
+    if (!content) continue;
+    if (msg.role === Role.USER) messages.push({ role: "user", content });
+    else messages.push({ role: "assistant", content });
+  }
+
+  messages.push({ role: "user", content: prompt });
+  return messages;
 
   // Keep the system prompt VERY short — small models echo long instructions
   const lang = language === "es" ? "Responde en español." : "Reply in English.";
@@ -238,8 +261,8 @@ const extractReasoning = (raw: string, isStreaming: boolean = false): { cleanTex
   // 5. Always clean leaked system/context content — even during streaming
   cleanText = cleanLeakedSystemContent(cleanText);
 
-  const thought = summarizeReasoning(parts.join("\n\n"));
-  return { cleanText, thought };
+  const thought = repairMojibakeText(summarizeReasoning(parts.join("\n\n")));
+  return { cleanText: repairMojibakeText(cleanText), thought };
 };
 
 const parseSseLines = (rawEvent: string): string[] => {
@@ -253,6 +276,18 @@ const parseSseLines = (rawEvent: string): string[] => {
 
 export class VortexService {
   private model: string = "auto";
+
+  async fetchOperationalStatus(): Promise<OperationalStatus | null> {
+    try {
+      const resp = await fetch("/v1/status");
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      if (!data || typeof data !== "object") return null;
+      return data as OperationalStatus;
+    } catch {
+      return null;
+    }
+  }
 
   async *generateResponseStream(
     history: Message[],
@@ -498,4 +533,3 @@ export class VortexService {
 }
 
 export const vortexService = new VortexService();
-

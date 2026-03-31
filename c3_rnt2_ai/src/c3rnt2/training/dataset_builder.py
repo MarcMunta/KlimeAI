@@ -243,6 +243,41 @@ def _chat_examples(
     return samples
 
 
+def _extra_jsonl_examples(paths: Iterable[Path]) -> List[Sample]:
+    samples: List[Sample] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        for payload in _iter_jsonl(path):
+            response = str(payload.get("response", "") or "").strip()
+            if not response:
+                continue
+            messages = payload.get("messages")
+            if not isinstance(messages, list):
+                prompt = str(payload.get("prompt", "") or "").strip()
+                messages = [{"role": "user", "content": prompt}] if prompt else []
+            source_kind = str(payload.get("source_kind", "chat_feedback")).strip() or "chat_feedback"
+            quality = payload.get("quality")
+            ts = payload.get("ts")
+            source_ref = payload.get("source_ref")
+            sample = Sample(
+                prompt="",
+                response=response,
+                source_kind=source_kind,
+                messages=messages,
+                quality=float(quality) if quality is not None else None,
+                ts=float(ts) if ts is not None else None,
+                source_ref=str(source_ref) if source_ref is not None else str(path),
+            )
+            digest = _hash_sample(sample)
+            if digest in seen:
+                continue
+            seen.add(digest)
+            samples.append(sample)
+    return samples
+
+
 def build_sft_dataset(
     *,
     chunks: Iterable[KnowledgeChunk],
@@ -253,6 +288,7 @@ def build_sft_dataset(
     chat_path: Path | None = None,
     feedback_path: Path | None = None,
     training_path: Path | None = None,
+    extra_training_paths: list[Path] | None = None,
     include_soft_feedback: bool = True,
     min_chars: int = 40,
     max_repeat_ratio: float = 0.8,
@@ -263,6 +299,7 @@ def build_sft_dataset(
         _doc_examples(chunks, system_prompt)
         + _episode_examples(episodes_path, system_prompt, queue_dir=queue_dir)
         + _chat_examples(chat_path, feedback_path, training_path, include_soft_feedback=include_soft_feedback)
+        + _extra_jsonl_examples(extra_training_paths or [])
     )
     seen_hashes: set[str] = set()
     seen_vecs: List[List[float]] = []

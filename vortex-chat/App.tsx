@@ -10,9 +10,10 @@ import ReasoningDrawer from './components/ReasoningDrawer';
 import AnalysisView from './components/AnalysisView';
 import TerminalView from './components/TerminalView';
 import SelfEditsView from './components/SelfEditsView';
+import LocalStackStatus from './components/LocalStackStatus';
 import VirtualizedMessageList from './components/VirtualizedMessageList';
 import ModificationExplorerModal from './components/ModificationExplorerModal';
-import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language } from './types';
+import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language, OperationalStatus } from './types';
 import { vortexService } from './services/vortexService';
 import { translations } from './translations';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'framer-motion';
@@ -26,9 +27,50 @@ const DEFAULT_SETTINGS: UserSettings = {
 
 const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'edits': 2, 'terminal': 3 };
 
+const repairMojibakeText = (value: string | null | undefined): string => {
+  if (!value || !/[ÃÂ]/.test(value)) return value ?? '';
+  try {
+    const bytes = Uint8Array.from(Array.from(value), (char) => char.charCodeAt(0) & 0xff);
+    const decoded = new TextDecoder('utf-8').decode(bytes);
+    return decoded.includes('\uFFFD') ? value : decoded;
+  } catch {
+    return value;
+  }
+};
+
+const normalizeSession = (rawSession: unknown): ChatSession | null => {
+  if (!rawSession || typeof rawSession !== 'object' || !Array.isArray((rawSession as ChatSession).messages)) {
+    return null;
+  }
+
+  const session = rawSession as ChatSession;
+  return {
+    ...session,
+    title: repairMojibakeText(session.title),
+    messages: session.messages.map((message) => ({
+      ...message,
+      content: repairMojibakeText(message.content),
+      thought: typeof message.thought === 'string' ? repairMojibakeText(message.thought) : message.thought,
+    })),
+  };
+};
+
+const normalizeSettings = (rawSettings: unknown): UserSettings => {
+  if (!rawSettings || typeof rawSettings !== 'object') return DEFAULT_SETTINGS;
+
+  const candidate = rawSettings as Partial<UserSettings>;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...candidate,
+    categoryOrder: Array.isArray(candidate.categoryOrder)
+      ? candidate.categoryOrder.map((entry) => repairMojibakeText(String(entry)))
+      : DEFAULT_SETTINGS.categoryOrder,
+  };
+};
+
 const createEmptySession = (language: Language): ChatSession => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-  title: language === 'es' ? 'Nueva Conversacion' : 'New Conversation',
+  title: language === 'es' ? 'Nueva Conversación' : 'New Conversation',
   messages: [],
   updatedAt: Date.now(),
 });
@@ -56,6 +98,7 @@ const App: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState(getInitialDarkMode());
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [mode, setMode] = useState<AppMode>('ask');
+  const [operationalStatus, setOperationalStatus] = useState<OperationalStatus | null>(null);
   
   const [headerVisible, setHeaderVisible] = useState(false);
   const [footerVisible, setFooterVisible] = useState(false);
@@ -75,6 +118,14 @@ const App: React.FC = () => {
   const t = translations[settings.language];
   const currentSession = sessions.find(s => s.id === currentSessionId);
   const hasMessages = currentSession && currentSession.messages && currentSession.messages.length > 0;
+  const sendDisabledReason = operationalStatus?.ok
+    ? undefined
+    : operationalStatus?.degraded_reason
+      || operationalStatus?.engine_reason
+      || operationalStatus?.model_reason
+      || operationalStatus?.docker_reason
+      || operationalStatus?.offline_reason
+      || (settings.language === 'es' ? 'Stack local no listo.' : 'Local stack not ready.');
 
   const addLog = useCallback((level: LogEntry['level'], message: string) => {
     const newLog: LogEntry = { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), level, message };
@@ -149,6 +200,22 @@ const App: React.FC = () => {
   }, [isLoading, isSearching, activeView, hasMessages, activeModificationFiles]);
 
   useEffect(() => { resetInactivityTimer(); return () => { if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current); }; }, [resetInactivityTimer]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const pollStatus = async () => {
+      const status = await vortexService.fetchOperationalStatus();
+      if (!disposed) setOperationalStatus(status);
+    };
+
+    pollStatus();
+    const timer = window.setInterval(pollStatus, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // --- Poll backend /v1/status for REAL kernel activity ---
   useEffect(() => {
@@ -372,15 +439,15 @@ const App: React.FC = () => {
       try {
         const parsedSessions = JSON.parse(savedSessions);
         const normalizedSessions = Array.isArray(parsedSessions)
-          ? parsedSessions.filter((session, index, all) => {
-              if (!session || typeof session !== 'object' || !Array.isArray(session.messages)) return false;
+          ? parsedSessions
+              .map((session) => normalizeSession(session))
+              .filter((session): session is ChatSession => session !== null)
+              .filter((session, index, all) => {
               const isEmptyDraft = session.messages.length === 0;
               if (!isEmptyDraft) return true;
               return all.findIndex(candidate =>
                 candidate
-                && typeof candidate === 'object'
                 && candidate.title === session.title
-                && Array.isArray(candidate.messages)
                 && candidate.messages.length === 0
               ) === index;
             })
@@ -395,7 +462,13 @@ const App: React.FC = () => {
         handleNewChat();
       }
     } else handleNewChat();
-    if (savedSettings) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(savedSettings) });
+    if (savedSettings) {
+      try {
+        setSettings(normalizeSettings(JSON.parse(savedSettings)));
+      } catch {
+        setSettings(DEFAULT_SETTINGS);
+      }
+    }
   }, []);
 
   useEffect(() => { document.documentElement.classList.toggle('dark', isDarkMode); localStorage.setItem('dark-mode', String(isDarkMode)); }, [isDarkMode]);
@@ -555,6 +628,10 @@ const VORTEX_CONFIG = {
   }, [currentSessionId, addLog, settings.language, t]);
 
   const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true, autoTrain: boolean = true) => {
+    if (sendDisabledReason) {
+      addLog('SYSTEM', sendDisabledReason);
+      return;
+    }
     let targetSessionId = currentSessionId;
     let targetSession = sessions.find(session => session.id === targetSessionId);
     if (!targetSession) {
@@ -581,7 +658,8 @@ const VORTEX_CONFIG = {
     if (currentMessages.length === 0) {
       vortexService.generateChatTitle(content, settings.language).then(result => {
         if (result.ok && result.title) {
-          setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, title: result.title! } : s));
+          const normalizedTitle = repairMojibakeText(result.title);
+          setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, title: normalizedTitle } : s));
         }
       }).catch(() => {});
     }
@@ -705,7 +783,20 @@ const VORTEX_CONFIG = {
 
           {!activeModificationFiles && activeView === 'chat' && (
             <motion.div initial={false} animate={{ y: footerVisible ? 0 : 200, opacity: footerVisible ? 1 : 0 }} transition={{ type: 'spring', damping: 30, stiffness: 200 }} className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-8 z-30 pointer-events-auto accelerated ${mode === 'agent' ? 'from-primary/5' : ''}`}>
-              <div className="pointer-events-auto"><ChatInput onSend={handleSendMessage} isLoading={isLoading} isDarkMode={isDarkMode} onStop={() => { abortControllerRef.current = true; }} language={settings.language} onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }} /></div>
+              <div className="pointer-events-auto">
+                <LocalStackStatus status={operationalStatus} language={settings.language} />
+                <ChatInput
+                  onSend={handleSendMessage}
+                  isLoading={isLoading}
+                  isDarkMode={isDarkMode}
+                  canUseInternet={false}
+                  allowAutoTrain={false}
+                  sendDisabledReason={sendDisabledReason}
+                  onStop={() => { abortControllerRef.current = true; }}
+                  language={settings.language}
+                  onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }}
+                />
+              </div>
             </motion.div>
           )}
         </main>

@@ -8,11 +8,23 @@ from types import SimpleNamespace
 import pytest
 
 from c3rnt2 import __main__ as main_mod
+from c3rnt2 import prepare as prepare_mod
 from c3rnt2.prepare import prepare_model_state
 
 
 def test_prepare_model_cmd_writes_state_json(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        main_mod,
+        "_load_and_validate",
+        lambda _profile, override=None: {
+            "_profile": "rtx4080_16gb_120b_like",
+            "core": {"backend": "hf", "hf_model": "Qwen/Qwen2.5-7B-Instruct", "hf_device": "cpu"},
+            "experts": {"enabled": False},
+            "adapters": {"enabled": False},
+            "bench_thresholds": {"required_ctx": 4096},
+        },
+    )
     args = SimpleNamespace(profile="rtx4080_16gb_120b_like")
     main_mod.cmd_prepare_model(args)
 
@@ -62,3 +74,89 @@ def test_prepare_model_cmd_exits_nonzero_when_invalid(tmp_path: Path, monkeypatc
         main_mod.cmd_prepare_model(SimpleNamespace(profile="rtx4080_16gb_120b_like"))
     assert int(exc.value.code) == 1
 
+
+def test_prepare_model_state_reports_programming_local_readiness(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        prepare_mod,
+        "_http_json",
+        lambda url, timeout_s=2.0: {
+            "data": [{"id": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"}]
+        },
+    )
+    monkeypatch.setattr(
+        prepare_mod,
+        "_docker_ready_status",
+        lambda settings, base_dir=None: (True, "docker_ready", {}),
+    )
+    settings = {
+        "_profile": "rtx4080_16gb_programming_local",
+        "core": {
+            "backend": "external",
+            "external_engine": "sglang",
+            "external_base_url": "http://127.0.0.1:30000",
+            "external_model": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+        },
+        "docker": {"enabled": True},
+        "tools": {"web": {"enabled": False, "allow_domains": []}},
+        "security": {"web": {"strict": True, "allowlist_domains": []}},
+        "continuous": {"ingest_web": False, "local_sources": {"enabled": True}},
+        "autolearn": {"web_ingest": False, "url_discovery": False},
+        "hf_train": {"enabled": False},
+        "profile_contract": {
+            "offline_required": True,
+            "require_web_disabled": True,
+            "require_external_engine": "sglang",
+            "require_docker": True,
+            "require_local_base_url": True,
+            "disable_fallbacks": True,
+        },
+    }
+    out = prepare_model_state(settings, base_dir=tmp_path)
+    assert out["ok"] is True
+    assert out["offline_ready"] is True
+    assert out["engine_ready"] is True
+    assert out["engine_kind"] == "sglang"
+    assert out["docker_ready"] is True
+    assert out["active_model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+    assert out["web_disabled"] is True
+    assert "training_ready" in out
+
+
+def test_prepare_model_state_fails_when_sglang_model_missing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        prepare_mod,
+        "_http_json",
+        lambda url, timeout_s=2.0: {"data": [{"id": "other-model"}]},
+    )
+    monkeypatch.setattr(
+        prepare_mod,
+        "_docker_ready_status",
+        lambda settings, base_dir=None: (True, "docker_ready", {}),
+    )
+    settings = {
+        "_profile": "rtx4080_16gb_programming_local",
+        "core": {
+            "backend": "external",
+            "external_engine": "sglang",
+            "external_base_url": "http://127.0.0.1:30000",
+            "external_model": "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+        },
+        "docker": {"enabled": True},
+        "tools": {"web": {"enabled": False, "allow_domains": []}},
+        "security": {"web": {"strict": True, "allowlist_domains": []}},
+        "continuous": {"ingest_web": False},
+        "autolearn": {"web_ingest": False, "url_discovery": False},
+        "profile_contract": {
+            "offline_required": True,
+            "require_web_disabled": True,
+            "require_external_engine": "sglang",
+            "require_docker": True,
+            "require_local_base_url": True,
+            "disable_fallbacks": True,
+        },
+    }
+    out = prepare_model_state(settings, base_dir=tmp_path)
+    assert out["ok"] is False
+    assert out["engine_ready"] is False
+    assert out["model_ready"] is False
+    assert out["model_reason"] == "sglang_model_missing"

@@ -1,6 +1,12 @@
-# Windows self-train HF via WSL2 (sin doble carga / OOM)
+# Windows self-train HF via WSL2 (modo legado / compatibilidad)
 
-Este repo soporta entrenar LoRA/QLoRA (HF/PEFT) desde Windows usando **WSL2** para evitar picos de VRAM y problemas de compatibilidad (p.ej. `bitsandbytes`).
+Este repo sigue soportando entrenar LoRA/QLoRA (HF/PEFT) desde Windows usando **WSL2** para evitar picos de VRAM y problemas de compatibilidad.
+
+Ruta principal actual:
+- serving diario: `docker compose up -d sglang-runtime vortex-api`
+- training principal: `rtx4080_16gb_programming_train_docker`
+
+Usa este documento solo si necesitas mantener el flujo legado `rtx4080_16gb_programming_train_wsl`.
 
 ## Requisitos
 
@@ -39,11 +45,18 @@ Nota: si tu entrenamiento usa CUDA en WSL, asegúrate de tener WSL GPU habilitad
 
 ## 3) Configurar el perfil (settings.yaml)
 
-El perfil `rtx4080_16gb_120b_like` ya viene con:
+El perfil recomendado para training local de programacion es `rtx4080_16gb_programming_train_wsl`.
+
+Tambien puedes reutilizar `rtx4080_16gb_120b_like`, pero la ruta soportada para entrenamiento local de programacion ya viene con:
 
 - `server.train_strategy: wsl_subprocess_unload`
 - `server.wsl_python: python`
-- `server.wsl_workdir: null` (recomendado configurarlo)
+- `server.wsl_workdir: "/mnt/d/Vortex/c3_rnt2_ai"`
+- `hf_train.model_name: "Qwen/Qwen2.5-Coder-7B-Instruct"`
+- `hf_train.max_seq_len: 2048`
+- `hf_train.micro_batch_size: 1`
+- `hf_train.grad_accum_steps: 8`
+- `hf_train.max_steps: 25`
 
 Para que el subprocess en WSL ejecute el repo correcto, configura `server.wsl_workdir` a la ruta WSL del repo:
 
@@ -56,8 +69,8 @@ server:
 
 ```powershell
 cd c3_rnt2_ai
-python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_120b_like
-python -m c3rnt2 bench --mock --profile rtx4080_16gb_120b_like --max-new-tokens 16
+python -m c3rnt2 doctor --deep --mock --profile rtx4080_16gb_programming_train_wsl
+python -m c3rnt2 train-once --profile rtx4080_16gb_programming_train_wsl
 ```
 
 ## 5) Serve + self-train (Windows -> WSL)
@@ -66,7 +79,7 @@ Desde Windows, el loop de self-train descargará/unload el modelo de inferencia 
 
 ```powershell
 cd c3_rnt2_ai
-python -m c3rnt2 serve-self-train --profile rtx4080_16gb_120b_like --host 0.0.0.0 --port 8000
+python -m c3rnt2 serve-self-train --profile rtx4080_16gb_programming_train_wsl --host 0.0.0.0 --port 8000
 ```
 
 Si WSL no está disponible, `doctor --deep` y el entrenamiento fallan **fail-closed** con un error claro.
@@ -90,4 +103,3 @@ Para promover un experto HF desde quarantine a registry, el perfil `rtx4080_16gb
 La función `c3rnt2.continuous.promotion.promote_hf_expert()` aplica `bench_thresholds` y escribe el motivo en:
 
 - `data/logs/promotions.jsonl`
-

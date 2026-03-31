@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
+import psutil
 import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
@@ -15,6 +17,7 @@ from ..continuous.types import Sample
 from ..continuous.formatting import format_chat_sample
 from ..continuous.anchors import load_anchors, write_default_anchors
 from .dataset_builder import build_sft_dataset
+from ..instructions import load_instruction_bundle
 from ..utils.oom import is_oom_error, clear_cuda_cache
 from ..promotion.gating import bench_gate, log_promotion_decision, resolve_bench_thresholds
 
@@ -235,6 +238,37 @@ def _resolve_dataset_path(base_dir: Path, settings: dict) -> Path:
     if not path.is_absolute():
         path = base_dir / path
     return path
+
+
+def _resolve_extra_training_paths(base_dir: Path, settings: dict) -> list[Path]:
+    cfg = settings.get("hf_train", {}) or {}
+    resolved: list[Path] = []
+    for raw in cfg.get("extra_training_paths", []) or []:
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = base_dir / path
+        resolved.append(path.resolve())
+    return resolved
+
+
+def _hash_paths(paths: list[Path]) -> str | None:
+    hasher = hashlib.sha256()
+    seen = False
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        seen = True
+        hasher.update(str(path.resolve()).encode("utf-8"))
+        hasher.update(b"\0")
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+    if not seen:
+        return None
+    return hasher.hexdigest()
 
 
 def _save_dataset(path: Path, samples: List[Sample]) -> None:
@@ -521,6 +555,11 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     reg_dir = _resolve_registry_dir(base_dir, settings)
     state_path = _resolve_state_path(base_dir, settings)
     dataset_path = _resolve_dataset_path(base_dir, settings)
+    extra_training_paths = [
+        path
+        for path in _resolve_extra_training_paths(base_dir, settings)
+        if path != dataset_path.resolve()
+    ]
     state = _load_state(state_path)
     last_ts = float(state.get("last_ts", 0.0))
 
@@ -551,7 +590,13 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
     if reuse_dataset and dataset_path.exists():
         samples = _load_dataset(dataset_path)
     else:
-        system_prompt = cfg.get("default_system") or settings.get("core", {}).get("hf_system_prompt") or "You are Vortex, a helpful coding assistant."
+        instruction_bundle = load_instruction_bundle(settings, base_dir=base_dir)
+        system_prompt = (
+            cfg.get("default_system")
+            or instruction_bundle.get("text")
+            or settings.get("core", {}).get("hf_system_prompt")
+            or "You are Vortex, a helpful coding assistant."
+        )
         queue_dir = Path(settings.get("self_patch", {}).get("queue_dir", "data/self_patch/queue"))
         if not queue_dir.is_absolute():
             queue_dir = base_dir / queue_dir
@@ -564,6 +609,7 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
             chat_path=chat_path,
             feedback_path=feedback_path,
             training_path=training_path,
+            extra_training_paths=extra_training_paths,
             include_soft_feedback=bool(cfg.get("include_soft_feedback", True)),
             min_chars=int(cfg.get("min_chars", 40)),
             max_repeat_ratio=float(cfg.get("max_repeat_ratio", 0.8)),
@@ -574,6 +620,9 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
 
     if not samples:
         return HfTrainResult(ok=False, ok_train=False, ok_eval=False, run_id="", adapter_dir=None, loss=None, steps=0, samples=0, tokens_per_sec=None, vram_peak_mb=None, error="empty_dataset")
+
+    instruction_bundle = load_instruction_bundle(settings, base_dir=base_dir)
+    dataset_hash = _hash_paths([dataset_path, *extra_training_paths])
 
     run_id = f"expert_{time.strftime('%Y%m%d_%H%M%S')}"
     adapter_dir = reg_dir / run_id / "adapter"
@@ -663,7 +712,11 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         except Exception:
             pass
 
-    default_system = cfg.get("default_system") or settings.get("core", {}).get("hf_system_prompt")
+    default_system = (
+        cfg.get("default_system")
+        or instruction_bundle.get("text")
+        or settings.get("core", {}).get("hf_system_prompt")
+    )
     use_weighted = bool(cfg.get("use_weighted_sampling", False))
     weights = _compute_sample_weights(samples, settings) if use_weighted else []
     if use_weighted:
@@ -719,13 +772,30 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
         raise
 
     model.save_pretrained(adapter_dir)
+    host_ram_available_mb = None
+    try:
+        host_ram_available_mb = float(psutil.virtual_memory().available / (1024**2))
+    except Exception:
+        host_ram_available_mb = None
     meta = {
+        "profile": settings.get("_profile"),
+        "base_model": model_name,
         "run_id": run_id,
         "loss": avg_loss,
         "steps": steps,
         "samples": len(samples),
         "tokens_per_sec": tokens_per_sec,
         "vram_peak_mb": vram_peak,
+        "dataset_path": str(dataset_path),
+        "dataset_hash": dataset_hash,
+        "extra_training_paths": [str(path) for path in extra_training_paths],
+        "instruction_digest": instruction_bundle.get("digest"),
+        "instruction_sources": instruction_bundle.get("sources") or [],
+        "micro_batch_size": micro_batch,
+        "grad_accum_steps": grad_accum,
+        "effective_batch_size": int(micro_batch) * int(grad_accum),
+        "max_seq_len": int(cfg.get("max_seq_len", 1024)),
+        "host_ram_available_mb": host_ram_available_mb,
         "ts": time.time(),
     }
     (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
@@ -794,7 +864,9 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
             bench_ok = None
             bench_reason = "bench_failed"
 
-    promote_ok = bool(eval_ok) and (not require_bench_ok or bench_ok is True)
+    gate_ok = bool(eval_ok) and (not require_bench_ok or bench_ok is True)
+    manual_promotion_only = bool(cfg.get("manual_promotion_only", False))
+    promote_ok = bool(gate_ok and not manual_promotion_only)
     post_error = None
     try:
         eval_meta = {
@@ -827,8 +899,15 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 "bench_vram_peak_mb": bench_vram_peak_mb,
                 "baseline_tokens_per_sec": baseline_tps,
                 "regression": bench_regression,
+                "gate_ok": gate_ok,
                 "promote_ok": promote_ok,
+                "manual_promotion_only": manual_promotion_only,
                 "eval": eval_meta,
+                "bench_decision": (
+                    "manual_review_required"
+                    if gate_ok and manual_promotion_only
+                    else ("promoted" if promote_ok else "candidate")
+                ),
             }
         )
         (adapter_dir.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=True), encoding="utf-8")
@@ -866,8 +945,13 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                             "improvement": improvement,
                             "eval_ok": eval_ok,
                             "bench_ok": bench_ok,
+                            "gate_ok": gate_ok,
+                            "manual_promotion_only": manual_promotion_only,
                             "regression": bench_regression,
                             "bench_vram_peak_mb": bench_vram_peak_mb,
+                            "promotion_blocked_reason": "manual_only"
+                            if gate_ok and manual_promotion_only
+                            else None,
                             "ts": time.time(),
                         },
                         ensure_ascii=True,
@@ -888,7 +972,9 @@ def train_once(settings: dict, base_dir: Path, reuse_dataset: bool = False) -> H
                 "eval_ok": bool(eval_ok),
                 "bench_ok": bench_ok,
                 "reason": bench_reason,
+                "gate_ok": gate_ok,
                 "promote_ok": promote_ok,
+                "manual_promotion_only": manual_promotion_only,
                 "bench_enabled": bool(bench_enabled),
                 "require_bench_ok": bool(require_bench_ok),
                 "bench_tokens_per_sec": bench_tps,

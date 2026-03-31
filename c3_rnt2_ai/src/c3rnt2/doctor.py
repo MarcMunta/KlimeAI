@@ -416,6 +416,7 @@ def _external_engine_deep_check(settings: dict) -> dict[str, Any]:
     core = settings.get("core", {}) or {}
     backend = str(core.get("backend", "vortex") or "vortex").strip().lower()
     engine = str(core.get("external_engine") or core.get("engine") or backend).strip().lower()
+    configured_model = str(core.get("external_model") or "").strip()
     if backend in {"vllm", "sglang"}:
         engine = backend
         backend = "external"
@@ -424,22 +425,102 @@ def _external_engine_deep_check(settings: dict) -> dict[str, Any]:
     base_url = core.get("external_base_url") or core.get("external_url")
     if not base_url:
         return {"ok": False, "error": "core.external_base_url missing"}
+    if engine in {"ollama", "lmstudio"}:
+        try:
+            import requests
+
+            endpoint = "/api/tags" if engine == "ollama" else "/v1/models"
+            resp = requests.get(str(base_url).rstrip("/") + endpoint, timeout=2.0)
+            if resp.status_code >= 400:
+                return {
+                    "ok": False,
+                    "error": "external_engine_unreachable",
+                    "engine": engine,
+                    "status": resp.status_code,
+                    "base_url": str(base_url),
+                }
+            payload = resp.json()
+            names: list[str] = []
+            if engine == "ollama":
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                names = [str(item.get("name", "")).strip() for item in models if isinstance(item, dict)]
+            else:
+                data = payload.get("data", []) if isinstance(payload, dict) else []
+                names = [str(item.get("id", "")).strip() for item in data if isinstance(item, dict)]
+            if configured_model and configured_model not in names:
+                return {
+                    "ok": False,
+                    "error": f"{engine}_model_missing",
+                    "engine": engine,
+                    "base_url": str(base_url),
+                    "model": configured_model,
+                    "available_models": names,
+                }
+            return {
+                "ok": True,
+                "engine": engine,
+                "base_url": str(base_url),
+                "model": configured_model or None,
+                "available_models": names,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "external_engine_unreachable",
+                "engine": engine,
+                "base_url": str(base_url),
+                "detail": str(exc),
+            }
     if engine not in {"vllm", "sglang"}:
-        return {"ok": False, "error": "external_engine_invalid", "engine": engine, "required": ["vllm", "sglang"]}
-    pkg = "vllm" if engine == "vllm" else "sglang"
-    installed = bool(importlib.util.find_spec(pkg) is not None)
-    if not installed:
-        install = f"python -m pip install {pkg}"
-        if sys.platform.startswith("win"):
-            install = f"{install}  # on Windows, prefer WSL2"
         return {
             "ok": False,
-            "error": "external_engine_not_installed",
+            "error": "external_engine_invalid",
             "engine": engine,
-            "package": pkg,
-            "install": install,
+            "required": ["vllm", "sglang", "ollama", "lmstudio"],
         }
-    return {"ok": True, "engine": engine, "base_url": str(base_url)}
+    try:
+        import requests
+
+        resp = requests.get(str(base_url).rstrip("/") + "/v1/models", timeout=2.0)
+        if resp.status_code >= 400:
+            return {
+                "ok": False,
+                "error": "external_engine_unreachable",
+                "engine": engine,
+                "status": resp.status_code,
+                "base_url": str(base_url),
+            }
+        payload = resp.json()
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        ids = [
+            str(item.get("id", "")).strip()
+            for item in data
+            if isinstance(item, dict)
+        ]
+        if configured_model and configured_model not in ids:
+            return {
+                "ok": False,
+                "error": f"{engine}_model_missing",
+                "engine": engine,
+                "base_url": str(base_url),
+                "model": configured_model,
+                "available_models": ids,
+            }
+        return {
+            "ok": True,
+            "engine": engine,
+            "base_url": str(base_url),
+            "model": configured_model or None,
+            "available_models": ids,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "external_engine_unreachable",
+            "engine": engine,
+            "base_url": str(base_url),
+            "detail": str(exc),
+        }
 
 
 def _promotion_gating_wiring_check(base_dir: Path) -> dict[str, Any]:
@@ -1029,14 +1110,11 @@ def _wsl_available_deep_check(settings: dict, *, timeout_s: float = 1.5) -> dict
     if not sys.platform.startswith("win"):
         return {"ok": True, "skipped": "not_windows"}
 
-    profile = str(settings.get("_profile") or "")
-    if profile not in {"rtx4080_16gb_120b_like", "rtx4080_16gb_safe_windows_hf"}:
-        return {"ok": True, "skipped": "not_target_profile"}
-
+    contract = settings.get("profile_contract", {}) or {}
     hf_train_enabled = bool((settings.get("hf_train", {}) or {}).get("enabled", False))
     train_strategy = str((settings.get("server", {}) or {}).get("train_strategy", "") or "").strip().lower()
-    if not hf_train_enabled and train_strategy != "wsl_subprocess_unload":
-        return {"ok": True, "skipped": "hf_train_disabled"}
+    if not bool(contract.get("require_wsl_training", False)) and not hf_train_enabled and train_strategy != "wsl_subprocess_unload":
+        return {"ok": True, "skipped": "wsl_not_required"}
 
     try:
         from .utils.wsl import is_wsl_available
@@ -1046,6 +1124,12 @@ def _wsl_available_deep_check(settings: dict, *, timeout_s: float = 1.5) -> dict
     status = is_wsl_available(timeout_s=float(timeout_s))
     if not bool(status.ok):
         return {"ok": False, "error": status.error or "wsl_unavailable"}
+    wsl_workdir = str((settings.get("server", {}) or {}).get("wsl_workdir", "") or "").strip()
+    if train_strategy == "wsl_subprocess_unload":
+        if not wsl_workdir:
+            return {"ok": False, "error": "wsl_workdir_missing"}
+        if not wsl_workdir.startswith("/mnt/"):
+            return {"ok": False, "error": "wsl_workdir_not_mnt"}
     return {"ok": True}
 
 

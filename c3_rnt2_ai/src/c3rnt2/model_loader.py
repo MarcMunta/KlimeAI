@@ -9,15 +9,22 @@ from .hf_model import load_hf_model
 from .tensorrt_backend import load_tensorrt_model
 
 
-def _fallback_backend(core: dict, current: str) -> str | None:
+def _fallback_backend(settings: dict, current: str) -> str | None:
+    core = settings.get("core", {}) or {}
+    contract = settings.get("profile_contract", {}) or {}
     cur = str(current or "").lower()
+    if bool(contract.get("disable_fallbacks", False)):
+        return None
     fallback = None
     if cur == "hf" and core.get("hf_fallback") is not None:
         fallback = core.get("hf_fallback")
     if fallback is None:
         fallback = core.get("backend_fallback")
     if fallback is None and cur != "hf":
-        fallback = core.get("hf_fallback")
+        if bool(core.get("allow_implicit_hf_fallback", True)):
+            fallback = core.get("hf_fallback") or (
+                "hf" if core.get("hf_model") else None
+            )
     if fallback and str(fallback).lower() != cur:
         return str(fallback).lower()
     return None
@@ -69,7 +76,7 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
 
             return load_external_engine_model(settings)
         except Exception:
-            fb = _fallback_backend(core, backend)
+            fb = _fallback_backend(settings, backend)
             if fb:
                 return load_inference_model(settings, backend_override=fb)
             raise
@@ -77,7 +84,7 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
         try:
             return load_hf_model(settings)
         except Exception:
-            fb = _fallback_backend(core, backend)
+            fb = _fallback_backend(settings, backend)
             if fb:
                 return load_inference_model(settings, backend_override=fb)
             raise
@@ -87,7 +94,7 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
 
             return load_llama_cpp_model(settings)
         except Exception:
-            fb = _fallback_backend(core, backend)
+            fb = _fallback_backend(settings, backend)
             if fb:
                 return load_inference_model(settings, backend_override=fb)
             raise
@@ -95,7 +102,7 @@ def load_inference_model(settings: dict, backend_override: str | None = None) ->
         try:
             return load_tensorrt_model(settings)
         except Exception:
-            fb = _fallback_backend(core, backend)
+            fb = _fallback_backend(settings, backend)
             if fb:
                 return load_inference_model(settings, backend_override=fb)
             return CoreTransformer.from_settings(settings)
