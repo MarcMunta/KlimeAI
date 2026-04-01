@@ -1,0 +1,18 @@
+{
+  "include": [
+    "c3_rnt2_ai/src",
+    "c3_rnt2_ai/tests"
+  ],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportUnknownImportSymbol": "none",
+  "executionEnvironments": [
+    {
+      "root": "c3_rnt2_ai",
+      "extraPaths": [
+        "c3_rnt2_ai/src"
+      ]
+    }
+  ],
+  "typeCheckingMode": "basic"
+}

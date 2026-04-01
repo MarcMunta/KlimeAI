@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { 
-  User, Bot, Copy, CheckCircle2, Brain, Globe, 
+  Bot, Copy, CheckCircle2, Brain, Globe, 
   FileCode, Plus, Minus, Equal, Maximize2, Minimize2, 
   Code2, ChevronRight, Loader2, Fingerprint, 
   GitBranch, FileStack, ChevronDown, ChevronUp, ExternalLink, ShieldCheck
@@ -63,14 +63,14 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
         rel={isWeb ? "noopener noreferrer" : undefined}
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
-        className={`flex items-center gap-2 px-3 py-1.5 border rounded-xl transition-all shadow-sm group glass-card relative z-10 ${
+        className={`flex items-center gap-2 rounded-full border px-2.5 py-1.5 transition-all shadow-sm group relative z-10 ${
           isWeb
-            ? 'bg-background border-border/60 hover:border-primary/60 cursor-pointer'
-            : 'bg-background/80 border-border/40 hover:border-emerald-500/50 cursor-default'
+            ? 'bg-background border-border/60 hover:border-primary/35 cursor-pointer'
+            : 'bg-muted/20 border-border/50 hover:border-primary/20 cursor-default'
         }`}
       >
         <div className={`w-4 h-4 rounded-md flex items-center justify-center overflow-hidden shrink-0 ${
-          isWeb ? 'bg-muted/40' : 'bg-emerald-500/10'
+          isWeb ? 'bg-muted/40' : 'bg-primary/10'
         }`}>
           {pillIcon}
         </div>
@@ -246,20 +246,20 @@ const CodeBlock = React.memo(({ children, className, isCollapsed, onToggle, code
 
   if (!isFilePath) {
     const lang = className?.replace('language-', '') || 'snippet';
-    return (
-      <div className={`mt-[14px] mb-6 rounded-3xl border border-border/40 overflow-hidden shadow-2xl group/code accelerated ring-1 ring-white/5 ${isCodeDark ? 'bg-[#0a0a0a]' : 'bg-zinc-50 border-zinc-200'}`}>
-        <div className={`px-5 py-3 border-b border-white/5 flex items-center justify-between ${isCodeDark ? 'bg-white/[0.03]' : 'bg-zinc-100/50'}`}>
+      return (
+      <div className={`mt-[14px] mb-6 overflow-hidden rounded-[1.2rem] border border-border/60 group/code accelerated ${isCodeDark ? 'bg-[#171717]' : 'bg-white border-zinc-200'}`}>
+        <div className={`flex items-center justify-between px-4 py-3 border-b ${isCodeDark ? 'border-white/5 bg-white/[0.02]' : 'border-zinc-200 bg-zinc-50'}`}>
           <div className="flex items-center gap-3">
-            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${isCodeDark ? 'bg-primary/20 text-primary border-primary/20' : 'bg-primary/10 text-primary border-primary/10'}`}>
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${isCodeDark ? 'bg-primary/14 text-primary border-primary/20' : 'bg-primary/10 text-primary border-primary/10'}`}>
               <Code2 size={14} />
             </div>
             <span className={`text-[10px] font-black uppercase tracking-[0.2em] ${isCodeDark ? 'text-zinc-500' : 'text-zinc-400'}`}>{lang}</span>
           </div>
-          <button onClick={handleCopy} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all border active:scale-95 ${isCodeDark ? 'bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white border-white/5' : 'bg-white hover:bg-zinc-200 text-zinc-500 border-zinc-200'}`}>
+          <button onClick={handleCopy} className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[10px] font-black transition-all active:scale-95 ${isCodeDark ? 'bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white border-white/5' : 'bg-white hover:bg-zinc-100 text-zinc-500 border-zinc-200'}`}>
             {copied ? <CheckCircle2 size={12} className="text-emerald-500" /> : <Copy size={12} />} {copied ? 'Copiado' : 'Copiar'}
           </button>
         </div>
-        <pre className={`p-6 overflow-x-auto text-[13px] font-mono leading-relaxed custom-scrollbar ${isCodeDark ? 'text-zinc-300 bg-black/40' : 'text-zinc-800 bg-white'}`}><code>{children}</code></pre>
+        <pre className={`custom-scrollbar overflow-x-auto p-5 text-[13px] font-mono leading-relaxed ${isCodeDark ? 'bg-black/25 text-zinc-300' : 'bg-white text-zinc-800'}`}><code>{children}</code></pre>
       </div>
     );
   }
@@ -539,17 +539,21 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
   const isThinking = isStreaming && !message.content && !!message.thought;
   const hasDiffBlock = useMemo(() => /```(?:diff|patch)\n[\s\S]*?```/i.test(message.content || ''), [message.content]);
   const wrapperClass = isUser
-    ? 'max-w-[80%] md:max-w-[420px]'
-    : 'max-w-[90%] md:max-w-[680px]';
+    ? 'max-w-fit md:max-w-[240px]'
+    : 'max-w-[92%] md:max-w-[720px]';
   const bubbleClass = isUser
-    ? 'bg-primary text-white rounded-[1.45rem] rounded-tr-[0.62rem] shadow-[0_18px_46px_-26px_rgba(0,194,255,0.55)] px-3.5 py-2.5'
-    : 'bg-muted/10 border border-border/40 rounded-[1.65rem] rounded-tl-[0.7rem] glass-card px-4 py-3.5';
+    ? 'bg-muted/35 border border-border/60 text-foreground rounded-[1.1rem] rounded-tr-[0.55rem] px-3 py-1.5 shadow-sm'
+    : 'bg-transparent text-foreground rounded-[1.1rem] px-0 py-0';
   const timestampClass = isUser ? 'mt-1' : 'mt-1.5';
 
   return (
-    <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-4 accelerated`}>
-      <div className={`flex ${wrapperClass} ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-2.5`}>
-        <div className={`mt-1 flex h-8 w-8 rounded-2xl items-center justify-center shrink-0 border transition-all duration-500 group-hover:scale-105 ${isUser ? 'bg-primary text-white border-primary/20 shadow-lg' : 'bg-background border-border glass-card shadow-md'}`}>{isUser ? <User size={15} /> : <Bot size={15} />}</div>
+      <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-5 accelerated`}>
+      <div className={`flex ${wrapperClass} ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-3`}>
+        {!isUser && (
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/60 bg-background text-muted-foreground shadow-sm transition-all duration-500 group-hover:scale-105">
+            <Bot size={14} />
+          </div>
+        )}
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0`}>
           <div className={`${bubbleClass} ${fontSizeClass} leading-[1.45] w-fit max-w-full relative`}>
             {!isUser && message.fileChanges && message.fileChanges.length >= 2 && (
@@ -579,7 +583,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
                 )}
               </div>
             )}
-            <span className="text-[9px] font-black text-muted-foreground/30 uppercase tracking-[0.22em] ml-auto">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            <span className={`text-[9px] font-black uppercase tracking-[0.18em] text-muted-foreground/30 ${isUser ? '' : 'ml-auto'}`}>{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
           </div>
         </div>
       </div>

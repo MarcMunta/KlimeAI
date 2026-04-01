@@ -73,6 +73,17 @@ function Get-ListeningPid([int]$Port) {
     return $null
 }
 
+function Stop-ProcessTree([int]$Pid, [string]$Reason = "restarting") {
+    if (-not $Pid) { return }
+    try {
+        Write-Warn "Stopping process $Pid ($Reason)."
+        Stop-Process -Id $Pid -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 800
+    } catch {
+        Write-Warn "Failed to stop process $Pid cleanly."
+    }
+}
+
 function Wait-HttpOk([string]$Uri, [int]$TimeoutSec = 30) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -184,15 +195,30 @@ $bootstrapUrl = "$controlUrl/control/bootstrap"
 
 if (-not $DryRun) {
     $existingControlPid = Get-ListeningPid -Port $ControlPort
+    $controlHealthy = $false
+    if ($existingControlPid) {
+        Write-Step "Control service already listening on port $ControlPort (pid=$existingControlPid)."
+        $controlHealthy = Wait-HttpOk -Uri $healthUrl -TimeoutSec 4
+        if (-not $controlHealthy) {
+            Stop-ProcessTree -Pid $existingControlPid -Reason "stale control service"
+            $existingControlPid = $null
+        }
+    }
     if (-not $existingControlPid) {
         Write-Step "Starting local control service on $controlUrl ..."
         $pyPath = Join-Path $backendRoot "src"
         $cmd = "cd /d `"$backendRoot`" && set PYTHONPATH=`"$pyPath`" && `"$python`" -m c3rnt2.control_server --base-dir `"$backendRoot`" --compose-file `"$composeFile`" --port $ControlPort --api-port $ApiPort --frontend-port $FrontendPort --api-profile `"$ApiProfile`" --training-profile `"$TrainingProfile`" > `"$controlLog`" 2>&1"
         Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -WindowStyle Hidden | Out-Null
-    } else {
-        Write-Step "Control service already listening on port $ControlPort (pid=$existingControlPid)."
     }
-    if (-not (Wait-HttpOk -Uri $healthUrl -TimeoutSec 20)) {
+    if (-not (Wait-HttpOk -Uri $healthUrl -TimeoutSec 45)) {
+        $logTail = @()
+        if (Test-Path -LiteralPath $controlLog) {
+            $logTail = Get-Content -LiteralPath $controlLog -Tail 40
+        }
+        if ($logTail.Count -gt 0) {
+            Write-Warn "Control service log tail:"
+            $logTail | ForEach-Object { Write-Host $_ }
+        }
         Fail "Control service did not become healthy in time."
     }
     Write-Step "Control service is healthy."

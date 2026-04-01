@@ -1,7 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
+  ChevronUp,
+  ChevronsUpDown,
+  CircleUserRound,
   FileCode2,
+  FlaskConical,
   MessageSquare,
   Moon,
   PanelLeftClose,
@@ -13,9 +17,10 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ChatSession, Language, ViewType } from '../types';
+import { ChatSession, Language, LocalAccount, ViewType } from '../types';
 import { translations } from '../translations';
 import VortexLogo from './VortexLogo';
+import type { SettingsTab } from './SettingsModal';
 
 interface SidebarProps {
   sessions: ChatSession[];
@@ -28,10 +33,14 @@ interface SidebarProps {
   isDarkMode: boolean;
   toggleDarkMode: () => void;
   onClose: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab?: SettingsTab) => void;
   isOpen: boolean;
   language: Language;
   selfEditsPendingCount?: number;
+  currentAccount?: LocalAccount | null;
+  accounts: LocalAccount[];
+  currentAccountId: string | null;
+  onSelectAccount: (id: string) => void;
 }
 
 const springTransition = { type: 'spring' as const, stiffness: 420, damping: 34 };
@@ -50,8 +59,14 @@ const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   language,
   selfEditsPendingCount = 0,
+  currentAccount,
+  accounts,
+  currentAccountId,
+  onSelectAccount,
 }) => {
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
   const t = translations[language];
 
   const themeLabel = language === 'es'
@@ -62,15 +77,20 @@ const Sidebar: React.FC<SidebarProps> = ({
     () => [
       { id: 'chat' as ViewType, label: t.nav_chat, icon: MessageSquare },
       { id: 'analysis' as ViewType, label: t.nav_analysis, icon: BarChart3 },
+      { id: 'training' as ViewType, label: t.nav_training, icon: FlaskConical },
       { id: 'edits' as ViewType, label: t.nav_edits, icon: FileCode2, badge: selfEditsPendingCount },
       { id: 'terminal' as ViewType, label: t.nav_terminal, icon: TerminalSquare },
     ],
-    [selfEditsPendingCount, t.nav_analysis, t.nav_chat, t.nav_edits, t.nav_terminal],
+    [selfEditsPendingCount, t.nav_analysis, t.nav_chat, t.nav_edits, t.nav_terminal, t.nav_training],
   );
 
   const orderedSessions = useMemo(
     () => [...sessions].sort((left, right) => right.updatedAt - left.updatedAt),
     [sessions],
+  );
+  const sortedAccounts = useMemo(
+    () => [...accounts].sort((left, right) => right.lastUsedAt - left.lastUsedAt),
+    [accounts],
   );
 
   const formatSessionTime = (timestamp: number) => {
@@ -87,12 +107,22 @@ const Sidebar: React.FC<SidebarProps> = ({
     setSessionToDelete(null);
   };
 
+  useEffect(() => {
+    if (!isProfileMenuOpen) return;
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (!profileMenuRef.current?.contains(event.target as Node)) {
+        setIsProfileMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handleOutsideClick);
+    return () => window.removeEventListener('mousedown', handleOutsideClick);
+  }, [isProfileMenuOpen]);
+
   return (
     <>
-      <div className="relative flex h-full w-full flex-col overflow-hidden border-r border-border/60 bg-background/90 backdrop-blur-3xl transition-colors duration-500 dark:bg-[#030812]/95">
+      <div className="relative flex h-full w-full flex-col overflow-hidden border-r border-border/70 bg-background/95 transition-colors duration-500">
         <div className="pointer-events-none absolute inset-0">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(0,194,255,0.16),transparent_32%),linear-gradient(180deg,rgba(255,255,255,0.05),transparent)] dark:bg-[radial-gradient(circle_at_top_left,rgba(0,194,255,0.18),transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.03),transparent)]" />
-          <div className="absolute inset-0 opacity-[0.05] vortex-grid-bg" />
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.18),transparent)] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.03),transparent)]" />
         </div>
 
         <div className="relative z-10 border-b border-border/50 px-5 pb-5 pt-6">
@@ -100,14 +130,14 @@ const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={() => onSelectView('chat')}
-              className="group flex min-w-0 items-center gap-3 rounded-[1.6rem] border border-border/50 bg-background/75 px-3 py-3 text-left shadow-sm transition-all hover:border-primary/30 hover:bg-background/95"
+            className="group flex min-w-0 items-center gap-3 rounded-[1.15rem] border border-border/70 bg-muted/15 px-3 py-3 text-left shadow-sm transition-all hover:border-primary/20 hover:bg-background"
             >
               <VortexLogo size={34} alt="Vortex" />
               <div className="min-w-0">
-                <p className="text-[9px] font-black uppercase tracking-[0.28em] text-primary/80">
+                <p className="text-[9px] font-black uppercase tracking-[0.16em] text-primary/80">
                   {language === 'es' ? 'Local core' : 'Local core'}
                 </p>
-                <p className="mt-1 truncate text-sm font-black tracking-tight">Vortex</p>
+                <p className="mt-1 truncate text-sm font-extrabold tracking-tight">Vortex</p>
                 <p className="mt-1 text-[10px] font-semibold text-muted-foreground">
                   {language === 'es' ? 'Frontend principal' : 'Primary frontend'}
                 </p>
@@ -118,7 +148,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.94 }}
               onClick={onClose}
-              className="rounded-2xl p-2.5 text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+              className="rounded-xl p-2.5 text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
               aria-label={language === 'es' ? 'Cerrar lateral' : 'Close sidebar'}
             >
               <PanelLeftClose size={20} />
@@ -128,17 +158,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={onNewChat}
-            className="mt-5 flex w-full items-center justify-between rounded-[1.35rem] border border-primary/20 bg-primary/[0.08] px-4 py-3.5 text-left shadow-[0_16px_40px_-26px_rgba(0,194,255,0.55)] transition-all hover:border-primary/40 hover:bg-primary/[0.12]"
+            className="mt-5 flex w-full items-center justify-between rounded-[1.15rem] border border-border/70 bg-muted/15 px-4 py-3 text-left shadow-sm transition-all hover:border-primary/20 hover:bg-background"
           >
             <div>
-              <p className="text-[10px] font-black uppercase tracking-[0.24em] text-primary">
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">
                 {language === 'es' ? 'Nueva sesión' : 'New session'}
               </p>
               <p className="mt-1 text-sm font-semibold text-foreground">
                 {language === 'es' ? 'Abrir chat limpio' : 'Start a fresh chat'}
               </p>
             </div>
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-primary text-primary-foreground">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
               <Plus size={18} />
             </div>
           </button>
@@ -154,20 +184,20 @@ const Sidebar: React.FC<SidebarProps> = ({
                   key={item.id}
                   type="button"
                   onClick={() => onSelectView(item.id)}
-                  className={`relative flex w-full items-center gap-3 rounded-[1.15rem] px-4 py-3 text-left transition-all ${
+                  className={`relative flex w-full items-center gap-3 rounded-[1rem] px-4 py-3 text-left transition-all ${
                     isActive
-                      ? 'bg-primary text-primary-foreground shadow-[0_18px_40px_-28px_rgba(0,194,255,0.65)]'
-                      : 'text-foreground/75 hover:bg-background/80 hover:text-foreground'
+                      ? 'bg-primary/[0.12] text-foreground'
+                      : 'text-foreground/75 hover:bg-muted/30 hover:text-foreground'
                   }`}
                 >
                   {isActive && (
                     <motion.div
                       layoutId="sidebar-active-pill"
                       transition={springTransition}
-                      className="absolute inset-0 rounded-[1.15rem] bg-primary shadow-[0_18px_40px_-28px_rgba(0,194,255,0.65)]"
+                      className="absolute inset-0 rounded-[1rem] bg-primary/[0.12] border border-primary/20"
                     />
                   )}
-                  <span className="relative z-10 flex h-9 w-9 items-center justify-center rounded-xl bg-background/10">
+                  <span className="relative z-10 flex h-9 w-9 items-center justify-center rounded-xl bg-background/70 border border-border/40">
                     <Icon size={18} />
                   </span>
                   <span className="relative z-10 flex-1 text-sm font-semibold tracking-tight">
@@ -187,7 +217,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         <div className="relative z-10 mt-5 flex-1 overflow-y-auto px-4 pb-5 custom-scrollbar">
           <div className="mb-3 flex items-center justify-between px-2">
             <div>
-              <p className="text-[10px] font-black uppercase tracking-[0.28em] text-muted-foreground">
+              <p className="text-[10px] font-black uppercase tracking-[0.22em] text-muted-foreground">
                 {t.smart_sessions}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -204,10 +234,10 @@ const Sidebar: React.FC<SidebarProps> = ({
               return (
                 <div
                   key={session.id}
-                  className={`group relative rounded-[1.25rem] border px-4 py-3 transition-all ${
+                  className={`group relative rounded-[1.1rem] border px-4 py-3 transition-all ${
                     isCurrent
-                      ? 'border-primary/30 bg-primary/[0.07] shadow-[0_16px_36px_-26px_rgba(0,194,255,0.6)]'
-                      : 'border-transparent bg-transparent hover:border-border/50 hover:bg-background/80'
+                      ? 'border-primary/20 bg-primary/[0.08] shadow-sm'
+                      : 'border-transparent bg-transparent hover:border-border/60 hover:bg-muted/20'
                   }`}
                 >
                   <button
@@ -247,36 +277,130 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="relative z-10 border-t border-border/50 px-4 py-4">
-          <div className="space-y-2">
+          <div className="mb-3 flex items-center gap-2">
             <button
               type="button"
               onClick={toggleDarkMode}
-              className="flex w-full items-center gap-3 rounded-[1.15rem] border border-border/50 bg-background/70 px-4 py-3 text-left transition-all hover:border-primary/25 hover:bg-background"
+              className="flex flex-1 items-center justify-center gap-2 rounded-[1rem] border border-border/60 bg-muted/20 px-3 py-2.5 text-xs font-semibold text-foreground transition-all hover:border-primary/20 hover:bg-background"
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-foreground">
-                {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold tracking-tight">{themeLabel}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {isDarkMode ? t.interface_light : t.interface_dark}
-                </p>
-              </div>
+              {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+              <span>{isDarkMode ? t.interface_light : t.interface_dark}</span>
             </button>
+          <button
+            type="button"
+            onClick={() => onOpenSettings('general')}
+            className="flex h-10 w-10 items-center justify-center rounded-[1rem] border border-border/60 bg-muted/20 text-foreground transition-all hover:border-primary/20 hover:bg-background"
+            aria-label={t.configuration}
+            title={t.configuration}
+            >
+              <Settings size={18} />
+            </button>
+          </div>
+
+          <div ref={profileMenuRef} className="relative">
+            <AnimatePresence>
+              {isProfileMenuOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                  transition={{ duration: 0.16, ease: 'easeOut' }}
+                  className="absolute bottom-[calc(100%+12px)] left-0 right-0 rounded-[1.25rem] border border-border/70 bg-background/98 p-2 shadow-[0_32px_80px_-48px_rgba(15,23,42,0.35)] backdrop-blur-xl"
+                >
+                  <div className="rounded-[1rem] border border-border/60 bg-muted/15 px-3 py-3">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black text-white"
+                        style={{ background: `linear-gradient(135deg, hsl(${currentAccount?.avatarHue ?? 198} 100% 58%), hsl(${(currentAccount?.avatarHue ?? 198) + 18} 100% 46%))` }}
+                      >
+                        {currentAccount?.name?.slice(0, 2).toUpperCase() || <CircleUserRound size={16} />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold tracking-tight text-foreground">
+                          {currentAccount?.name || 'Vortex Local'}
+                        </p>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {currentAccount?.email || 'local@vortex.dev'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 space-y-1">
+                    {sortedAccounts.map((account) => {
+                      const isCurrentAccount = account.id === currentAccountId;
+                      return (
+                        <button
+                          key={account.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectAccount(account.id);
+                            setIsProfileMenuOpen(false);
+                          }}
+                          className={`flex w-full items-center gap-3 rounded-[0.95rem] px-3 py-2.5 text-left transition-all ${
+                            isCurrentAccount
+                              ? 'bg-primary/[0.10] text-foreground'
+                              : 'hover:bg-muted/35'
+                          }`}
+                        >
+                          <div
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white"
+                            style={{ background: `linear-gradient(135deg, hsl(${account.avatarHue} 100% 58%), hsl(${account.avatarHue + 18} 100% 46%))` }}
+                          >
+                            {account.name.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-semibold text-foreground">{account.name}</p>
+                            <p className="truncate text-xs text-muted-foreground">{account.handle}</p>
+                          </div>
+                          {isCurrentAccount && (
+                            <span className="rounded-full bg-primary px-2 py-1 text-[9px] font-black uppercase tracking-[0.12em] text-primary-foreground">
+                              {t.account_current}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-2 border-t border-border/60 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsProfileMenuOpen(false);
+                        onOpenSettings('profiles');
+                      }}
+                      className="flex w-full items-center gap-3 rounded-[0.95rem] px-3 py-2.5 text-left text-sm font-semibold text-foreground transition-all hover:bg-muted/35"
+                    >
+                      <Settings size={16} />
+                      <span>{language === 'es' ? 'Gestionar perfiles' : 'Manage profiles'}</span>
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <button
               type="button"
-              onClick={onOpenSettings}
-              className="flex w-full items-center gap-3 rounded-[1.15rem] border border-border/50 bg-background/70 px-4 py-3 text-left transition-all hover:border-primary/25 hover:bg-background"
+              onClick={() => setIsProfileMenuOpen((prev) => !prev)}
+              className="flex w-full items-center gap-3 rounded-[1.15rem] border border-border/60 bg-muted/20 px-3 py-3 text-left transition-all hover:border-primary/20 hover:bg-background"
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-foreground">
-                <Settings size={18} />
-              </span>
+              <div
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black text-white"
+                style={{ background: `linear-gradient(135deg, hsl(${currentAccount?.avatarHue ?? 198} 100% 58%), hsl(${(currentAccount?.avatarHue ?? 198) + 18} 100% 46%))` }}
+              >
+                {currentAccount?.name?.slice(0, 2).toUpperCase() || <CircleUserRound size={16} />}
+              </div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold tracking-tight">{t.configuration}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {language === 'es' ? 'Tema, idioma y paneles' : 'Theme, language, and panels'}
+                <p className="truncate text-sm font-semibold tracking-tight text-foreground">
+                  {currentAccount?.name || 'Vortex Local'}
                 </p>
+                <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                  {currentAccount?.email || 'local@vortex.dev'}
+                </p>
+              </div>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 text-muted-foreground">
+                {isProfileMenuOpen ? <ChevronUp size={15} /> : <ChevronsUpDown size={15} />}
               </div>
             </button>
           </div>
@@ -300,7 +424,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.94, y: 20 }}
               transition={springTransition}
-              className="relative w-full max-w-md rounded-[2.2rem] border border-border bg-background px-8 py-8 shadow-2xl"
+              className="relative w-full max-w-md rounded-[1.8rem] border border-border bg-background px-8 py-8 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.35)]"
             >
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-[1.8rem] bg-red-500/10 text-red-500">
                 <AlertTriangle size={28} />

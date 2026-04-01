@@ -1,4 +1,10 @@
-import { ControlStatus, TrainingRunSummary, TrainingStreamPayload } from "../types";
+import {
+  AutonomyStreamPayload,
+  AutonomyStatus,
+  ControlStatus,
+  TrainingRunSummary,
+  TrainingStreamPayload,
+} from "../types";
 
 const resolveBaseUrl = (): string => {
   const raw = (import.meta.env.VITE_CONTROL_BASE_URL || "").trim();
@@ -96,6 +102,60 @@ class ControlService {
         onMessage(payload);
       } catch (error) {
         onError?.(error instanceof Error ? error : new Error("training_stream_parse_failed"));
+      }
+    };
+    source.onerror = (event) => {
+      onError?.(event);
+    };
+    return () => source.close();
+  }
+
+  async getAutonomyStatus(): Promise<AutonomyStatus | null> {
+    try {
+      const payload = await this.json<{ ok: boolean; autonomy?: AutonomyStatus }>("/control/autonomy/status", { method: "GET" });
+      return payload.autonomy || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async startAutonomy(): Promise<{ ok: boolean; enabled?: boolean }> {
+    return this.json("/control/autonomy/start", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async stopAutonomy(): Promise<{ ok: boolean; enabled?: boolean }> {
+    return this.json("/control/autonomy/stop", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async configureAutonomy(config: {
+    enabled?: boolean;
+    reflection_enabled?: boolean;
+    training_enabled?: boolean;
+    autoedit_enabled?: boolean;
+  }): Promise<{ ok: boolean; autonomy?: AutonomyStatus }> {
+    return this.json("/control/autonomy/config", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  }
+
+  subscribeAutonomyStream(
+    onMessage: (payload: AutonomyStreamPayload) => void,
+    onError?: (error: Event | Error) => void,
+  ): () => void {
+    const source = new EventSource(`${this.baseUrl}/control/autonomy/stream`);
+    source.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as AutonomyStreamPayload;
+        onMessage(payload);
+      } catch (error) {
+        onError?.(error instanceof Error ? error : new Error("autonomy_stream_parse_failed"));
       }
     };
     source.onerror = (event) => {

@@ -70,7 +70,7 @@ const TAB_INDEX: Record<ControlTab, number> = {
 const StatusPill: React.FC<{ ok: boolean; label: string }> = ({ ok, label }) => (
   <span
     className={`inline-flex items-center rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-[0.24em] ${
-      ok ? 'bg-emerald-500/10 text-emerald-500' : 'bg-primary/[0.10] text-primary'
+      ok ? 'bg-primary/[0.10] text-primary' : 'bg-primary/[0.08] text-primary/70'
     }`}
   >
     {label}
@@ -83,11 +83,11 @@ const Panel: React.FC<{ title: string; eyebrow?: string; children: React.ReactNo
   children,
   className = '',
 }) => (
-  <section className={`rounded-[2rem] border border-border/40 bg-background/70 p-6 shadow-[0_20px_70px_-50px_rgba(0,0,0,0.55)] backdrop-blur-2xl ${className}`}>
+  <section className={`surface-panel rounded-[1.5rem] p-6 ${className}`}>
     {(eyebrow || title) && (
       <header className="mb-5">
-        {eyebrow && <p className="text-[10px] font-black uppercase tracking-[0.28em] text-primary">{eyebrow}</p>}
-        <h3 className="mt-2 text-2xl font-black tracking-tight">{title}</h3>
+        {eyebrow && <p className="text-[10px] font-black uppercase tracking-[0.16em] text-primary">{eyebrow}</p>}
+        <h3 className="mt-2 text-2xl font-extrabold tracking-tight">{title}</h3>
       </header>
     )}
     {children}
@@ -262,7 +262,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
       value: `${metrics.trainingEvents}`,
       caption: language === 'es' ? 'respuestas marcadas para mejora' : 'answers marked for improvement',
       icon: <FlaskConical size={18} />,
-      accent: 'text-emerald-500',
+      accent: 'text-primary',
     },
     {
       title: language === 'es' ? 'Fuentes' : 'Sources',
@@ -325,15 +325,15 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
   );
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mx-auto w-full max-w-[1380px] space-y-10 px-6 pb-32 pt-28 lg:px-10">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mx-auto w-full max-w-[1280px] space-y-8 px-6 pb-32 pt-24 lg:px-8">
       <header className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
         <div className="space-y-5">
-          <div className="inline-flex items-center gap-3 rounded-full border border-primary/20 bg-primary/[0.08] px-4 py-2 text-[10px] font-black uppercase tracking-[0.3em] text-primary">
+          <div className="inline-flex items-center gap-3 rounded-full border border-border/60 bg-muted/20 px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-primary">
             <Sparkles size={14} />
             <span>{t.analysis_hub_title}</span>
           </div>
           <div className="space-y-3">
-            <h2 className="max-w-3xl text-4xl font-black tracking-[-0.05em] text-foreground lg:text-6xl">
+            <h2 className="max-w-3xl text-4xl font-extrabold tracking-[-0.05em] text-foreground lg:text-5xl">
               {language === 'es' ? 'Un solo panel para arrancar, entrenar y controlar Vortex.' : 'One panel to boot, train, and control Vortex.'}
             </h2>
             <p className="max-w-2xl text-base leading-8 text-muted-foreground lg:text-lg">
@@ -345,9 +345,9 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
         </div>
 
         <Panel title={language === 'es' ? 'Resumen operativo' : 'Operational summary'} eyebrow={language === 'es' ? 'Estado actual' : 'Current status'}>
-          <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-2">
             {summaryCards.map((card) => (
-              <div key={card.title} className="rounded-[1.35rem] border border-border/40 bg-muted/15 px-4 py-4">
+              <div key={card.title} className="rounded-[1.1rem] border border-border/60 bg-muted/20 px-4 py-4">
                 <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] ${card.accent}`}>
                   {card.icon}
                   <span>{card.title}</span>
@@ -360,7 +360,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
         </Panel>
       </header>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-[1.6rem] border border-border/40 bg-background/70 p-2 backdrop-blur-2xl">
+      <div className="flex flex-wrap items-center gap-3 rounded-[1.2rem] border border-border/60 bg-muted/20 p-2 backdrop-blur-xl">
         {([
           { id: 'stack', label: t.analysis_overview },
           { id: 'learning', label: t.analysis_library },
@@ -373,14 +373,14 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
               setPreviousTab(activeTab);
               setActiveTab(tab.id);
             }}
-            className={`relative rounded-[1.1rem] px-5 py-3 text-[11px] font-black uppercase tracking-[0.24em] transition-all ${
+            className={`relative rounded-[0.95rem] px-5 py-3 text-[11px] font-black uppercase tracking-[0.14em] transition-all ${
               activeTab === tab.id ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             {activeTab === tab.id && (
               <motion.div
                 layoutId="analysis-active-tab"
-                className="absolute inset-0 rounded-[1.1rem] bg-primary"
+                className="absolute inset-0 rounded-[0.95rem] bg-primary"
                 transition={{ type: 'spring', stiffness: 420, damping: 34 }}
               />
             )}
@@ -402,22 +402,22 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
           >
             <Panel title={language === 'es' ? 'Stack local' : 'Local stack'} eyebrow={language === 'es' ? 'Arranque y salud' : 'Boot and health'}>
               <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-[1.35rem] border border-border/40 bg-muted/15 p-4">
+                <div className="rounded-[1.1rem] border border-border/60 bg-muted/20 p-4">
                   <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-primary"><Activity size={14} /><span>{language === 'es' ? 'Runtime' : 'Runtime'}</span></div>
                   <p className="mt-3 text-lg font-black tracking-tight">{operationalStatus?.engine_ready ? (language === 'es' ? 'Respondiendo' : 'Responding') : (language === 'es' ? 'Sin levantar' : 'Not started')}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{operationalStatus?.engine_base_url || 'http://127.0.0.1:30000'}</p>
                 </div>
-                <div className="rounded-[1.35rem] border border-border/40 bg-muted/15 p-4">
+                <div className="rounded-[1.1rem] border border-border/60 bg-muted/20 p-4">
                   <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-primary"><Bot size={14} /><span>{language === 'es' ? 'Modelo servido' : 'Served model'}</span></div>
                   <p className="mt-3 text-lg font-black tracking-tight break-words">{operationalStatus?.active_model || controlStatus?.model?.model_id || 'Qwen/Qwen2.5-Coder-14B-Instruct-AWQ'}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{controlStatus?.model?.cached ? (language === 'es' ? 'Cache local detectada.' : 'Local cache detected.') : (language === 'es' ? 'Modelo pendiente de descarga.' : 'Model still needs download.')}</p>
                 </div>
-                <div className="rounded-[1.35rem] border border-border/40 bg-muted/15 p-4">
+                <div className="rounded-[1.1rem] border border-border/60 bg-muted/20 p-4">
                   <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-primary"><ShieldCheck size={14} /><span>Docker</span></div>
                   <p className="mt-3 text-lg font-black tracking-tight">{controlStatus?.docker?.ready ? (language === 'es' ? 'Listo' : 'Ready') : (language === 'es' ? 'Pendiente' : 'Pending')}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{controlStatus?.docker?.reason || 'docker_ready'}</p>
                 </div>
-                <div className="rounded-[1.35rem] border border-border/40 bg-muted/15 p-4">
+                <div className="rounded-[1.1rem] border border-border/60 bg-muted/20 p-4">
                   <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-primary"><Workflow size={14} /><span>{language === 'es' ? 'Bootstrap' : 'Bootstrap'}</span></div>
                   <p className="mt-3 text-lg font-black tracking-tight">{controlStatus?.bootstrap?.stage || (language === 'es' ? 'Sin actividad' : 'Idle')}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{controlStatus?.bootstrap?.message || (language === 'es' ? 'No hay tareas en curso.' : 'No tasks in progress.')}</p>
@@ -486,7 +486,7 @@ const AnalysisView: React.FC<AnalysisViewProps> = ({
                         </p>
                       </div>
                       <div className="flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.08] px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.24em] text-primary">
-                        <span className={`h-2 w-2 rounded-full ${activeRunId ? 'animate-pulse bg-primary' : 'bg-emerald-500'}`} />
+                        <span className={`h-2 w-2 rounded-full ${activeRunId ? 'animate-pulse bg-primary' : 'bg-primary'}`} />
                         <span>{activeRunId ? (language === 'es' ? 'Ejecutando' : 'Running') : (language === 'es' ? 'Último run' : 'Latest run')}</span>
                       </div>
                     </div>

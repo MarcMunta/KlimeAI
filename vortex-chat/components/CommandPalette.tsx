@@ -188,7 +188,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-zinc-950/40 backdrop-blur-xl"
+            className="absolute inset-0 bg-black/28 backdrop-blur-md"
             onClick={onClose}
           />
 
@@ -196,14 +196,14 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             initial={{ opacity: 0, scale: 0.95, y: 40, filter: 'blur(10px)' }}
             animate={{ opacity: 1, scale: 1, y: 0, filter: 'blur(0px)' }}
             exit={{ opacity: 0, scale: 0.95, y: 20, filter: 'blur(10px)' }}
-            className="relative flex w-full max-w-2xl flex-col overflow-hidden rounded-[2.5rem] border border-border bg-white/95 shadow-2xl dark:bg-zinc-900/95"
+            className="surface-panel relative flex w-full max-w-2xl flex-col overflow-hidden rounded-[1.6rem]"
           >
-            <div className="relative flex h-24 items-center border-b border-border/50 bg-muted/20 px-10 dark:bg-zinc-900/40">
+            <div className="relative flex h-20 items-center border-b border-border/60 bg-muted/20 px-8">
               <Search size={22} className="mr-6 shrink-0 text-primary opacity-60" />
               <input
                 ref={inputRef}
                 type="text"
-                className="flex-1 bg-transparent text-xl font-bold tracking-tight text-foreground outline-none placeholder:text-muted-foreground/30 dark:placeholder:text-zinc-600"
+                className="flex-1 bg-transparent text-xl font-bold tracking-tight text-foreground outline-none placeholder:text-muted-foreground/45 dark:placeholder:text-zinc-500"
                 placeholder={copy.placeholder}
                 value={query}
                 onChange={(event) => {
@@ -215,7 +215,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                 type="button"
                 onClick={onClose}
                 aria-label={language === 'es' ? 'Cerrar' : 'Close'}
-                className="rounded-full p-3 transition-all hover:bg-muted dark:hover:bg-zinc-800"
+                className="rounded-full p-3 transition-all hover:bg-muted"
               >
                 <X size={20} className="text-muted-foreground" />
               </button>
@@ -250,10 +250,10 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                                     item.action();
                                     onClose();
                                   }}
-                                  className={`relative flex w-full items-center gap-5 overflow-hidden rounded-2xl px-6 py-4.5 text-left transition-all ${
+                                  className={`relative flex w-full items-center gap-5 overflow-hidden rounded-[1rem] px-5 py-4 text-left transition-all ${
                                     isSelected
-                                      ? 'z-10 bg-primary text-primary-foreground shadow-lg shadow-primary/20'
-                                      : 'text-foreground/70 hover:bg-muted/60 dark:text-zinc-400 dark:hover:bg-zinc-800/60'
+                                      ? 'z-10 bg-primary text-primary-foreground shadow-sm'
+                                      : 'text-foreground/70 hover:bg-muted/60 dark:text-zinc-400'
                                   }`}
                                 >
                                   {isSelected && (

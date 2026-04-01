@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  BrainCircuit,
   CheckCircle2,
   ChevronDown,
   Cpu,
@@ -21,6 +22,8 @@ interface TopBarStackStatusProps {
   onRestartRuntime?: () => Promise<unknown> | unknown;
   onStartTraining?: () => Promise<unknown> | unknown;
   onOpenTraining?: () => void;
+  onStartAutonomy?: () => Promise<unknown> | unknown;
+  onStopAutonomy?: () => Promise<unknown> | unknown;
 }
 
 const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
@@ -32,6 +35,8 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
   onRestartRuntime,
   onStartTraining,
   onOpenTraining,
+  onStartAutonomy,
+  onStopAutonomy,
 }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -86,10 +91,13 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
 
   const toneClasses =
     summary.tone === 'ready'
-      ? 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-500'
+      ? 'border-primary/25 bg-primary/[0.10] text-primary'
       : summary.tone === 'progress'
-        ? 'border-primary/25 bg-primary/[0.08] text-primary'
-        : 'border-amber-500/25 bg-amber-500/[0.10] text-amber-500';
+        ? 'border-primary/20 bg-primary/[0.08] text-primary'
+        : 'border-amber-500/20 bg-amber-500/[0.10] text-amber-500';
+  const autonomy = controlStatus?.autonomy;
+  const autonomyEnabled = Boolean(autonomy?.enabled);
+  const autonomyState = autonomy?.state || (language === 'es' ? 'waiting' : 'waiting');
 
   const items = [
     {
@@ -124,6 +132,15 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
         ? String(controlStatus?.bootstrap?.stage || 'bootstrap')
         : (language === 'es' ? 'Control manual' : 'Manual control'),
     },
+    {
+      key: 'autonomy',
+      icon: <BrainCircuit size={14} />,
+      label: language === 'es' ? 'Autonomia' : 'Autonomy',
+      value: autonomyEnabled
+        ? (language === 'es' ? 'Activa' : 'Active')
+        : (language === 'es' ? 'Pausada' : 'Paused'),
+      caption: autonomyState,
+    },
   ];
 
   const ActionButton = ({
@@ -140,10 +157,10 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
       onClick={() => {
         void onClick?.();
       }}
-      className={`rounded-full border px-3 py-2 text-[10px] font-black uppercase tracking-[0.2em] transition-all ${
+      className={`rounded-full border px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] transition-all ${
         primary
-          ? 'border-primary/30 bg-primary/[0.10] text-primary hover:bg-primary/[0.16]'
-          : 'border-border/60 bg-background/75 text-foreground/75 hover:border-primary/25 hover:text-foreground'
+          ? 'border-primary/25 bg-primary/[0.10] text-primary hover:bg-primary/[0.16]'
+          : 'border-border/60 bg-muted/20 text-foreground/75 hover:border-primary/20 hover:bg-background hover:text-foreground'
       }`}
     >
       {label}
@@ -155,13 +172,13 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className={`flex items-center gap-3 rounded-2xl border px-4 py-3 shadow-sm transition-all hover:-translate-y-0.5 ${toneClasses}`}
+        className={`flex items-center gap-3 rounded-[1.1rem] border px-4 py-3 shadow-sm transition-all hover:bg-muted/30 ${toneClasses}`}
       >
-        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 text-current">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-background text-current">
           {summary.icon}
         </span>
         <div className="hidden min-w-0 text-left md:block">
-          <p className="text-[10px] font-black uppercase tracking-[0.24em]">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em]">
             {summary.label}
           </p>
           <p className="mt-1 max-w-[200px] truncate text-xs text-foreground/70 dark:text-white/70">
@@ -175,10 +192,10 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
       </button>
 
       {open && (
-        <div className="absolute right-0 top-[calc(100%+12px)] z-50 w-[360px] rounded-[1.8rem] border border-border/60 bg-background/95 p-5 shadow-[0_32px_90px_-42px_rgba(0,0,0,0.55)] backdrop-blur-3xl">
+        <div className="surface-panel absolute right-0 top-[calc(100%+12px)] z-50 w-[360px] rounded-[1.5rem] p-5 backdrop-blur-xl">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-[10px] font-black uppercase tracking-[0.26em] text-primary">
+              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-primary">
                 {language === 'es' ? 'Stack local' : 'Local stack'}
               </p>
               <h3 className="mt-2 text-lg font-black tracking-tight text-foreground">
@@ -192,15 +209,15 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
                   : reason}
               </p>
             </div>
-            <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${toneClasses}`}>
+            <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-[0.14em] ${toneClasses}`}>
               {summary.label}
             </span>
           </div>
 
           <div className="mt-4 grid gap-3">
             {items.map((item) => (
-              <div key={item.key} className="rounded-[1.2rem] border border-border/50 bg-muted/20 px-4 py-3">
-                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground">
+              <div key={item.key} className="rounded-[1rem] border border-border/60 bg-muted/20 px-4 py-3">
+                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground">
                   {item.icon}
                   <span>{item.label}</span>
                 </div>
@@ -228,6 +245,15 @@ const TopBarStackStatus: React.FC<TopBarStackStatusProps> = ({
             <ActionButton
               label={language === 'es' ? 'Panel train' : 'Train panel'}
               onClick={onOpenTraining || onStartTraining}
+            />
+            <ActionButton
+              label={language === 'es' ? 'Reanudar IA' : 'Resume AI'}
+              onClick={onStartAutonomy}
+              primary={!autonomyEnabled}
+            />
+            <ActionButton
+              label={language === 'es' ? 'Pausar IA' : 'Pause AI'}
+              onClick={onStopAutonomy}
             />
           </div>
         </div>

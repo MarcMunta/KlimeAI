@@ -4,10 +4,20 @@ export enum Role {
   AI = 'ai'
 }
 
-export type ViewType = 'chat' | 'analysis' | 'edits' | 'terminal';
+export type ViewType = 'chat' | 'analysis' | 'training' | 'edits' | 'terminal';
 export type AppMode = 'ask' | 'agent';
 export type FontSize = 'small' | 'medium' | 'large';
 export type Language = 'es' | 'en';
+
+export interface LocalAccount {
+  id: string;
+  name: string;
+  email: string;
+  handle: string;
+  avatarHue: number;
+  createdAt: number;
+  lastUsedAt: number;
+}
 
 export interface Source {
   title: string;
@@ -116,6 +126,65 @@ export interface TrainingStreamPayload {
   runs?: TrainingRunSummary[];
 }
 
+export interface AutonomyAgentStatus {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  accent?: 'ask' | 'agent' | 'neutral';
+  last_event_at?: number | null;
+}
+
+export interface AutonomyRollbackState {
+  ts?: number | null;
+  status?: string | null;
+  target?: string | null;
+  reason?: string | null;
+}
+
+export interface AutonomyEvent {
+  id: string;
+  ts: number;
+  agent: 'analyst' | 'builder' | 'system';
+  kind: string;
+  title: string;
+  detail: string;
+  cycle_id?: string | null;
+  state?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AutonomyStatus {
+  enabled: boolean;
+  boot_mode: string;
+  state: string;
+  active_agents: AutonomyAgentStatus[];
+  current_cycle?: string | null;
+  last_reflection_at?: number | null;
+  last_train_at?: number | null;
+  last_patch_at?: number | null;
+  autoedit_scope: string;
+  last_rollback?: AutonomyRollbackState | null;
+  config?: {
+    reflection_enabled?: boolean;
+    training_enabled?: boolean;
+    autoedit_enabled?: boolean;
+    reflection_interval_s?: number;
+    quick_train_interval_s?: number;
+    full_train_interval_s?: number;
+    autoedit_interval_s?: number;
+  };
+  latest_events?: AutonomyEvent[];
+}
+
+export interface AutonomyStreamPayload {
+  ts: number;
+  status: AutonomyStatus;
+  events: AutonomyEvent[];
+  active_run_id?: string | null;
+  runs?: TrainingRunSummary[];
+}
+
 export interface ControlStatus {
   ok: boolean;
   bootstrap?: {
@@ -158,6 +227,7 @@ export interface ControlStatus {
     digest?: string | null;
     sources?: string[];
   };
+  autonomy?: AutonomyStatus;
   active_run_id?: string | null;
   runs?: TrainingRunSummary[];
 }

@@ -16,12 +16,12 @@ const VortexLogo: React.FC<VortexLogoProps> = ({
       className={`relative shrink-0 select-none ${className}`}
       style={{ width: size, height: size }}
     >
-      <div className="absolute inset-[-10%] rounded-full bg-primary/18 blur-xl opacity-70" />
+      <div className="absolute inset-[-8%] rounded-full bg-primary/10 blur-md opacity-75" />
       <img
         src="/vortex-logo.svg"
         alt={alt}
         draggable={false}
-        className="relative h-full w-full object-contain drop-shadow-[0_16px_34px_rgba(0,194,255,0.24)]"
+        className="relative h-full w-full object-contain drop-shadow-[0_10px_24px_rgba(16,163,127,0.18)]"
       />
     </div>
   );
