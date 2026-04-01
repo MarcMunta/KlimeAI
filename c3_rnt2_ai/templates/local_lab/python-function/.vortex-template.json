@@ -1,0 +1,4 @@
+{
+  "check_command": ["pytest", "-q"],
+  "template_name": "python-function"
+}

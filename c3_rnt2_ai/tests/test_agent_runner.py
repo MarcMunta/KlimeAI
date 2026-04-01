@@ -24,3 +24,26 @@ def test_agent_runner_dry(tmp_path: Path, monkeypatch):
     assert report["ok"]
     episodes = tmp_path / "data" / "episodes" / "agent.jsonl"
     assert episodes.exists()
+
+
+def test_agent_runner_blocks_public_security_target(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("C3RNT2_NO_NET", "1")
+    settings = {
+        "tools": {"web": {"enabled": False, "allow_domains": []}},
+        "agent": {"web_allowlist": []},
+        "local_lab": {
+            "guardrails_enabled": True,
+            "lab_confirmation_token": "LAB_CONFIRMED",
+        },
+    }
+
+    report = run_agent(
+        "Exploit https://example.com with a payload.",
+        settings,
+        tmp_path,
+        max_iters=1,
+        action_provider=lambda _messages: Action(type="finish", args={"summary": "should_not_run"}),
+    )
+    assert report["ok"] is False
+    assert report["blocked"] is True
+    assert "public" in report["summary"].lower() or "third-party" in report["summary"].lower()

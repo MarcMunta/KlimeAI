@@ -1,0 +1,110 @@
+track: python_fastapi_react
+modules:
+  - id: python-basics
+    weeks: "0-2"
+    title: Python Fundamentals and Testing
+    summary: Build confidence with Python syntax, functions, control flow, and pytest-based feedback loops.
+    concepts:
+      - Functions, loops, and data structures
+      - Reading failing tests before editing code
+      - Small refactors with explicit validation
+    checkpoints:
+      - Explain what the failing test is checking
+      - Implement the smallest correct change
+      - Re-run the validation command and interpret the result
+    validation:
+      - pytest -q
+    exercise:
+      template: python-function
+      objective: Implement a pure Python function that passes the provided unit tests.
+      acceptance:
+        - All tests pass with `pytest -q`
+        - Keep the solution readable and side-effect free
+
+  - id: git-linux-basics
+    weeks: "2-4"
+    title: Git, Shell, and Linux Basics
+    summary: Practice repo navigation, diffs, commits, and shell literacy needed for backend and security work.
+    concepts:
+      - Reading repo state before editing
+      - Git status, diff, and commit hygiene
+      - Linux file system, processes, and logs
+    checkpoints:
+      - Explain the difference between tracked and untracked changes
+      - Find the file responsible for a given behavior
+      - Use shell output as evidence, not guesswork
+
+  - id: http-fastapi
+    weeks: "4-8"
+    title: HTTP APIs with FastAPI
+    summary: Learn how request routing, validation, and response models work in a small FastAPI service.
+    concepts:
+      - Path operations and response contracts
+      - TestClient-driven API tests
+      - Input validation and status codes
+    checkpoints:
+      - Read the failing API test first
+      - Change the handler instead of the test
+      - Return explicit JSON with stable keys
+    validation:
+      - pytest -q
+    exercise:
+      template: fastapi-endpoint
+      objective: Implement the FastAPI endpoint so the tests pass without changing the contract.
+      acceptance:
+        - The API tests pass with `pytest -q`
+        - The endpoint returns deterministic JSON
+
+  - id: fastapi-auth
+    weeks: "8-10"
+    title: Authentication, Sessions, and Secrets
+    summary: Add secure defaults around auth flows, session handling, and environment configuration.
+    concepts:
+      - Secret management and config boundaries
+      - Session and cookie basics
+      - Secure-by-default auth flows
+
+  - id: react-components
+    weeks: "10-12"
+    title: React Components and State
+    summary: Build confidence with component composition, props, state, and UI validation loops.
+    concepts:
+      - Component boundaries and props
+      - Local state and event handling
+      - Rendering predictable, testable UI
+
+  - id: react-data-flow
+    weeks: "12-16"
+    title: React Data Flow and Forms
+    summary: Combine client state, async requests, and form handling with predictable UX.
+    concepts:
+      - Client and server boundaries
+      - Form state and validation
+      - Error handling in the UI
+
+  - id: docker-postgres
+    weeks: "16-18"
+    title: Docker, Postgres, and Local Services
+    summary: Learn to run app dependencies locally, isolate state, and debug containerized services.
+    concepts:
+      - Container lifecycle and mounts
+      - Service dependencies and health checks
+      - Local database workflows
+
+  - id: appsec-basics
+    weeks: "18-22"
+    title: AppSec Basics for Full-Stack Apps
+    summary: "Focus on defensive security: input validation, auth boundaries, dependency hygiene, and safe defaults."
+    concepts:
+      - XSS, CSRF, and SQL injection from a remediation-first angle
+      - Dependency scanning and supply-chain hygiene
+      - Threat modeling of common app flows
+
+  - id: threat-modeling-lab
+    weeks: "22-24"
+    title: Threat Modeling and Ethical Security Lab
+    summary: Work only against your isolated lab to understand attack surface, observability, and remediation.
+    concepts:
+      - Lab-only scope confirmation
+      - Private targets, logs, and indicators
+      - Remediation after every exercise

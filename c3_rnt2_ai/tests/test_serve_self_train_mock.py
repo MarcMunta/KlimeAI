@@ -104,3 +104,36 @@ def test_self_train_tick_skips_when_vram_insufficient(tmp_path: Path, monkeypatc
     assert result.get("skipped") == "vram_insufficient"
     assert train_calls == []
     assert (tmp_path / "data" / "locks" / "gpu.lock").exists()
+
+
+def test_self_train_tick_skips_when_host_ram_insufficient(tmp_path: Path, monkeypatch) -> None:
+    from c3rnt2 import __main__ as main_mod
+
+    monkeypatch.setattr(main_mod, "ingest_sources", lambda base_dir, allowlist, settings: 0)
+    monkeypatch.setattr(main_mod, "get_vram_free_mb", lambda: 10_000.0)
+    monkeypatch.setattr(main_mod, "_host_ram_free_mb", lambda: 1024.0)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    train_calls: list[int] = []
+
+    def _fake_train(_settings, _base_dir, reuse_dataset=False):
+        train_calls.append(1)
+        return SimpleNamespace(ok=True, ok_eval=True, ok_train=True, eval_ok=True)
+
+    settings = {
+        "core": {"vram_safety_margin_mb": 0, "vram_threshold_mb": 0},
+        "server": {"block_during_training": True, "train_strategy": "inprocess", "train_host_ram_threshold_mb": 8192},
+        "continuous": {"ingest_web": False, "trigger": {"enabled": False}},
+    }
+    result = main_mod._run_self_train_tick(
+        app,
+        settings,
+        tmp_path,
+        reuse_dataset=False,
+        maintenance_window_s=0.0,
+        reload_fn=None,
+        train_fn=_fake_train,
+    )
+    assert result.get("ok") is True
+    assert result.get("skipped") == "host_ram_insufficient"
+    assert train_calls == []

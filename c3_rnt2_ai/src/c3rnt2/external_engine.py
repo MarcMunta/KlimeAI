@@ -60,6 +60,34 @@ def _extract_delta(evt: dict) -> str:
     return ""
 
 
+def _normalize_messages(messages: Iterable[dict[str, Any]] | None, prompt: str | None) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    if messages:
+        for raw in messages:
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role") or "user").strip().lower() or "user"
+            content = raw.get("content")
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if text is not None:
+                            parts.append(str(text))
+                    elif item is not None:
+                        parts.append(str(item))
+                content_text = "".join(parts).strip()
+            else:
+                content_text = str(content or "").strip()
+            if not content_text:
+                continue
+            normalized.append({"role": role, "content": content_text})
+    if normalized:
+        return normalized
+    return [{"role": "user", "content": str(prompt or "")}]
+
+
 class ExternalEngineModel:
     is_external = True
     is_hf = False
@@ -172,8 +200,9 @@ class ExternalEngineModel:
 
     def generate(self, prompt: str, *, max_new_tokens: int = 64, temperature: float = 1.0, top_p: float = 1.0, **_kwargs) -> str:
         self._ensure_started()
+        messages = _normalize_messages(_kwargs.get("messages"), prompt)
         payload: dict[str, Any] = {
-            "messages": [{"role": "user", "content": str(prompt)}],
+            "messages": messages,
             "max_tokens": int(max_new_tokens),
             "temperature": float(temperature),
             "top_p": float(top_p),
@@ -260,8 +289,9 @@ class ExternalEngineModel:
 
     def stream_generate(self, prompt: str, *, max_new_tokens: int = 64, temperature: float = 1.0, top_p: float = 1.0, **_kwargs) -> Iterable[str]:
         self._ensure_started()
+        messages = _normalize_messages(_kwargs.get("messages"), prompt)
         payload: dict[str, Any] = {
-            "messages": [{"role": "user", "content": str(prompt)}],
+            "messages": messages,
             "max_tokens": int(max_new_tokens),
             "temperature": float(temperature),
             "top_p": float(top_p),

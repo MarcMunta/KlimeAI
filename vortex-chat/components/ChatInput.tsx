@@ -16,6 +16,8 @@ interface ChatInputProps {
   isThinking?: boolean;
   onStop?: () => void;
   onInteraction?: () => void;
+  onFocusChange?: (focused: boolean) => void;
+  onDraftChange?: (hasDraft: boolean) => void;
 }
 
 const ChatInput: React.FC<ChatInputProps> = ({
@@ -29,6 +31,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
   isThinking,
   onStop,
   onInteraction,
+  onFocusChange,
+  onDraftChange,
 }) => {
   const [input, setInput] = useState('');
   const [isInternetEnabled, setIsInternetEnabled] = useState(false);
@@ -55,6 +59,10 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, [input, adjustHeight]);
 
   useEffect(() => {
+    onDraftChange?.(input.trim().length > 0);
+  }, [input, onDraftChange]);
+
+  useEffect(() => {
     if (!canUseInternet) setIsInternetEnabled(false);
   }, [canUseInternet]);
 
@@ -77,6 +85,26 @@ const ChatInput: React.FC<ChatInputProps> = ({
       handleSend();
     }
   };
+
+  const statusChips = [
+    mode === 'agent'
+      ? (language === 'es' ? 'Agente activo' : 'Agent active')
+      : (language === 'es' ? 'Consulta guiada' : 'Grounded query'),
+    useThinking
+      ? (language === 'es' ? 'Thinking' : 'Thinking')
+      : (language === 'es' ? 'Fast' : 'Fast'),
+    isInternetEnabled
+      ? (language === 'es' ? 'Internet en este prompt' : 'Internet on this prompt')
+      : null,
+    autoTrainEnabled
+      ? (language === 'es' ? 'Aprender tras responder' : 'Learn after reply')
+      : null,
+  ].filter(Boolean) as string[];
+
+  const footerHint = sendDisabledReason
+    || (language === 'es'
+      ? 'Enter para enviar. Shift+Enter para nueva línea.'
+      : 'Enter to send. Shift+Enter for a new line.');
 
   return (
     <div className="max-w-[840px] mx-auto w-full relative px-6 accelerated">
@@ -137,7 +165,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
           value={input}
           onChange={(e) => { setInput(e.target.value); onInteraction?.(); }}
           onKeyDown={handleKeyDown}
-          onFocus={onInteraction}
+          onFocus={() => { onInteraction?.(); onFocusChange?.(true); }}
+          onBlur={() => onFocusChange?.(false)}
           placeholder={mode === 'agent' ? t.input_placeholder_agent : t.input_placeholder_ask}
           rows={1}
           className="flex-1 bg-transparent border-none focus:ring-0 outline-none resize-none py-4 px-3 text-[15px] leading-relaxed placeholder:text-muted-foreground/30 dark:placeholder:text-zinc-600 font-medium text-foreground relative z-10 custom-scrollbar"
@@ -226,6 +255,22 @@ const ChatInput: React.FC<ChatInputProps> = ({
           )}
         </div>
       </motion.div>
+
+      <div className="mt-3 flex flex-col gap-3 px-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          {statusChips.map((chip) => (
+            <span
+              key={chip}
+              className="rounded-full border border-border/50 bg-background/70 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-muted-foreground"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+        <p className={`text-xs ${sendDisabledReason ? 'text-primary' : 'text-muted-foreground'}`}>
+          {footerHint}
+        </p>
+      </div>
     </div>
   );
 };

@@ -41,11 +41,22 @@ docker compose run --rm trainer python -m c3rnt2 train-once --profile rtx4080_16
 docker compose run --rm eval python -m c3rnt2 bench --profile rtx4080_16gb_programming_local --scenario default
 ```
 
+Windows one-command local-lab bootstrap:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ..\scripts\local_lab_init.ps1
+```
+
+Ese wrapper levanta `c3rnt2.control_server`, asegura `model-init` si faltan pesos locales, arranca `sglang-runtime` + `vortex-api` y abre `vortex-chat` en `http://127.0.0.1:4173`.
+
 Notas:
 - El runtime OpenAI-compatible queda expuesto en `http://127.0.0.1:30000`.
 - La API de Vortex queda expuesta en `http://127.0.0.1:8000`.
+- El control plane local queda expuesto en `http://127.0.0.1:8765`.
 - No hay fallback silencioso en los perfiles principales Docker-first.
 - `ingest_web`, `autolearn.web_ingest` y `autolearn.url_discovery` quedan desactivados en el path principal.
+- El modo internet del frontend es por prompt y usa allowlist editable desde la UI/control service.
+- Los runs de entrenamiento rápido/completo quedan en `data/control/training_runs/`.
 - El corpus local vive en `data/corpora/programming/{python,fastapi,react_ts,pytorch,git_linux,repo_notes}` y puedes ampliar la parte defensiva en `data/corpora/cybersecurity/`.
 - Los adapters HF quedan en cuarentena manual; el training genera `meta.json`, eval y bench, pero no promociona a producción automaticamente.
 

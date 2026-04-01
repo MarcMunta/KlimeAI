@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
+# pylint: disable=import-error,no-name-in-module
+
 from c3rnt2.promotion.gating import bench_gate, compare_to_baseline
 
 
@@ -42,3 +45,33 @@ def test_compare_to_baseline_returns_ok_reason_tuple() -> None:
     )
     assert ok is True
     assert reason == ""
+
+
+def test_bench_gate_fails_on_latency_p95_threshold() -> None:
+    verdict = bench_gate(
+        {"tokens_per_sec": 20.0, "latency_p95_ms": 950.0},
+        baseline=None,
+        thresholds={"min_tokens_per_sec": 0.0, "max_regression": 1.0, "max_latency_p95_ms": 900.0},
+    )
+    assert verdict["ok"] is False
+    assert "latency_p95_exceeded" in (verdict["reason"] or "")
+
+
+def test_bench_gate_fails_on_latency_regression() -> None:
+    verdict = bench_gate(
+        {"tokens_per_sec": 20.0, "latency_p95_ms": 120.0},
+        baseline={"tokens_per_sec": 20.0, "latency_p95_ms": 100.0},
+        thresholds={"min_tokens_per_sec": 0.0, "max_regression": 1.0, "max_latency_regression": 0.1},
+    )
+    assert verdict["ok"] is False
+    assert "latency_regression_exceeded" in (verdict["reason"] or "")
+
+
+def test_bench_gate_fails_on_error_rate_threshold() -> None:
+    verdict = bench_gate(
+        {"tokens_per_sec": 20.0, "error_rate": 0.03},
+        baseline=None,
+        thresholds={"min_tokens_per_sec": 0.0, "max_regression": 1.0, "max_error_rate": 0.01},
+    )
+    assert verdict["ok"] is False
+    assert "error_rate_exceeded" in (verdict["reason"] or "")

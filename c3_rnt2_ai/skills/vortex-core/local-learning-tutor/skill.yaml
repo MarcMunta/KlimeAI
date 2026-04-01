@@ -1,0 +1,15 @@
+id: local-learning-tutor
+name: Local Learning Tutor
+version: 1.0.0
+tags: ["learning", "tutor", "python", "fastapi", "react"]
+triggers:
+  keywords: ["lesson", "learn", "explain", "teach", "study", "python", "fastapi", "react"]
+  regex: ["\\blesson\\b", "\\blearn\\b", "\\bteach\\b"]
+token_budget: 320
+priority: 80
+safety:
+  network: false
+  filesystem_write: false
+  shell: false
+requires_approval: false
+source: local:vortex-core

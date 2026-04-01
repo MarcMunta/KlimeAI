@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
@@ -843,6 +845,39 @@ def _normalize_backend_label(value: object) -> str:
     return name
 
 
+def _external_model_aliases(settings: dict) -> set[str]:
+    core = settings.get("core", {}) or {}
+    aliases: set[str] = set()
+    for raw in (
+        core.get("external_model"),
+        core.get("hf_model"),
+        core.get("model"),
+    ):
+        text = str(raw or "").strip().lower()
+        if not text:
+            continue
+        aliases.add(text)
+        if "/" in text:
+            aliases.add(text.split("/")[-1])
+    return aliases
+
+
+def _resolve_requested_backend(requested_model: object, settings: dict, default_backend: str) -> tuple[str | None, bool]:
+    text = str(requested_model or "").strip()
+    if not text:
+        return None, False
+    lowered = text.lower()
+    if lowered in {"auto", "router"}:
+        return None, True
+    normalized = _normalize_backend_label(text)
+    if normalized != lowered:
+        return normalized, False
+    if str(default_backend or "").strip().lower() == "external":
+        if lowered in _external_model_aliases(settings):
+            return "external", False
+    return normalized, False
+
+
 def _llama_cpp_ready(settings: dict, base_dir: Path) -> bool:
     core = settings.get("core", {}) or {}
     model_path = core.get("llama_cpp_model_path")
@@ -1330,6 +1365,76 @@ def _extract_query(messages: list[dict], prompt: str | None) -> str:
     return (prompt or "").strip()
 
 
+def _normalize_smalltalk_query(query: str) -> str:
+    text = unicodedata.normalize("NFKD", str(query or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower().strip()
+    text = re.sub(r"(.)\1{2,}", r"\1", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _query_is_smalltalk(query: str) -> bool:
+    text = _normalize_smalltalk_query(query)
+    if not text:
+        return True
+    if len(text) > 48:
+        return False
+
+    exact_matches = {
+        "hola",
+        "hola a",
+        "holaa",
+        "holaaa",
+        "hello",
+        "hi",
+        "hey",
+        "buenas",
+        "buenos dias",
+        "buenas tardes",
+        "buenas noches",
+        "que tal",
+        "como estas",
+        "como vas",
+        "como va",
+        "gracias",
+        "thanks",
+        "thank you",
+        "ok",
+        "vale",
+    }
+    if text in exact_matches:
+        return True
+
+    smalltalk_tokens = {
+        "hola",
+        "holaa",
+        "holaaa",
+        "hello",
+        "hi",
+        "hey",
+        "buenas",
+        "buenos",
+        "dias",
+        "tardes",
+        "noches",
+        "como",
+        "estas",
+        "vas",
+        "va",
+        "que",
+        "tal",
+        "gracias",
+        "thanks",
+        "thank",
+        "you",
+        "ok",
+        "vale",
+    }
+    tokens = [token for token in text.split(" ") if token]
+    return bool(tokens) and len(tokens) <= 4 and all(token in smalltalk_tokens for token in tokens)
+
+
 def _resolve_messages(payload: dict) -> list[dict]:
     messages = payload.get("messages")
     if isinstance(messages, list) and messages:
@@ -1508,7 +1613,12 @@ def _has_context_marker(messages: list[dict], prompt: str | None) -> bool:
 
 
 def _web_search_and_ingest(
-    base_dir: Path, query: str, settings: dict, *, max_results: int = 5
+    base_dir: Path,
+    query: str,
+    settings: dict,
+    *,
+    max_results: int = 5,
+    extra_allowlist: list[str] | None = None,
 ) -> list[str]:
     """Search DDG for *query*, fetch top pages, ingest into knowledge store.
 
@@ -1522,6 +1632,11 @@ def _web_search_and_ingest(
     from .continuous.knowledge_store import KnowledgeStore
 
     allowlist = resolve_web_allowlist(settings) or []
+    if extra_allowlist:
+        for domain in extra_allowlist:
+            item = str(domain or "").strip().lower()
+            if item and item not in allowlist:
+                allowlist.append(item)
     # DDG must be reachable
     if "duckduckgo.com" not in allowlist:
         allowlist = list(allowlist) + ["duckduckgo.com"]
@@ -1637,6 +1752,9 @@ def _inject_rag_context(
         return messages, None, rag_info
     query = _extract_query(messages, prompt)
     if not query:
+        return messages, None, rag_info
+    if _query_is_smalltalk(query):
+        rag_info["skipped_reason"] = "smalltalk"
         return messages, None, rag_info
     top_k_raw = rag_info.get("top_k", 0)
     top_k = int(cast(Any, top_k_raw)) if top_k_raw is not None else 0
@@ -2441,10 +2559,16 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         # --- Real-time web search when internet button is ON ---
         if payload.get("web_ingest"):
             user_query = _extract_query(messages, None)
+            request_allowlist = payload.get("web_allowlist")
+            scoped_allowlist = request_allowlist if isinstance(request_allowlist, list) else None
             if user_query:
                 try:
                     _web_search_and_ingest(
-                        base_dir, user_query, settings, max_results=5
+                        base_dir,
+                        user_query,
+                        settings,
+                        max_results=5,
+                        extra_allowlist=scoped_allowlist,
                     )
                 except Exception as _ws_exc:
                     LOG.warning("web_search_error: %s", _ws_exc)
@@ -2479,10 +2603,9 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
         requested_backend = None
         use_router = False
         if requested_model:
-            if requested_model.lower() in {"auto", "router"}:
-                use_router = True
-            else:
-                requested_backend = _normalize_backend_label(requested_model)
+            requested_backend, use_router = _resolve_requested_backend(
+                requested_model, settings, default_backend_label
+            )
         if requested_backend:
             chosen_backend = requested_backend
         elif router is not None and (use_router or not requested_model):
@@ -2584,6 +2707,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
             tokenizer=getattr(selected_model, "tokenizer", None),
             default_system=default_system,
         )
+        engine_messages = list(messages)
 
         ctx_max = _resolve_ctx_max_tokens(settings)
         if ctx_max is not None:
@@ -2751,6 +2875,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                                         "repetition_penalty"
                                     ],
                                     no_repeat_ngram=decode_args["no_repeat_ngram"],
+                                    messages=engine_messages if bool(getattr(selected_model, "is_external", False)) else None,
                                     return_stats=True,
                                 )
                             else:
@@ -2763,6 +2888,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                                         "repetition_penalty"
                                     ],
                                     no_repeat_ngram=decode_args["no_repeat_ngram"],
+                                    messages=engine_messages if bool(getattr(selected_model, "is_external", False)) else None,
                                 )
                                 stats = None
                         else:
@@ -2802,6 +2928,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                                                 no_repeat_ngram=decode_args[
                                                     "no_repeat_ngram"
                                                 ],
+                                                messages=engine_messages if bool(getattr(selected_model, "is_external", False)) else None,
                                                 return_stats=True,
                                             )
                                         else:
@@ -2818,6 +2945,7 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                                                 no_repeat_ngram=decode_args[
                                                     "no_repeat_ngram"
                                                 ],
+                                                messages=engine_messages if bool(getattr(selected_model, "is_external", False)) else None,
                                             )
                                             stats = None
                                     else:
@@ -3012,6 +3140,8 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                             stream_args = _stream_decode_args_for_model(
                                 current_model, decode_args
                             )
+                            if bool(getattr(current_model, "is_external", False)):
+                                stream_args["messages"] = engine_messages
                             gen = current_model.stream_generate(prompt, **stream_args)
                         else:
                             gen = _stream_generate(
@@ -3043,6 +3173,8 @@ def create_app(settings: dict, base_dir: Path) -> FastAPI:
                                         stream_args = _stream_decode_args_for_model(
                                             current_model, decode_args
                                         )
+                                        if bool(getattr(current_model, "is_external", False)):
+                                            stream_args["messages"] = engine_messages
                                         gen = current_model.stream_generate(
                                             prompt, **stream_args
                                         )
@@ -3691,10 +3823,16 @@ def _run_basic_server(settings: dict, base_dir: Path, host: str, port: int) -> N
             # --- Real-time web search when internet button is ON ---
             if payload.get("web_ingest"):
                 user_query = _extract_query(messages, None)
+                request_allowlist = payload.get("web_allowlist")
+                scoped_allowlist = request_allowlist if isinstance(request_allowlist, list) else None
                 if user_query:
                     try:
                         _web_search_and_ingest(
-                            base_dir, user_query, settings, max_results=5
+                            base_dir,
+                            user_query,
+                            settings,
+                            max_results=5,
+                            extra_allowlist=scoped_allowlist,
                         )
                     except Exception:
                         pass

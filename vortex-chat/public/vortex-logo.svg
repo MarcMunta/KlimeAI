@@ -1,0 +1,42 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="vortex-outer" x1="115" y1="94" x2="372" y2="343" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="55%" stop-color="#3FE4FF" />
+      <stop offset="100%" stop-color="#008CFF" />
+    </linearGradient>
+    <linearGradient id="vortex-core" x1="262" y1="180" x2="318" y2="235" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#18C8FF" />
+    </linearGradient>
+    <filter id="vortex-glow" x="58" y="58" width="396" height="396" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18" result="blur" />
+      <feColorMatrix
+        in="blur"
+        type="matrix"
+        values="1 0 0 0 0
+                0 0.9 0 0 0
+                0 0.98 1 0 0
+                0 0 0 0.28 0"
+      />
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="144" fill="#02060D" />
+  <circle cx="256" cy="256" r="176" fill="#030914" stroke="#0A1324" stroke-width="10" />
+
+  <g filter="url(#vortex-glow)">
+    <path d="M386 179C362 126 309 92 248 92C162 92 92 162 92 248" stroke="#11CFFF" stroke-opacity="0.38" stroke-width="44" stroke-linecap="round" />
+  </g>
+
+  <path d="M386 179C362 126 309 92 248 92C162 92 92 162 92 248" stroke="url(#vortex-outer)" stroke-width="34" stroke-linecap="round" />
+  <path d="M362 201C342 159 300 131 252 131C183 131 127 187 127 256" stroke="white" stroke-width="26" stroke-linecap="round" stroke-opacity="0.97" />
+  <path d="M333 219C317 188 286 167 247 167C194 167 151 210 151 263" stroke="#16C8FF" stroke-width="20" stroke-linecap="round" />
+  <path d="M305 234C294 212 272 196 246 196C209 196 179 226 179 263" stroke="#098CFF" stroke-width="14" stroke-linecap="round" />
+
+  <circle cx="298" cy="205" r="35" fill="white" />
+  <circle cx="298" cy="205" r="17" fill="url(#vortex-core)" />
+
+  <path d="M164 305C190 348 237 376 291 376C374 376 441 309 441 226C441 197 433 170 419 147" stroke="#081426" stroke-width="28" stroke-linecap="round" stroke-opacity="0.9" />
+  <circle cx="256" cy="256" r="103" stroke="#0C1730" stroke-width="8" />
+</svg>

@@ -1,23 +1,22 @@
-
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { 
-  Search, 
-  MessageSquare, 
-  Moon, 
-  Sun, 
-  Plus, 
-  Settings, 
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
   Command,
-  X,
-  Layout,
   Download,
   Eraser,
   HelpCircle,
+  Layout,
+  MessageSquare,
+  Moon,
+  Plus,
+  Search,
+  Settings,
   Sparkles,
+  Sun,
+  Type,
+  X,
   ChevronRight,
-  Type
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { ChatSession, FontSize, Language } from '../types';
 
 interface CommandPaletteProps {
@@ -41,6 +40,44 @@ interface CommandPaletteProps {
   language: Language;
 }
 
+type PaletteItem = {
+  id: string;
+  title: string;
+  icon: React.ReactNode;
+  action: () => void;
+  category: string;
+  disabled?: boolean;
+};
+
+const text = {
+  es: {
+    quick: 'Acciones Rápidas',
+    preferences: 'Preferencias',
+    interface: 'Interfaz',
+    data: 'Datos',
+    recent: 'Chats Recientes',
+    system: 'Sistema',
+    placeholder: 'Busca un comando o una sesión...',
+    empty: 'No se encontraron coincidencias',
+    navigate: 'Navegar',
+    run: 'Ejecutar',
+    footer: 'Consola local',
+  },
+  en: {
+    quick: 'Quick Actions',
+    preferences: 'Preferences',
+    interface: 'Interface',
+    data: 'Data',
+    recent: 'Recent Chats',
+    system: 'System',
+    placeholder: 'Search for a command or session...',
+    empty: 'No matches found',
+    navigate: 'Navigate',
+    run: 'Run',
+    footer: 'Local console',
+  },
+};
+
 const CommandPalette: React.FC<CommandPaletteProps> = ({
   isOpen,
   onClose,
@@ -48,7 +85,6 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   currentSessionId,
   onSelectSession,
   onNewChat,
-  onDeleteSession,
   onClearHistory,
   onExportChat,
   isDarkMode,
@@ -59,67 +95,58 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   onOpenHelp,
   categoryOrder,
   onSetFontSize,
-  language
+  language,
 }) => {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const toggleThemeTitle = isDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro';
+  const copy = text[language];
+  const themeToggleTitle = language === 'es'
+    ? (isDarkMode ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro')
+    : (isDarkMode ? 'Switch to light mode' : 'Switch to dark mode');
 
-  const actions = useMemo(() => [
-    { id: 'new-chat', title: 'Nuevo Chat', icon: <Plus size={18} />, action: onNewChat, category: 'Acciones Rápidas' },
-    { id: 'toggle-dark', title: toggleThemeTitle, icon: isDarkMode ? <Sun size={18} /> : <Moon size={18} />, action: toggleDarkMode, category: 'Preferencias' },
-    { id: 'toggle-sidebar', title: isSidebarOpen ? 'Ocultar Lateral' : 'Mostrar Lateral', icon: <Layout size={18} />, action: onToggleSidebar, category: 'Interfaz' },
-    { id: 'font-small', title: 'Fuente: Pequeña', icon: <Type size={14} />, action: () => onSetFontSize('small'), category: 'Interfaz' },
-    { id: 'font-medium', title: 'Fuente: Normal', icon: <Type size={18} />, action: () => onSetFontSize('medium'), category: 'Interfaz' },
-    { id: 'font-large', title: 'Fuente: Grande', icon: <Type size={22} />, action: () => onSetFontSize('large'), category: 'Interfaz' },
-    { 
-        id: 'export-chat', 
-        title: 'Exportar Chat (Markdown)', 
-        icon: <Download size={18} />, 
-        action: onExportChat, 
-        category: 'Datos',
-        disabled: !currentSessionId
-    },
-    { 
-        id: 'clear-history', 
-        title: 'Purgar Historial', 
-        icon: <Eraser size={18} />, 
-        action: onClearHistory, 
-        category: 'Datos',
-        disabled: sessions.length === 0
-    },
-    { id: 'settings', title: 'Configuración Avanzada', icon: <Settings size={18} />, action: onOpenSettings, category: 'Sistema' },
-    { id: 'help', title: 'Ayuda y Atajos', icon: <HelpCircle size={18} />, action: onOpenHelp, category: 'Sistema' },
-  ], [toggleThemeTitle, isDarkMode, isSidebarOpen, currentSessionId, sessions.length, onNewChat, toggleDarkMode, onToggleSidebar, onExportChat, onClearHistory, onOpenSettings, onOpenHelp, onSetFontSize]);
+  const categories = {
+    quick: categoryOrder.includes(copy.quick) ? copy.quick : text.es.quick,
+    preferences: categoryOrder.includes(copy.preferences) ? copy.preferences : text.es.preferences,
+    interface: categoryOrder.includes(copy.interface) ? copy.interface : text.es.interface,
+    data: categoryOrder.includes(copy.data) ? copy.data : text.es.data,
+    recent: categoryOrder.includes(copy.recent) ? copy.recent : text.es.recent,
+    system: categoryOrder.includes(copy.system) ? copy.system : text.es.system,
+  };
+
+  const actions = useMemo<PaletteItem[]>(() => [
+    { id: 'new-chat', title: language === 'es' ? 'Nueva conversación' : 'New conversation', icon: <Plus size={18} />, action: onNewChat, category: categories.quick },
+    { id: 'toggle-dark', title: themeToggleTitle, icon: isDarkMode ? <Sun size={18} /> : <Moon size={18} />, action: toggleDarkMode, category: categories.preferences },
+    { id: 'toggle-sidebar', title: language === 'es' ? (isSidebarOpen ? 'Ocultar lateral' : 'Mostrar lateral') : (isSidebarOpen ? 'Hide sidebar' : 'Show sidebar'), icon: <Layout size={18} />, action: onToggleSidebar, category: categories.interface },
+    { id: 'font-small', title: language === 'es' ? 'Fuente: pequeña' : 'Font: small', icon: <Type size={14} />, action: () => onSetFontSize('small'), category: categories.interface },
+    { id: 'font-medium', title: language === 'es' ? 'Fuente: normal' : 'Font: medium', icon: <Type size={18} />, action: () => onSetFontSize('medium'), category: categories.interface },
+    { id: 'font-large', title: language === 'es' ? 'Fuente: grande' : 'Font: large', icon: <Type size={22} />, action: () => onSetFontSize('large'), category: categories.interface },
+    { id: 'export-chat', title: language === 'es' ? 'Exportar chat (Markdown)' : 'Export chat (Markdown)', icon: <Download size={18} />, action: onExportChat, category: categories.data, disabled: !currentSessionId },
+    { id: 'clear-history', title: language === 'es' ? 'Borrar historial' : 'Clear history', icon: <Eraser size={18} />, action: onClearHistory, category: categories.data, disabled: sessions.length === 0 },
+    { id: 'settings', title: language === 'es' ? 'Configuración avanzada' : 'Advanced settings', icon: <Settings size={18} />, action: onOpenSettings, category: categories.system },
+    { id: 'help', title: language === 'es' ? 'Ayuda y atajos' : 'Help and shortcuts', icon: <HelpCircle size={18} />, action: onOpenHelp, category: categories.system },
+  ], [categories.data, categories.interface, categories.preferences, categories.quick, categories.system, currentSessionId, isDarkMode, isSidebarOpen, language, onClearHistory, onExportChat, onNewChat, onOpenHelp, onOpenSettings, onSetFontSize, onToggleSidebar, sessions.length, themeToggleTitle, toggleDarkMode]);
 
   const filteredItems = useMemo(() => {
     const search = query.toLowerCase();
-    
-    const matchingActions = actions.filter(a => !a.disabled && a.title.toLowerCase().includes(search));
+    const matchingActions = actions.filter((item) => !item.disabled && item.title.toLowerCase().includes(search));
     const matchingSessions = sessions
-      .filter(s => s.title.toLowerCase().includes(search))
-      .map(s => ({
-        id: s.id,
-        title: s.title,
+      .filter((session) => session.title.toLowerCase().includes(search))
+      .map<PaletteItem>((session) => ({
+        id: session.id,
+        title: session.title,
         icon: <MessageSquare size={18} />,
-        action: () => onSelectSession(s.id),
-        category: 'Chats Recientes'
+        action: () => onSelectSession(session.id),
+        category: categories.recent,
       }));
 
-    const allItems = [...matchingActions, ...matchingSessions];
-
-    return allItems.sort((a, b) => {
-      const indexA = categoryOrder.indexOf(a.category);
-      const indexB = categoryOrder.indexOf(b.category);
-      return indexA - indexB;
-    });
-  }, [query, actions, sessions, onSelectSession, categoryOrder]);
+    return [...matchingActions, ...matchingSessions].sort((left, right) => categoryOrder.indexOf(left.category) - categoryOrder.indexOf(right.category));
+  }, [actions, categories.recent, categoryOrder, onSelectSession, query, sessions]);
 
   const orderedCategories = useMemo(() => {
-    const activeCategories = new Set(filteredItems.map(i => i.category));
-    return categoryOrder.filter(cat => activeCategories.has(cat));
-  }, [filteredItems, categoryOrder]);
+    const activeCategories = new Set(filteredItems.map((item) => item.category));
+    return categoryOrder.filter((category) => activeCategories.has(category));
+  }, [categoryOrder, filteredItems]);
 
   useEffect(() => {
     if (isOpen) {
@@ -130,66 +157,65 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   }, [isOpen]);
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = (event: KeyboardEvent) => {
       if (!isOpen) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSelectedIndex(prev => (prev + 1) % Math.max(1, filteredItems.length));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSelectedIndex(prev => (prev - 1 + filteredItems.length) % Math.max(1, filteredItems.length));
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setSelectedIndex((current) => (current + 1) % Math.max(1, filteredItems.length));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setSelectedIndex((current) => (current - 1 + filteredItems.length) % Math.max(1, filteredItems.length));
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
         if (filteredItems[selectedIndex]) {
           filteredItems[selectedIndex].action();
           onClose();
         }
-      } else if (e.key === 'Escape') {
+      } else if (event.key === 'Escape') {
         onClose();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, filteredItems, selectedIndex, onClose]);
+  }, [filteredItems, isOpen, onClose, selectedIndex]);
 
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh] px-4">
-          <motion.div 
+        <div className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[15vh]">
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="absolute inset-0 bg-zinc-950/40 backdrop-blur-xl"
             onClick={onClose}
           />
-          
-          <motion.div 
+
+          <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 40, filter: 'blur(10px)' }}
             animate={{ opacity: 1, scale: 1, y: 0, filter: 'blur(0px)' }}
             exit={{ opacity: 0, scale: 0.95, y: 20, filter: 'blur(10px)' }}
-            className="relative w-full max-w-2xl bg-white/95 dark:bg-zinc-900/95 border border-border shadow-2xl rounded-[2.5rem] overflow-hidden flex flex-col"
+            className="relative flex w-full max-w-2xl flex-col overflow-hidden rounded-[2.5rem] border border-border bg-white/95 shadow-2xl dark:bg-zinc-900/95"
           >
-            <div className="relative flex items-center px-10 border-b border-border/50 h-24 bg-muted/20 dark:bg-zinc-900/40">
-              <Search size={22} className="text-primary mr-6 shrink-0 opacity-60" />
+            <div className="relative flex h-24 items-center border-b border-border/50 bg-muted/20 px-10 dark:bg-zinc-900/40">
+              <Search size={22} className="mr-6 shrink-0 text-primary opacity-60" />
               <input
                 ref={inputRef}
                 type="text"
-                className="flex-1 bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground/30 dark:placeholder:text-zinc-600 text-xl font-bold tracking-tight"
-                placeholder="Busca un comando o sesión..."
+                className="flex-1 bg-transparent text-xl font-bold tracking-tight text-foreground outline-none placeholder:text-muted-foreground/30 dark:placeholder:text-zinc-600"
+                placeholder={copy.placeholder}
                 value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
+                onChange={(event) => {
+                  setQuery(event.target.value);
                   setSelectedIndex(0);
                 }}
               />
               <button
+                type="button"
                 onClick={onClose}
                 aria-label={language === 'es' ? 'Cerrar' : 'Close'}
-                title={language === 'es' ? 'Cerrar' : 'Close'}
-                className="p-3 hover:bg-muted dark:hover:bg-zinc-800 rounded-full transition-all"
+                className="rounded-full p-3 transition-all hover:bg-muted dark:hover:bg-zinc-800"
               >
                 <X size={20} className="text-muted-foreground" />
               </button>
@@ -198,19 +224,15 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             <div className="max-h-[50vh] overflow-y-auto p-5 custom-scrollbar">
               <AnimatePresence mode="popLayout">
                 {filteredItems.length === 0 ? (
-                  <motion.div 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="py-16 flex flex-col items-center justify-center text-muted-foreground gap-4"
-                  >
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center gap-4 py-16 text-muted-foreground">
                     <Sparkles size={32} className="opacity-20" />
-                    <p className="text-xs font-black uppercase tracking-[0.3em] opacity-40">No se encontraron protocolos</p>
+                    <p className="text-xs font-black uppercase tracking-[0.3em] opacity-40">{copy.empty}</p>
                   </motion.div>
                 ) : (
                   <div className="space-y-8 py-4">
-                    {orderedCategories.map(category => (
+                    {orderedCategories.map((category) => (
                       <div key={category} className="space-y-3">
-                        <h3 className="px-6 text-[10px] font-black text-primary/60 uppercase tracking-[0.4em] mb-4">
+                        <h3 className="mb-4 px-6 text-[10px] font-black uppercase tracking-[0.4em] text-primary/60">
                           {category}
                         </h3>
                         <div className="space-y-1.5">
@@ -228,37 +250,27 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                                     item.action();
                                     onClose();
                                   }}
-                                  className={`w-full flex items-center gap-5 px-6 py-4.5 rounded-2xl text-left transition-all relative group overflow-hidden ${
-                                    isSelected 
-                                      ? 'bg-primary text-primary-foreground shadow-lg shadow-primary/20 z-10' 
-                                      : 'hover:bg-muted/60 dark:hover:bg-zinc-800/60 text-foreground/70 dark:text-zinc-400'
+                                  className={`relative flex w-full items-center gap-5 overflow-hidden rounded-2xl px-6 py-4.5 text-left transition-all ${
+                                    isSelected
+                                      ? 'z-10 bg-primary text-primary-foreground shadow-lg shadow-primary/20'
+                                      : 'text-foreground/70 hover:bg-muted/60 dark:text-zinc-400 dark:hover:bg-zinc-800/60'
                                   }`}
                                 >
                                   {isSelected && (
-                                    <motion.div 
+                                    <motion.div
                                       layoutId="command-highlight"
-                                      className="absolute inset-0 bg-primary -z-10"
+                                      className="absolute inset-0 -z-10 bg-primary"
                                       transition={{ type: 'spring', stiffness: 500, damping: 40 }}
                                     />
                                   )}
-                                  
                                   <div className={`shrink-0 transition-transform duration-500 ${isSelected ? 'scale-110 rotate-3' : 'opacity-40'}`}>
                                     {item.icon}
                                   </div>
-                                  
-                                  <div className="flex-1 min-w-0 flex items-center justify-between">
+                                  <div className="flex min-w-0 flex-1 items-center justify-between">
                                     <p className={`text-[14.5px] font-bold tracking-tight ${isSelected ? 'text-white' : ''}`}>
                                       {item.title}
                                     </p>
-                                    {isSelected && (
-                                      <motion.div 
-                                        initial={{ x: -5, opacity: 0 }}
-                                        animate={{ x: 0, opacity: 1 }}
-                                        className="shrink-0"
-                                      >
-                                        <ChevronRight size={16} />
-                                      </motion.div>
-                                    )}
+                                    {isSelected && <ChevronRight size={16} />}
                                   </div>
                                 </motion.button>
                               );
@@ -271,20 +283,20 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
               </AnimatePresence>
             </div>
 
-            <div className="px-10 py-5 bg-muted/10 dark:bg-zinc-900/60 border-t border-border/40 flex items-center justify-between text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">
+            <div className="flex items-center justify-between border-t border-border/40 bg-muted/10 px-10 py-5 text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40 dark:bg-zinc-900/60">
               <div className="flex gap-6">
                 <span className="flex items-center gap-2">
-                  <kbd className="px-2 py-0.5 bg-background dark:bg-zinc-800 border border-border rounded-lg">↑↓</kbd>
-                  Navegar
+                  <kbd className="rounded-lg border border-border bg-background px-2 py-0.5 dark:bg-zinc-800">↑↓</kbd>
+                  {copy.navigate}
                 </span>
                 <span className="flex items-center gap-2">
-                  <kbd className="px-2 py-0.5 bg-background dark:bg-zinc-800 border border-border rounded-lg">↵</kbd>
-                  Ejecutar
+                  <kbd className="rounded-lg border border-border bg-background px-2 py-0.5 dark:bg-zinc-800">↵</kbd>
+                  {copy.run}
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                 <Command size={14} />
-                 <span>Consola de Inteligencia</span>
+                <Command size={14} />
+                <span>{copy.footer}</span>
               </div>
             </div>
           </motion.div>

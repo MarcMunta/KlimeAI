@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vortex | Asistente de IA</title>
+    <title>Vortex | Local Core</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       (function() {
@@ -66,28 +66,28 @@
       };
     </script>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
       
       :root {
-        --background: 210 20% 98%;
-        --foreground: 224 71.4% 4.1%;
-        --primary: 221.2 83.2% 53.3%;
-        --primary-foreground: 210 40% 98%;
-        --muted: 220 14% 94%;
-        --muted-foreground: 215.4 16.3% 40%;
-        --border: 220 13% 88%;
-        --ring: 221.2 83.2% 53.3%;
+        --background: 210 50% 99%;
+        --foreground: 220 39% 8%;
+        --primary: 198 100% 50%;
+        --primary-foreground: 0 0% 100%;
+        --muted: 210 40% 96%;
+        --muted-foreground: 220 13% 35%;
+        --border: 214 30% 89%;
+        --ring: 198 100% 50%;
       }
 
       .dark {
-        --background: 240 10% 4%;
-        --foreground: 0 0% 98%;
-        --primary: 217.2 91.2% 59.8%;
-        --primary-foreground: 222.2 47.4% 11.2%;
-        --muted: 240 6% 12%;
-        --muted-foreground: 240 5% 75%;
-        --border: 240 5% 18%;
-        --ring: 217.2 91.2% 59.8%;
+        --background: 222 47% 4%;
+        --foreground: 210 40% 98%;
+        --primary: 196 100% 52%;
+        --primary-foreground: 222 47% 8%;
+        --muted: 224 28% 10%;
+        --muted-foreground: 215 20% 75%;
+        --border: 224 22% 16%;
+        --ring: 196 100% 52%;
       }
 
       * {
@@ -98,12 +98,24 @@
       }
 
       body {
-        font-family: 'Plus Jakarta Sans', sans-serif;
+        font-family: 'Space Grotesk', sans-serif;
         background-color: hsl(var(--background));
         color: hsl(var(--foreground));
         overflow: hidden;
         margin: 0;
+        background-image:
+          radial-gradient(circle at 14% 14%, rgba(0, 194, 255, 0.16), transparent 24%),
+          radial-gradient(circle at 86% 10%, rgba(255, 255, 255, 0.78), transparent 16%),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(242, 248, 255, 0.96));
+        background-attachment: fixed;
         transition: background-color 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .dark body {
+        background-image:
+          radial-gradient(circle at 16% 18%, rgba(0, 194, 255, 0.22), transparent 28%),
+          radial-gradient(circle at 84% 10%, rgba(255, 255, 255, 0.08), transparent 16%),
+          linear-gradient(180deg, rgba(2, 6, 13, 0.98), rgba(1, 4, 10, 0.98));
       }
 
       .custom-scrollbar::-webkit-scrollbar { width: 4px; }
@@ -131,7 +143,7 @@
       }
 
       .vortex-grid-bg {
-        background-image: radial-gradient(circle at 2px 2px, white 1px, transparent 0);
+        background-image: radial-gradient(circle at 2px 2px, rgba(0, 194, 255, 0.34) 1px, transparent 0);
         background-size: 40px 40px;
       }
       

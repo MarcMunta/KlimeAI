@@ -517,15 +517,16 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
     setTimeout(() => setMsgCopied(false), 2000);
   }, [message.content]);
 
-  const fontSizeClass = { small: 'text-[12px]', medium: 'text-[15px]', large: 'text-[17px]' }[fontSize];
+  const fontSizeClass = { small: 'text-[11px]', medium: 'text-[14px]', large: 'text-[16px]' }[fontSize];
 
   const markdownComponents = useMemo(() => ({
-    ul: ({ children }: any) => <ul className="space-y-4 mb-6 list-none">{children}</ul>,
-    ol: ({ children }: any) => <ol className="space-y-4 mb-6 list-none counter-reset-pulse">{children}</ol>,
+    p: ({ children }: any) => <p className="m-0 leading-[1.55] text-foreground/90">{children}</p>,
+    ul: ({ children }: any) => <ul className="space-y-2.5 mb-4 list-none">{children}</ul>,
+    ol: ({ children }: any) => <ol className="space-y-2.5 mb-4 list-none counter-reset-pulse">{children}</ol>,
     li: ({ children, ordered, index }: any) => (
-      <motion.li initial={{ opacity: 0, x: -10 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} className="flex items-start gap-5 group/li">
-        <div className="shrink-0 mt-2">{ordered ? <div className="w-6 h-6 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-[10px] font-black text-primary shadow-inner">{index + 1}</div> : <div className="w-2 h-2 rounded-full bg-primary mt-1.5 shadow-[0_0_10px_rgba(var(--primary),0.8)] group-hover/li:scale-150 transition-transform duration-500" />}</div>
-        <span className="text-foreground/80 leading-relaxed font-medium group-hover/li:text-foreground transition-colors">{children}</span>
+      <motion.li initial={{ opacity: 0, x: -10 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} className="flex items-start gap-3 group/li">
+        <div className="shrink-0 mt-1.5">{ordered ? <div className="w-5 h-5 rounded-md bg-primary/10 border border-primary/20 flex items-center justify-center text-[9px] font-black text-primary shadow-inner">{index + 1}</div> : <div className="w-1.5 h-1.5 rounded-full bg-primary mt-1.5 shadow-[0_0_10px_rgba(var(--primary),0.8)] group-hover/li:scale-150 transition-transform duration-500" />}</div>
+        <span className="text-foreground/80 leading-[1.55] font-medium group-hover/li:text-foreground transition-colors">{children}</span>
       </motion.li>
     ),
     code({ node, inline, className, children, ...props }: any) {
@@ -537,13 +538,20 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
 
   const isThinking = isStreaming && !message.content && !!message.thought;
   const hasDiffBlock = useMemo(() => /```(?:diff|patch)\n[\s\S]*?```/i.test(message.content || ''), [message.content]);
+  const wrapperClass = isUser
+    ? 'max-w-[80%] md:max-w-[420px]'
+    : 'max-w-[90%] md:max-w-[680px]';
+  const bubbleClass = isUser
+    ? 'bg-primary text-white rounded-[1.45rem] rounded-tr-[0.62rem] shadow-[0_18px_46px_-26px_rgba(0,194,255,0.55)] px-3.5 py-2.5'
+    : 'bg-muted/10 border border-border/40 rounded-[1.65rem] rounded-tl-[0.7rem] glass-card px-4 py-3.5';
+  const timestampClass = isUser ? 'mt-1' : 'mt-1.5';
 
   return (
-    <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-10 accelerated`}>
-      <div className={`flex max-w-[96%] md:max-w-[88%] ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-5`}>
-        <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border transition-all duration-700 group-hover:scale-110 group-hover:rotate-6 ${isUser ? 'bg-primary text-white border-primary/20 shadow-xl' : 'bg-background border-border glass-card shadow-lg'}`}>{isUser ? <User size={20} /> : <Bot size={20} />}</div>
-        <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1`}>
-          <div className={`px-8 py-6 rounded-[2.5rem] ${isUser ? 'bg-primary text-white rounded-tr-none shadow-2xl' : 'bg-muted/10 border border-border/40 rounded-tl-none glass-card'} ${fontSizeClass} leading-relaxed w-full relative`}>
+    <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-4 accelerated`}>
+      <div className={`flex ${wrapperClass} ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-2.5`}>
+        <div className={`mt-1 flex h-8 w-8 rounded-2xl items-center justify-center shrink-0 border transition-all duration-500 group-hover:scale-105 ${isUser ? 'bg-primary text-white border-primary/20 shadow-lg' : 'bg-background border-border glass-card shadow-md'}`}>{isUser ? <User size={15} /> : <Bot size={15} />}</div>
+        <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0`}>
+          <div className={`${bubbleClass} ${fontSizeClass} leading-[1.45] w-fit max-w-full relative`}>
             {!isUser && message.fileChanges && message.fileChanges.length >= 2 && (
               <PatchOverview fileChanges={message.fileChanges} onToggleAll={toggleAll} onToggleSingle={togglePath} onOpenExplorer={() => onOpenModificationExplorer(message.fileChanges!)} collapsedPaths={collapsedPaths} language={language} />
             )}
@@ -551,27 +559,27 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
               {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown> : isThinking ? <div className="flex items-center gap-4 py-3 text-primary"><Loader2 size={20} className="animate-spin" /><span className="text-[13px] font-black tracking-[0.2em] opacity-70 uppercase">{language === 'es' ? 'Vortex está procesando...' : 'Vortex is processing...'}</span></div> : null}
               {isStreaming && message.content && <span className="typing-cursor" />}
             </div>
-            {!isUser && message.sources && message.sources.length > 0 && <div className="mt-10 pt-8 border-t border-border/20 flex flex-wrap gap-3 mb-2 relative z-[20]">{message.sources.map((src, i) => <GroundingPill key={i} source={src} index={i} />)}</div>}
+            {!isUser && message.sources && message.sources.length > 0 && <div className="mt-4 pt-3 border-t border-border/20 flex flex-wrap gap-2 relative z-[20]">{message.sources.map((src, i) => <GroundingPill key={i} source={src} index={i} />)}</div>}
           </div>
-          <div className="flex gap-8 mt-4 px-6 opacity-0 group-hover:opacity-100 transition-all duration-500 items-center w-full">
+          <div className={`flex gap-3 ${timestampClass} px-1 opacity-0 group-hover:opacity-100 transition-all duration-300 items-center w-full`}>
             {!isUser && (
-              <div className="flex gap-6">
-                <button onClick={handleCopyMessage} className="text-[11px] font-black uppercase tracking-widest text-muted-foreground hover:text-primary transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={handleCopyMessage} className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground hover:text-primary transition-all flex items-center gap-2 active:scale-95 py-1.5 px-2.5 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={13} className="text-emerald-500" /> : <Copy size={13} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
                 {hasDiffBlock && (
-                  <button onClick={() => onSuggestPatch?.(message.id)} className="text-[11px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-amber-500/10">
-                    <GitBranch size={14} /> {language === 'es' ? 'Sugerir parche' : 'Suggest patch'}
+                  <button onClick={() => onSuggestPatch?.(message.id)} className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-400 hover:text-amber-300 transition-all flex items-center gap-2 active:scale-95 py-1.5 px-2.5 rounded-xl hover:bg-amber-500/10">
+                    <GitBranch size={13} /> {language === 'es' ? 'Sugerir parche' : 'Suggest patch'}
                   </button>
                 )}
                 {(message.thought || (isStreaming && message.role === Role.AI)) && (
-                  <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[11px] font-black uppercase tracking-widest text-primary flex items-center gap-2.5 py-2 px-4 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
-                    <div className="relative"><Brain size={14} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
+                  <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[10px] font-black uppercase tracking-[0.2em] text-primary flex items-center gap-2 py-1.5 px-3 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
+                    <div className="relative"><Brain size={13} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
                     <span>{isStreaming && !message.content ? (language === 'es' ? 'Razonando...' : 'Thinking...') : (language === 'es' ? 'Razonamiento' : 'Reasoning')}</span>
-                    <ChevronRight size={14} className="opacity-40 group-hover/btn:translate-x-1.5 transition-transform" />
+                    <ChevronRight size={13} className="opacity-40 group-hover/btn:translate-x-1 transition-transform" />
                   </button>
                 )}
               </div>
             )}
-            <span className="text-[10px] font-black text-muted-foreground/30 uppercase tracking-[0.3em] ml-auto">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            <span className="text-[9px] font-black text-muted-foreground/30 uppercase tracking-[0.22em] ml-auto">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
           </div>
         </div>
       </div>

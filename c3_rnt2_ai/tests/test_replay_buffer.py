@@ -1,3 +1,6 @@
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
+# pylint: disable=import-error,no-name-in-module
+
 import sqlite3
 
 from c3rnt2.continuous.types import Sample
@@ -22,6 +25,7 @@ def test_replay_dedup_priority(tmp_path) -> None:
     samples = buffer.sample(batch_size=1, top_frac=1.0, random_frac=0.0)
     assert len(samples) == 1
     assert samples[0].response == "r1"
+    assert samples[0].source_kind == "episode"
 
 
 def test_replay_eviction_respects_max(tmp_path) -> None:
@@ -33,3 +37,33 @@ def test_replay_eviction_respects_max(tmp_path) -> None:
     with sqlite3.connect(path) as conn:
         cur = conn.execute("SELECT COUNT(*) FROM replay")
         assert int(cur.fetchone()[0]) == 3
+
+
+def test_replay_random_sampling_respects_source_weights(tmp_path) -> None:
+    path = tmp_path / "replay.sqlite"
+    buffer = ReplayBuffer(path)
+    ep = ReplayItem(
+        sample=Sample(prompt="pe", response="re"),
+        source_kind="episode",
+        quality_score=0.5,
+        novelty_score=0.5,
+        success_count=0,
+    )
+    lg = ReplayItem(
+        sample=Sample(prompt="pl", response="rl"),
+        source_kind="logs",
+        quality_score=0.5,
+        novelty_score=0.5,
+        success_count=0,
+    )
+    assert buffer.add(ep) is True
+    assert buffer.add(lg) is True
+
+    samples = buffer.sample(
+        batch_size=1,
+        top_frac=0.0,
+        random_frac=1.0,
+        source_weights={"episode": 10.0, "logs": 0.0},
+    )
+    assert len(samples) == 1
+    assert samples[0].source_kind == "episode"

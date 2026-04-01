@@ -83,3 +83,81 @@ export interface OperationalStatus {
     sources?: string[];
   };
 }
+
+export interface TrainingRunSummary {
+  run_id: string;
+  mode: 'quick' | 'full' | string;
+  status: string;
+  stage?: string;
+  created_at?: number;
+  updated_at?: number;
+  profile?: string;
+  base_model?: string;
+  served_model?: string;
+  dataset_hash?: string;
+  adapter_dir?: string;
+  log_path?: string;
+  eval_log_path?: string;
+  bench_log_path?: string;
+  promotion?: {
+    manual_only?: boolean;
+    decision?: string;
+    eval_ok?: boolean;
+    bench_ok?: boolean;
+  };
+  train_result?: Record<string, unknown>;
+  eval_result?: Record<string, unknown>;
+  bench_result?: Record<string, unknown>;
+}
+
+export interface TrainingStreamPayload {
+  ts: number;
+  active_run_id?: string | null;
+  runs?: TrainingRunSummary[];
+}
+
+export interface ControlStatus {
+  ok: boolean;
+  bootstrap?: {
+    running?: boolean;
+    stage?: string;
+    message?: string;
+    updated_at?: number;
+    error?: unknown;
+    tail?: string[];
+  };
+  docker?: {
+    ready?: boolean;
+    reason?: string;
+    detail?: string;
+    server_version?: string | null;
+  };
+  model?: {
+    model_id?: string;
+    cache_dir?: string;
+    repo_dir?: string;
+    cached?: boolean;
+    snapshot_count?: number;
+    last_snapshot?: string | null;
+  };
+  runtime?: {
+    api_ready?: boolean;
+    runtime_ready?: boolean;
+    readyz?: { ok?: boolean };
+    status?: OperationalStatus | null;
+  };
+  frontend?: {
+    ready?: boolean;
+    port?: number;
+    url?: string;
+  };
+  internet?: {
+    allowlist?: string[];
+  };
+  instructions?: {
+    digest?: string | null;
+    sources?: string[];
+  };
+  active_run_id?: string | null;
+  runs?: TrainingRunSummary[];
+}

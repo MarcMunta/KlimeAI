@@ -160,3 +160,18 @@ def test_prepare_model_state_fails_when_sglang_model_missing(tmp_path: Path, mon
     assert out["engine_ready"] is False
     assert out["model_ready"] is False
     assert out["model_reason"] == "sglang_model_missing"
+
+
+def test_docker_ready_status_can_be_assumed_inside_container(tmp_path: Path, monkeypatch) -> None:
+    compose_path = tmp_path / "docker-compose.yml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setenv("C3RNT2_ASSUME_DOCKER_READY", "1")
+
+    ready, reason, meta = prepare_mod._docker_ready_status(  # type: ignore[attr-defined]
+        {"docker": {"enabled": True, "compose_path": str(compose_path)}},
+        base_dir=tmp_path,
+    )
+
+    assert ready is True
+    assert reason == "docker_managed_by_host"
+    assert meta["assumed_from_env"] is True

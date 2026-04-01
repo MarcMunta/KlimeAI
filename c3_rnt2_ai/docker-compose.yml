@@ -1,14 +1,15 @@
 services:
   sglang-runtime:
-    image: lmsysorg/sglang:latest-runtime
+    image: lmsysorg/sglang:v0.4.2-cu121
     restart: unless-stopped
     gpus: all
     shm_size: "32g"
     ipc: host
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - ./data/models/hf-cache:/root/.cache/huggingface
     ports:
       - "30000:30000"
       - "8000:8000"
@@ -29,6 +30,27 @@ services:
       - --mem-fraction-static
       - "0.80"
 
+  model-init:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - .:/workspace
+      - ./data/models/hf-cache:/root/.cache/huggingface
+    command:
+      - python
+      - -m
+      - c3rnt2.model_init
+      - --model
+      - Qwen/Qwen2.5-Coder-14B-Instruct-AWQ
+      - --cache-dir
+      - /root/.cache/huggingface
+
   vortex-api:
     build:
       context: .
@@ -40,16 +62,18 @@ services:
     working_dir: /workspace
     environment:
       PYTHONPATH: /workspace/src
+      HF_HOME: /root/.cache/huggingface
+      C3RNT2_ASSUME_DOCKER_READY: "1"
     volumes:
       - .:/workspace
-      - hf-cache:/root/.cache/huggingface
+      - ./data/models/hf-cache:/root/.cache/huggingface
     command:
       - python
       - -m
       - c3rnt2
       - serve
       - --profile
-      - rtx4080_16gb_programming_local
+      - ${VORTEX_API_PROFILE:-rtx4080_16gb_programming_local}
       - --host
       - 0.0.0.0
       - --port
@@ -67,9 +91,11 @@ services:
     environment:
       PYTHONPATH: /workspace/src
       HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      C3RNT2_ASSUME_DOCKER_READY: "1"
     volumes:
       - .:/workspace
-      - hf-cache:/root/.cache/huggingface
+      - ./data/models/hf-cache:/root/.cache/huggingface
     command:
       - python
       - -m
@@ -90,9 +116,11 @@ services:
     working_dir: /workspace
     environment:
       PYTHONPATH: /workspace/src
+      HF_HOME: /root/.cache/huggingface
+      C3RNT2_ASSUME_DOCKER_READY: "1"
     volumes:
       - .:/workspace
-      - hf-cache:/root/.cache/huggingface
+      - ./data/models/hf-cache:/root/.cache/huggingface
     command:
       - python
       - -m
@@ -103,6 +131,3 @@ services:
       - --scenario
       - default
       - --mock
-
-volumes:
-  hf-cache:

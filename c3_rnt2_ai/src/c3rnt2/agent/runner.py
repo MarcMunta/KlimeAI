@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 from ..config import resolve_web_allowlist
+from ..lab_guard import evaluate_lab_request
 from ..model_loader import load_inference_model
 from ..prompting.chat_format import build_chat_prompt
 from .tools import AgentTools, ToolResult
@@ -118,6 +119,22 @@ def run_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
+    guard = evaluate_lab_request(messages, settings)
+    if guard.get("action") != "allow":
+        summary = str(guard.get("message") or "blocked_by_lab_policy")
+        _log_episode(
+            base_dir,
+            {
+                "version": 2,
+                "ts": time.time(),
+                "task": task,
+                "prompt": task,
+                "summary": summary,
+                "tool_calls": [],
+                "blocked": True,
+            },
+        )
+        return {"ok": False, "patch_id": None, "tests_ok": False, "summary": summary, "blocked": True}
     tools_cfg = settings.get("tools", {}) or {}
     allowlist = resolve_web_allowlist(settings)
     sandbox_root = Path(settings.get("selfimprove", {}).get("sandbox_root", "data/workspaces"))
