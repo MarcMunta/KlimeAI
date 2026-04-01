@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { 
-  User, Bot, Copy, CheckCircle2, Brain, Globe, 
+  Bot, Copy, CheckCircle2, Brain, Globe, 
   FileCode, Plus, Minus, Equal, Maximize2, Minimize2, 
   Code2, ChevronRight, Loader2, Fingerprint, 
   GitBranch, FileStack, ChevronDown, ChevronUp, ExternalLink, ShieldCheck
@@ -63,14 +63,14 @@ const GroundingPill: React.FC<{ source: Source; index: number }> = ({ source }) 
         rel={isWeb ? "noopener noreferrer" : undefined}
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
-        className={`flex items-center gap-2 px-3 py-1.5 border rounded-xl transition-all shadow-sm group glass-card relative z-10 ${
+        className={`flex items-center gap-2 rounded-full border px-2.5 py-1.5 transition-all shadow-sm group relative z-10 ${
           isWeb
-            ? 'bg-background border-border/60 hover:border-primary/60 cursor-pointer'
-            : 'bg-background/80 border-border/40 hover:border-emerald-500/50 cursor-default'
+            ? 'bg-background border-border/60 hover:border-primary/35 cursor-pointer'
+            : 'bg-muted/20 border-border/50 hover:border-primary/20 cursor-default'
         }`}
       >
         <div className={`w-4 h-4 rounded-md flex items-center justify-center overflow-hidden shrink-0 ${
-          isWeb ? 'bg-muted/40' : 'bg-emerald-500/10'
+          isWeb ? 'bg-muted/40' : 'bg-primary/10'
         }`}>
           {pillIcon}
         </div>
@@ -246,20 +246,20 @@ const CodeBlock = React.memo(({ children, className, isCollapsed, onToggle, code
 
   if (!isFilePath) {
     const lang = className?.replace('language-', '') || 'snippet';
-    return (
-      <div className={`mt-[14px] mb-6 rounded-3xl border border-border/40 overflow-hidden shadow-2xl group/code accelerated ring-1 ring-white/5 ${isCodeDark ? 'bg-[#0a0a0a]' : 'bg-zinc-50 border-zinc-200'}`}>
-        <div className={`px-5 py-3 border-b border-white/5 flex items-center justify-between ${isCodeDark ? 'bg-white/[0.03]' : 'bg-zinc-100/50'}`}>
+      return (
+      <div className={`mt-[14px] mb-6 overflow-hidden rounded-[1.2rem] border border-border/60 group/code accelerated ${isCodeDark ? 'bg-[#171717]' : 'bg-white border-zinc-200'}`}>
+        <div className={`flex items-center justify-between px-4 py-3 border-b ${isCodeDark ? 'border-white/5 bg-white/[0.02]' : 'border-zinc-200 bg-zinc-50'}`}>
           <div className="flex items-center gap-3">
-            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${isCodeDark ? 'bg-primary/20 text-primary border-primary/20' : 'bg-primary/10 text-primary border-primary/10'}`}>
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${isCodeDark ? 'bg-primary/14 text-primary border-primary/20' : 'bg-primary/10 text-primary border-primary/10'}`}>
               <Code2 size={14} />
             </div>
             <span className={`text-[10px] font-black uppercase tracking-[0.2em] ${isCodeDark ? 'text-zinc-500' : 'text-zinc-400'}`}>{lang}</span>
           </div>
-          <button onClick={handleCopy} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all border active:scale-95 ${isCodeDark ? 'bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white border-white/5' : 'bg-white hover:bg-zinc-200 text-zinc-500 border-zinc-200'}`}>
+          <button onClick={handleCopy} className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[10px] font-black transition-all active:scale-95 ${isCodeDark ? 'bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white border-white/5' : 'bg-white hover:bg-zinc-100 text-zinc-500 border-zinc-200'}`}>
             {copied ? <CheckCircle2 size={12} className="text-emerald-500" /> : <Copy size={12} />} {copied ? 'Copiado' : 'Copiar'}
           </button>
         </div>
-        <pre className={`p-6 overflow-x-auto text-[13px] font-mono leading-relaxed custom-scrollbar ${isCodeDark ? 'text-zinc-300 bg-black/40' : 'text-zinc-800 bg-white'}`}><code>{children}</code></pre>
+        <pre className={`custom-scrollbar overflow-x-auto p-5 text-[13px] font-mono leading-relaxed ${isCodeDark ? 'bg-black/25 text-zinc-300' : 'bg-white text-zinc-800'}`}><code>{children}</code></pre>
       </div>
     );
   }
@@ -517,15 +517,16 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
     setTimeout(() => setMsgCopied(false), 2000);
   }, [message.content]);
 
-  const fontSizeClass = { small: 'text-[12px]', medium: 'text-[15px]', large: 'text-[17px]' }[fontSize];
+  const fontSizeClass = { small: 'text-[11px]', medium: 'text-[14px]', large: 'text-[16px]' }[fontSize];
 
   const markdownComponents = useMemo(() => ({
-    ul: ({ children }: any) => <ul className="space-y-4 mb-6 list-none">{children}</ul>,
-    ol: ({ children }: any) => <ol className="space-y-4 mb-6 list-none counter-reset-pulse">{children}</ol>,
+    p: ({ children }: any) => <p className="m-0 leading-[1.55] text-foreground/90">{children}</p>,
+    ul: ({ children }: any) => <ul className="space-y-2.5 mb-4 list-none">{children}</ul>,
+    ol: ({ children }: any) => <ol className="space-y-2.5 mb-4 list-none counter-reset-pulse">{children}</ol>,
     li: ({ children, ordered, index }: any) => (
-      <motion.li initial={{ opacity: 0, x: -10 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} className="flex items-start gap-5 group/li">
-        <div className="shrink-0 mt-2">{ordered ? <div className="w-6 h-6 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-[10px] font-black text-primary shadow-inner">{index + 1}</div> : <div className="w-2 h-2 rounded-full bg-primary mt-1.5 shadow-[0_0_10px_rgba(var(--primary),0.8)] group-hover/li:scale-150 transition-transform duration-500" />}</div>
-        <span className="text-foreground/80 leading-relaxed font-medium group-hover/li:text-foreground transition-colors">{children}</span>
+      <motion.li initial={{ opacity: 0, x: -10 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} className="flex items-start gap-3 group/li">
+        <div className="shrink-0 mt-1.5">{ordered ? <div className="w-5 h-5 rounded-md bg-primary/10 border border-primary/20 flex items-center justify-center text-[9px] font-black text-primary shadow-inner">{index + 1}</div> : <div className="w-1.5 h-1.5 rounded-full bg-primary mt-1.5 shadow-[0_0_10px_rgba(var(--primary),0.8)] group-hover/li:scale-150 transition-transform duration-500" />}</div>
+        <span className="text-foreground/80 leading-[1.55] font-medium group-hover/li:text-foreground transition-colors">{children}</span>
       </motion.li>
     ),
     code({ node, inline, className, children, ...props }: any) {
@@ -537,13 +538,24 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
 
   const isThinking = isStreaming && !message.content && !!message.thought;
   const hasDiffBlock = useMemo(() => /```(?:diff|patch)\n[\s\S]*?```/i.test(message.content || ''), [message.content]);
+  const wrapperClass = isUser
+    ? 'max-w-fit md:max-w-[240px]'
+    : 'max-w-[92%] md:max-w-[720px]';
+  const bubbleClass = isUser
+    ? 'bg-muted/35 border border-border/60 text-foreground rounded-[1.1rem] rounded-tr-[0.55rem] px-3 py-1.5 shadow-sm'
+    : 'bg-transparent text-foreground rounded-[1.1rem] px-0 py-0';
+  const timestampClass = isUser ? 'mt-1' : 'mt-1.5';
 
   return (
-    <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-10 accelerated`}>
-      <div className={`flex max-w-[96%] md:max-w-[88%] ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-5`}>
-        <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border transition-all duration-700 group-hover:scale-110 group-hover:rotate-6 ${isUser ? 'bg-primary text-white border-primary/20 shadow-xl' : 'bg-background border-border glass-card shadow-lg'}`}>{isUser ? <User size={20} /> : <Bot size={20} />}</div>
-        <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1`}>
-          <div className={`px-8 py-6 rounded-[2.5rem] ${isUser ? 'bg-primary text-white rounded-tr-none shadow-2xl' : 'bg-muted/10 border border-border/40 rounded-tl-none glass-card'} ${fontSizeClass} leading-relaxed w-full relative`}>
+      <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className={`group flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-5 accelerated`}>
+      <div className={`flex ${wrapperClass} ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start gap-3`}>
+        {!isUser && (
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/60 bg-background text-muted-foreground shadow-sm transition-all duration-500 group-hover:scale-105">
+            <Bot size={14} />
+          </div>
+        )}
+        <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0`}>
+          <div className={`${bubbleClass} ${fontSizeClass} leading-[1.45] w-fit max-w-full relative`}>
             {!isUser && message.fileChanges && message.fileChanges.length >= 2 && (
               <PatchOverview fileChanges={message.fileChanges} onToggleAll={toggleAll} onToggleSingle={togglePath} onOpenExplorer={() => onOpenModificationExplorer(message.fileChanges!)} collapsedPaths={collapsedPaths} language={language} />
             )}
@@ -551,27 +563,27 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, fontSize = 'medi
               {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown> : isThinking ? <div className="flex items-center gap-4 py-3 text-primary"><Loader2 size={20} className="animate-spin" /><span className="text-[13px] font-black tracking-[0.2em] opacity-70 uppercase">{language === 'es' ? 'Vortex está procesando...' : 'Vortex is processing...'}</span></div> : null}
               {isStreaming && message.content && <span className="typing-cursor" />}
             </div>
-            {!isUser && message.sources && message.sources.length > 0 && <div className="mt-10 pt-8 border-t border-border/20 flex flex-wrap gap-3 mb-2 relative z-[20]">{message.sources.map((src, i) => <GroundingPill key={i} source={src} index={i} />)}</div>}
+            {!isUser && message.sources && message.sources.length > 0 && <div className="mt-4 pt-3 border-t border-border/20 flex flex-wrap gap-2 relative z-[20]">{message.sources.map((src, i) => <GroundingPill key={i} source={src} index={i} />)}</div>}
           </div>
-          <div className="flex gap-8 mt-4 px-6 opacity-0 group-hover:opacity-100 transition-all duration-500 items-center w-full">
+          <div className={`flex gap-3 ${timestampClass} px-1 opacity-0 group-hover:opacity-100 transition-all duration-300 items-center w-full`}>
             {!isUser && (
-              <div className="flex gap-6">
-                <button onClick={handleCopyMessage} className="text-[11px] font-black uppercase tracking-widest text-muted-foreground hover:text-primary transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Copy size={14} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={handleCopyMessage} className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground hover:text-primary transition-all flex items-center gap-2 active:scale-95 py-1.5 px-2.5 rounded-xl hover:bg-muted">{msgCopied ? <CheckCircle2 size={13} className="text-emerald-500" /> : <Copy size={13} />} {msgCopied ? 'Copiado' : 'Copiar'}</button>
                 {hasDiffBlock && (
-                  <button onClick={() => onSuggestPatch?.(message.id)} className="text-[11px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-all flex items-center gap-2.5 active:scale-95 py-1.5 px-3 rounded-xl hover:bg-amber-500/10">
-                    <GitBranch size={14} /> {language === 'es' ? 'Sugerir parche' : 'Suggest patch'}
+                  <button onClick={() => onSuggestPatch?.(message.id)} className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-400 hover:text-amber-300 transition-all flex items-center gap-2 active:scale-95 py-1.5 px-2.5 rounded-xl hover:bg-amber-500/10">
+                    <GitBranch size={13} /> {language === 'es' ? 'Sugerir parche' : 'Suggest patch'}
                   </button>
                 )}
                 {(message.thought || (isStreaming && message.role === Role.AI)) && (
-                  <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[11px] font-black uppercase tracking-widest text-primary flex items-center gap-2.5 py-2 px-4 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
-                    <div className="relative"><Brain size={14} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
+                  <button onClick={() => onShowReasoning?.(message.id)} className="group/btn text-[10px] font-black uppercase tracking-[0.2em] text-primary flex items-center gap-2 py-1.5 px-3 bg-primary/10 rounded-2xl hover:bg-primary/20 transition-all active:scale-95 border border-primary/10">
+                    <div className="relative"><Brain size={13} className={`${isStreaming ? 'animate-pulse' : 'group-hover/btn:rotate-12'} transition-transform`} />{isStreaming && <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-primary rounded-full blur-[3px]" />}</div>
                     <span>{isStreaming && !message.content ? (language === 'es' ? 'Razonando...' : 'Thinking...') : (language === 'es' ? 'Razonamiento' : 'Reasoning')}</span>
-                    <ChevronRight size={14} className="opacity-40 group-hover/btn:translate-x-1.5 transition-transform" />
+                    <ChevronRight size={13} className="opacity-40 group-hover/btn:translate-x-1 transition-transform" />
                   </button>
                 )}
               </div>
             )}
-            <span className="text-[10px] font-black text-muted-foreground/30 uppercase tracking-[0.3em] ml-auto">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            <span className={`text-[9px] font-black uppercase tracking-[0.18em] text-muted-foreground/30 ${isUser ? '' : 'ml-auto'}`}>{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
           </div>
         </div>
       </div>

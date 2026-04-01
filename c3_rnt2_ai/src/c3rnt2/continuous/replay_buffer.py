@@ -218,9 +218,50 @@ class ReplayBuffer:
             )
             return [f"{row[0]}\n{row[1]}".strip() for row in cur.fetchall()]
 
-    def _sample_random_rows(self, conn: sqlite3.Connection, count: int) -> List[Sample]:
+    def _sample_random_rows(
+        self,
+        conn: sqlite3.Connection,
+        count: int,
+        source_weights: dict[str, float] | None = None,
+    ) -> List[Sample]:
         if count <= 0:
             return []
+        source_weights = source_weights or {}
+
+        # If source weights are configured, sample from a randomized pool with weighted picks.
+        if source_weights:
+            pool_limit = max(200, count * 25)
+            cur = conn.execute(
+                """
+                SELECT prompt, response, source_kind
+                FROM replay
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (pool_limit,),
+            )
+            pool_rows = cur.fetchall()
+            if not pool_rows:
+                return []
+
+            candidates: list[tuple[str, str, str]] = [
+                (str(prompt), str(response), str(source_kind or "unknown"))
+                for prompt, response, source_kind in pool_rows
+            ]
+            samples: List[Sample] = []
+            while candidates and len(samples) < count:
+                weights = [
+                    max(0.0, float(source_weights.get(kind, 1.0)))
+                    for _prompt, _response, kind in candidates
+                ]
+                if sum(weights) <= 0.0:
+                    picked_idx = random.randrange(len(candidates))
+                else:
+                    picked_idx = random.choices(range(len(candidates)), weights=weights, k=1)[0]
+                prompt, response, source_kind = candidates.pop(picked_idx)
+                samples.append(Sample(prompt=prompt, response=response, source_kind=source_kind))
+            return samples
+
         cur = conn.execute("SELECT MIN(rowid), MAX(rowid) FROM replay")
         row = cur.fetchone()
         if not row or row[0] is None or row[1] is None:
@@ -234,18 +275,27 @@ class ReplayBuffer:
             rid = random.randint(min_id, max_id)
             if rid in seen:
                 continue
-            cur = conn.execute("SELECT rowid, prompt, response FROM replay WHERE rowid >= ? LIMIT 1", (rid,))
+            cur = conn.execute(
+                "SELECT rowid, prompt, response, source_kind FROM replay WHERE rowid >= ? LIMIT 1",
+                (rid,),
+            )
             found = cur.fetchone()
             if not found:
                 continue
-            rowid, prompt, response = found
+            rowid, prompt, response, source_kind = found
             if rowid in seen:
                 continue
             seen.add(int(rowid))
-            samples.append(Sample(prompt=prompt, response=response))
+            samples.append(Sample(prompt=prompt, response=response, source_kind=str(source_kind or "unknown")))
         return samples
 
-    def sample(self, batch_size: int, top_frac: float = 0.7, random_frac: float = 0.3) -> List[Sample]:
+    def sample(
+        self,
+        batch_size: int,
+        top_frac: float = 0.7,
+        random_frac: float = 0.3,
+        source_weights: dict[str, float] | None = None,
+    ) -> List[Sample]:
         if batch_size <= 0:
             return []
         top_n = max(0, int(batch_size * top_frac))
@@ -259,17 +309,29 @@ class ReplayBuffer:
             if top_n > 0:
                 cur = conn.execute(
                     """
-                    SELECT hash, prompt, response FROM replay
+                    SELECT hash, prompt, response, source_kind FROM replay
                     ORDER BY (quality_score + novelty_score + success_count) DESC
                     LIMIT ?
                     """,
                     (top_n,),
                 )
                 top_rows = cur.fetchall()
-                for _hash, prompt, response in top_rows:
-                    samples.append(Sample(prompt=prompt, response=response))
+                for _hash, prompt, response, source_kind in top_rows:
+                    samples.append(
+                        Sample(
+                            prompt=prompt,
+                            response=response,
+                            source_kind=str(source_kind or "unknown"),
+                        )
+                    )
             if rand_n > 0:
-                samples.extend(self._sample_random_rows(conn, rand_n))
+                samples.extend(
+                    self._sample_random_rows(
+                        conn,
+                        rand_n,
+                        source_weights=source_weights,
+                    )
+                )
         unique: dict[str, Sample] = {}
         for sample in samples:
             digest = _hash_sample(sample.prompt, sample.response)

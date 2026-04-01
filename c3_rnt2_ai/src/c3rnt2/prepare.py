@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .config import resolve_web_allowlist, resolve_web_strict
+from .model_init import DEFAULT_MODEL_ID, model_cache_status, resolve_cache_dir
 
 
 def _truthy(val: object) -> bool:
@@ -60,6 +61,9 @@ def _docker_ready_status(settings: dict, *, base_dir: Path) -> tuple[bool, str, 
     meta: dict[str, Any] = {"compose_path": str(compose_path) if compose_path else None}
     if not bool(docker_cfg.get("enabled", False)):
         return True, "docker_not_required", meta
+    if _truthy(os.getenv("C3RNT2_ASSUME_DOCKER_READY")):
+        meta["assumed_from_env"] = True
+        return True, "docker_managed_by_host", meta
     if compose_path is None:
         return False, "docker_compose_path_missing", meta
     if not compose_path.exists():
@@ -106,7 +110,7 @@ def _web_disabled_status(settings: dict) -> tuple[bool, str]:
     return True, "web_disabled"
 
 
-def _external_engine_status(core: dict) -> tuple[bool, str, dict[str, Any], list[str]]:
+def _external_engine_status(core: dict, *, base_dir: Path | None = None) -> tuple[bool, str, dict[str, Any], list[str]]:
     backend = str(core.get("backend", "vortex") or "vortex").strip().lower()
     engine = str(core.get("external_engine") or core.get("engine") or backend).strip().lower()
     base_url = str(core.get("external_base_url") or core.get("external_url") or "").strip()
@@ -118,6 +122,13 @@ def _external_engine_status(core: dict) -> tuple[bool, str, dict[str, Any], list
         "base_url_local": _is_local_base_url(base_url),
     }
     next_steps: list[str] = []
+    if base_dir is not None:
+        try:
+            cache_dir = resolve_cache_dir(base_dir / "data" / "models" / "hf-cache")
+            cache_meta = model_cache_status(model_name or DEFAULT_MODEL_ID, cache_dir)
+            meta["model_cache"] = cache_meta
+        except Exception:
+            meta["model_cache"] = None
     if backend not in {"external", "vllm", "sglang"}:
         return True, "not_external", meta, next_steps
     if not base_url:
@@ -141,11 +152,21 @@ def _external_engine_status(core: dict) -> tuple[bool, str, dict[str, Any], list
             payload = _http_json(base_url.rstrip("/") + "/v1/models", timeout_s=2.0)
         except Exception as exc:
             meta["detail"] = str(exc)
+            if engine == "sglang":
+                next_steps.extend(
+                    [
+                        "Ensure the local model cache exists via `docker compose run --rm model-init`.",
+                        "Start the runtime with `docker compose up -d sglang-runtime vortex-api`.",
+                    ]
+                )
             return False, f"{engine}_unreachable", meta, next_steps
         data = payload.get("data", []) if isinstance(payload.get("data"), list) else []
         ids = [str(item.get("id", "")).strip() for item in data if isinstance(item, dict)]
         meta["available_models"] = ids
         if model_name and model_name not in ids:
+            cache_meta = meta.get("model_cache") if isinstance(meta.get("model_cache"), dict) else {}
+            if engine == "sglang" and not bool(cache_meta.get("cached", False)):
+                next_steps.append("Populate the local Hugging Face cache via `docker compose run --rm model-init`.")
             return False, f"{engine}_model_missing", meta, next_steps
         return True, f"{engine}_ready", meta, next_steps
     return True, "external_engine_not_checked", meta, next_steps
@@ -326,7 +347,7 @@ def prepare_model_state(settings: dict, *, base_dir: Path | None = None) -> dict
 
     web_disabled, web_reason = _web_disabled_status(settings)
     wsl_ready, wsl_reason = _wsl_ready_status(settings)
-    external_ready, external_reason, external_meta, external_steps = _external_engine_status(core)
+    external_ready, external_reason, external_meta, external_steps = _external_engine_status(core, base_dir=base_dir)
     docker_ready, docker_reason, docker_meta = _docker_ready_status(
         settings, base_dir=base_dir
     )

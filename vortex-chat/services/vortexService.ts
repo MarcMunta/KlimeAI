@@ -77,29 +77,35 @@ const extractFileChanges = (content: string): { path: string; diff: string }[] =
 };
 
 const buildMessages = (history: Message[], prompt: string, mode: AppMode, useThinking: boolean, language: "es" | "en" = "es") => {
-  void mode;
-  void useThinking;
-  void language;
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
-  for (const msg of history) {
-    const content = (msg.content ?? "").trim();
-    if (!content) continue;
-    if (msg.role === Role.USER) messages.push({ role: "user", content });
-    else messages.push({ role: "assistant", content });
-  }
+  const lang = language === "es" ? "Responde en espanol." : "Reply in English.";
+  const tempo = useThinking
+    ? (
+        language === "es"
+          ? "Piensa antes de responder, pero entrega solo la respuesta util."
+          : "Think before answering, but return only the useful answer."
+      )
+    : (
+        language === "es"
+          ? "Responde de forma directa y corta."
+          : "Answer directly and briefly."
+      );
+  const behavior = mode === "agent"
+    ? (
+        language === "es"
+          ? "Actua como operador tecnico. Prioriza diagnostico, pasos concretos y cambios de codigo. Usa bloques ```diff``` o ```file:path``` solo cuando ayuden."
+          : "Act as a technical operator. Prioritize diagnosis, concrete steps, and code changes. Use ```diff``` or ```file:path``` blocks only when they help."
+      )
+    : (
+        language === "es"
+          ? "Actua como asistente tecnico local. Da respuestas claras, grounded y sin relleno."
+          : "Act as a local technical assistant. Give clear, grounded answers without filler."
+      );
 
-  messages.push({ role: "user", content: prompt });
-  return messages;
-
-  // Keep the system prompt VERY short — small models echo long instructions
-  const lang = language === "es" ? "Responde en español." : "Reply in English.";
-  let sys = `Eres Vortex, asistente experto. ${lang}`;
-
-  if (mode === "agent") {
-    sys += " Usa bloques ```diff``` para cambios de código.";
-  }
-
-  messages.push({ role: "system", content: sys });
+  messages.push({
+    role: "system",
+    content: `Eres Vortex. ${lang} ${tempo} ${behavior}`,
+  });
 
   for (const msg of history) {
     const content = (msg.content ?? "").trim();
@@ -292,10 +298,11 @@ export class VortexService {
   async *generateResponseStream(
     history: Message[],
     prompt: string,
-    includeSources: boolean = false,
+    useInternet: boolean = false,
     useThinking: boolean = true,
     mode: AppMode = "ask",
-    language: "es" | "en" = "es"
+    language: "es" | "en" = "es",
+    webAllowlist: string[] = []
   ): AsyncGenerator<StreamChunk> {
     const abortController = new AbortController();
 
@@ -303,8 +310,9 @@ export class VortexService {
       const payload = {
         model: this.model,
         stream: true,
-        include_sources: includeSources,
-        web_ingest: includeSources,
+        include_sources: true,
+        web_ingest: useInternet,
+        web_allowlist: webAllowlist,
         temperature: useThinking ? 0.7 : 0.2,
         messages: buildMessages(history, prompt, mode, useThinking, language),
       };

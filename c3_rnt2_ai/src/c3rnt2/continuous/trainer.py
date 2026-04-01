@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught
+# ruff: noqa: BLE001
+
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +31,21 @@ class TrainResult:
     promoted: bool
     loss: float
     samples: int
+
+
+def _normalize_sample_weights(samples: List[Sample], source_weights: dict) -> List[float] | None:
+    weights: list[float] = []
+    for sample in samples:
+        kind = getattr(sample, "source_kind", "unknown")
+        raw = source_weights.get(kind, 1.0)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 1.0
+        weights.append(max(0.0, value))
+    if not any(w > 0.0 for w in weights):
+        return None
+    return weights
 
 
 class ContinualTrainer:
@@ -133,7 +152,7 @@ class ContinualTrainer:
 
             model.train()
             source_weights = self.settings.get("continuous", {}).get("source_weights", {}) or {}
-            sample_weights = [float(source_weights.get(getattr(s, "source_kind", "unknown"), 1.0)) for s in train_samples]
+            sample_weights = _normalize_sample_weights(train_samples, source_weights)
             use_scaler = model.device.type == "cuda" and model.dtype == torch.float16
             scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
             loss_val = 0.0
@@ -150,7 +169,10 @@ class ContinualTrainer:
                 token_count = 0
                 attempts = 0
                 while token_count < batch_tokens and attempts < max(4, len(train_samples)):
-                    sample = random.choices(train_samples, weights=sample_weights, k=1)[0]
+                    if sample_weights is None:
+                        sample = random.choice(train_samples)
+                    else:
+                        sample = random.choices(train_samples, weights=sample_weights, k=1)[0]
                     text = self._format_sample(model, sample)
                     ids, _ = model.encode_prompt(text)
                     attempts += 1
@@ -237,13 +259,13 @@ class ContinualTrainer:
             if model.device.type == "cuda":
                 try:
                     gpu_mem = float(torch.cuda.max_memory_allocated() / (1024**2))
-                except Exception:
+                except RuntimeError:
                     gpu_mem = None
             lm_stats = {}
             if hasattr(model.lm_head, "stats"):
                 try:
                     lm_stats = model.lm_head.stats()
-                except Exception:
+                except (AttributeError, RuntimeError, TypeError, ValueError):
                     lm_stats = {}
             finalize_run(
                 self.base_dir,
@@ -283,9 +305,9 @@ class ContinualTrainer:
 
             loss_out = new_loss if new_loss is not None else loss_val
             return TrainResult(run_id=run_id, promoted=promoted, loss=float(loss_out), samples=len(samples))
-        except Exception:
-            rollback(self.base_dir)
-            raise
+        finally:
+            if sys.exc_info()[0] is not None:
+                rollback(self.base_dir)
 
     def _adapter_path(self, run_id: str) -> Path:
         return self.base_dir / "data" / "registry" / "adapters" / f"{run_id}.pt"

@@ -10,12 +10,16 @@ interface ChatInputProps {
   isLoading: boolean;
   isDarkMode: boolean;
   language: Language;
+  mode: AppMode;
+  onModeChange: (mode: AppMode) => void;
   canUseInternet?: boolean;
   allowAutoTrain?: boolean;
   sendDisabledReason?: string;
   isThinking?: boolean;
   onStop?: () => void;
   onInteraction?: () => void;
+  onFocusChange?: (focused: boolean) => void;
+  onDraftChange?: (hasDraft: boolean) => void;
 }
 
 const ChatInput: React.FC<ChatInputProps> = ({
@@ -23,18 +27,21 @@ const ChatInput: React.FC<ChatInputProps> = ({
   isLoading,
   isDarkMode,
   language,
+  mode,
+  onModeChange,
   canUseInternet = true,
   allowAutoTrain = true,
   sendDisabledReason,
   isThinking,
   onStop,
   onInteraction,
+  onFocusChange,
+  onDraftChange,
 }) => {
   const [input, setInput] = useState('');
   const [isInternetEnabled, setIsInternetEnabled] = useState(false);
   const [useThinking, setUseThinking] = useState(true);
   const [autoTrainEnabled, setAutoTrainEnabled] = useState(false);
-  const [mode, setMode] = useState<AppMode>('ask');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const t = translations[language];
@@ -53,6 +60,10 @@ const ChatInput: React.FC<ChatInputProps> = ({
   useEffect(() => {
     adjustHeight();
   }, [input, adjustHeight]);
+
+  useEffect(() => {
+    onDraftChange?.(input.trim().length > 0);
+  }, [input, onDraftChange]);
 
   useEffect(() => {
     if (!canUseInternet) setIsInternetEnabled(false);
@@ -78,15 +89,35 @@ const ChatInput: React.FC<ChatInputProps> = ({
     }
   };
 
+  const statusChips = [
+    mode === 'agent'
+      ? (language === 'es' ? 'Agente activo' : 'Agent active')
+      : (language === 'es' ? 'Consulta guiada' : 'Grounded query'),
+    useThinking
+      ? (language === 'es' ? 'Thinking' : 'Thinking')
+      : (language === 'es' ? 'Fast' : 'Fast'),
+    isInternetEnabled
+      ? (language === 'es' ? 'Internet en este prompt' : 'Internet on this prompt')
+      : null,
+    autoTrainEnabled
+      ? (language === 'es' ? 'Aprender tras responder' : 'Learn after reply')
+      : null,
+  ].filter(Boolean) as string[];
+
+  const footerHint = sendDisabledReason
+    || (language === 'es'
+      ? 'Enter para enviar. Shift+Enter para nueva línea.'
+      : 'Enter to send. Shift+Enter for a new line.');
+
   return (
-    <div className="max-w-[840px] mx-auto w-full relative px-6 accelerated">
+    <div className="mx-auto w-full max-w-[860px] relative px-6 accelerated">
       <AnimatePresence>
         {isLoading && (
           <motion.div
             initial={{ opacity: 0, y: 10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.95 }}
-            className="absolute -top-12 left-10 flex items-center gap-3 px-5 py-2 bg-background dark:bg-zinc-900 border border-border/50 shadow-2xl rounded-2xl glass-card z-20"
+            className="absolute -top-11 left-10 z-20 flex items-center gap-3 rounded-2xl border border-border/60 px-4 py-2 glass-card"
           >
             <div className="flex gap-1.5">
               {[0, 0.2, 0.4].map((d) => (
@@ -94,14 +125,14 @@ const ChatInput: React.FC<ChatInputProps> = ({
                   key={d}
                   animate={{ opacity: [0.3, 1, 0.3], scale: [0.9, 1.1, 0.9] }}
                   transition={{ duration: 1.2, repeat: Infinity, delay: d }}
-                  className={`w-1.5 h-1.5 rounded-full ${mode === 'agent' ? 'bg-purple-500' : 'bg-primary'}`}
+                  className="w-1.5 h-1.5 rounded-full bg-primary"
                 />
               ))}
             </div>
             <span className="text-[9px] font-black uppercase tracking-[0.2em] opacity-70">
-              {mode === 'agent' 
-                ? (language === 'es' ? 'Motor de Agente Activo' : 'Agent Engine Active') 
-                : (language === 'es' ? 'Procesando Flujo' : 'Processing Flow')}
+              {mode === 'agent'
+                ? (language === 'es' ? 'Modo agente activo' : 'Agent mode active')
+                : (language === 'es' ? 'Procesando' : 'Processing')}
             </span>
           </motion.div>
         )}
@@ -109,12 +140,12 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
       <motion.div 
         layout
-        className={`relative flex items-end w-full bg-white/95 dark:bg-zinc-900/95 backdrop-blur-3xl border rounded-[2.2rem] transition-all duration-500 p-2 group shadow-2xl accelerated ${
+        className={`surface-panel relative flex w-full items-end rounded-[1.5rem] p-1.5 transition-all duration-500 group accelerated ${
           isLoading 
-            ? 'border-border/30 opacity-90' 
+            ? 'border-border/70 opacity-90' 
             : mode === 'agent'
-              ? 'border-purple-500/30 focus-within:border-purple-500/60 focus-within:ring-[8px] focus-within:ring-purple-500/5'
-              : 'border-border/50 focus-within:border-primary/60 focus-within:ring-[8px] focus-within:ring-primary/5'
+              ? 'focus-within:border-primary/35 focus-within:ring-[4px] focus-within:ring-primary/5'
+              : 'focus-within:border-primary/35 focus-within:ring-[4px] focus-within:ring-primary/5'
         }`}
       >
         <div className="flex items-center mb-1 ml-1 relative z-10 shrink-0">
@@ -122,13 +153,13 @@ const ChatInput: React.FC<ChatInputProps> = ({
             onClick={() => { setUseThinking(!useThinking); onInteraction?.(); }}
             aria-label={useThinking ? (language === 'es' ? 'Modo Thinking activo' : 'Thinking mode active') : (language === 'es' ? 'Modo Fast activo' : 'Fast mode active')}
             title={useThinking ? (language === 'es' ? 'Modo Thinking Activo' : 'Thinking Mode Active') : (language === 'es' ? 'Modo Fast Activo' : 'Fast Mode Active')}
-            className={`w-11 h-11 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
+            className={`flex h-10 w-10 items-center justify-center rounded-full border border-transparent transition-all duration-300 ${
               useThinking 
-                ? 'text-primary bg-primary/5 border-primary/10' 
+                ? 'text-primary bg-primary/10 border-primary/10' 
                 : 'text-muted-foreground/40 dark:text-zinc-600 hover:text-foreground/60'
             }`}
           >
-            <Timer size={22} strokeWidth={useThinking ? 2.5 : 1.5} className="transition-all duration-500" />
+            <Timer size={20} strokeWidth={useThinking ? 2.4 : 1.5} className="transition-all duration-500" />
           </button>
         </div>
 
@@ -137,23 +168,24 @@ const ChatInput: React.FC<ChatInputProps> = ({
           value={input}
           onChange={(e) => { setInput(e.target.value); onInteraction?.(); }}
           onKeyDown={handleKeyDown}
-          onFocus={onInteraction}
+          onFocus={() => { onInteraction?.(); onFocusChange?.(true); }}
+          onBlur={() => onFocusChange?.(false)}
           placeholder={mode === 'agent' ? t.input_placeholder_agent : t.input_placeholder_ask}
           rows={1}
-          className="flex-1 bg-transparent border-none focus:ring-0 outline-none resize-none py-4 px-3 text-[15px] leading-relaxed placeholder:text-muted-foreground/30 dark:placeholder:text-zinc-600 font-medium text-foreground relative z-10 custom-scrollbar"
+          className="relative z-10 flex-1 resize-none border-none bg-transparent px-3 py-3.5 text-[15px] font-medium leading-7 text-foreground outline-none custom-scrollbar placeholder:text-muted-foreground/45 focus:ring-0 dark:placeholder:text-zinc-500"
         />
         
         <div className="flex items-center gap-2 mb-1 mr-1 relative z-10 shrink-0">
-          <div className="relative flex bg-muted/40 dark:bg-zinc-800/60 p-0.5 rounded-2xl border border-border/30 h-[44px] min-w-[120px] shadow-inner overflow-hidden">
+          <div className="relative flex h-[42px] min-w-[120px] overflow-hidden rounded-2xl border border-border/50 bg-muted/35 p-0.5">
             <motion.div
-              animate={{ x: mode === 'ask' ? 0 : 58, backgroundColor: mode === 'ask' ? 'hsl(var(--primary))' : '#8b5cf6' }}
+              animate={{ x: mode === 'ask' ? 0 : 58, backgroundColor: 'hsl(var(--primary))' }}
               transition={{ type: 'spring', stiffness: 500, damping: 35 }}
               className="absolute top-0.5 bottom-0.5 w-[58px] rounded-xl shadow-lg z-0"
             />
-            <button onClick={() => { setMode('ask'); onInteraction?.(); }} className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 text-[8px] font-black uppercase tracking-widest transition-all duration-300 ${mode === 'ask' ? 'text-white' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>
+            <button onClick={() => { onModeChange('ask'); onInteraction?.(); }} className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 text-[8px] font-black uppercase tracking-widest transition-all duration-300 ${mode === 'ask' ? 'text-white' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>
                {t.input_ask_mode}
             </button>
-            <button onClick={() => { setMode('agent'); onInteraction?.(); }} className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 text-[8px] font-black uppercase tracking-widest transition-all duration-300 ${mode === 'agent' ? 'text-white' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>
+            <button onClick={() => { onModeChange('agent'); onInteraction?.(); }} className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 text-[8px] font-black uppercase tracking-widest transition-all duration-300 ${mode === 'agent' ? 'text-white' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>
                {t.input_agent_mode}
             </button>
           </div>
@@ -166,12 +198,12 @@ const ChatInput: React.FC<ChatInputProps> = ({
             }}
             aria-label={isInternetEnabled ? (language === 'es' ? 'Desactivar Internet' : 'Disable internet') : (language === 'es' ? 'Activar Internet' : 'Enable internet')}
             title={isInternetEnabled ? (language === 'es' ? 'Internet activado' : 'Internet enabled') : (language === 'es' ? 'Internet desactivado' : 'Internet disabled')}
-            className={`p-2.5 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
+            className={`flex items-center justify-center rounded-full border border-transparent p-2.5 transition-all duration-300 ${
               !canUseInternet
                 ? 'text-muted-foreground/20 dark:text-zinc-700 cursor-not-allowed'
                 : isInternetEnabled 
-                ? 'bg-primary/15 text-primary border-primary/20 shadow-inner' 
-                : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted dark:hover:bg-zinc-800 hover:text-foreground'
+                ? 'bg-primary/12 text-primary border-primary/20' 
+                : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted hover:text-foreground'
             }`}
             disabled={!canUseInternet}
           >
@@ -186,12 +218,12 @@ const ChatInput: React.FC<ChatInputProps> = ({
             }}
             aria-label={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activo' : 'Auto-training active') : (language === 'es' ? 'Auto-entrenamiento inactivo' : 'Auto-training inactive')}
             title={autoTrainEnabled ? (language === 'es' ? 'Auto-entrenamiento activado' : 'Auto-training enabled') : (language === 'es' ? 'Auto-entrenamiento desactivado' : 'Auto-training disabled')}
-            className={`p-2.5 rounded-full transition-all duration-300 flex items-center justify-center border border-transparent ${
+            className={`flex items-center justify-center rounded-full border border-transparent p-2.5 transition-all duration-300 ${
               !allowAutoTrain
                 ? 'text-muted-foreground/20 dark:text-zinc-700 cursor-not-allowed'
                 : autoTrainEnabled
-                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20 shadow-inner'
-                : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted dark:hover:bg-zinc-800 hover:text-foreground'
+                ? 'bg-primary/12 text-primary border-primary/20'
+                : 'text-muted-foreground dark:text-zinc-400 hover:bg-muted hover:text-foreground'
             }`}
             disabled={!allowAutoTrain}
           >
@@ -203,7 +235,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
               onClick={() => onStop?.()}
               aria-label={language === 'es' ? 'Detener' : 'Stop'}
               title={language === 'es' ? 'Detener' : 'Stop'}
-              className="w-11 h-11 bg-red-500 text-white rounded-full transition-all hover:scale-110 active:scale-90 shadow-xl flex items-center justify-center"
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-red-500 text-white shadow-lg transition-all hover:scale-105 active:scale-90"
             >
               <Square size={14} fill="currentColor" />
             </button>
@@ -213,19 +245,35 @@ const ChatInput: React.FC<ChatInputProps> = ({
               disabled={!input.trim() || Boolean(sendDisabledReason)}
               aria-label={language === 'es' ? 'Enviar mensaje' : 'Send message'}
               title={sendDisabledReason || (language === 'es' ? 'Enviar mensaje' : 'Send message')}
-              className={`w-11 h-11 rounded-full transition-all duration-300 shadow-xl flex items-center justify-center group/send ${
+              className={`group/send flex h-10 w-10 items-center justify-center rounded-full transition-all duration-300 ${
                 input.trim() && !sendDisabledReason
                   ? mode === 'agent' 
-                    ? 'bg-purple-600 text-white hover:scale-110 active:scale-90 shadow-purple-500/20'
-                    : 'bg-primary text-white hover:scale-110 active:scale-90 shadow-primary/20'
-                  : 'bg-muted/40 dark:bg-zinc-800/40 text-muted-foreground/10 cursor-not-allowed shadow-none'
+                    ? 'bg-primary text-white shadow-lg shadow-primary/10 hover:scale-105 active:scale-90'
+                    : 'bg-primary text-white shadow-lg shadow-primary/10 hover:scale-105 active:scale-90'
+                  : 'cursor-not-allowed bg-muted/40 text-muted-foreground/10 shadow-none dark:bg-zinc-800/40'
               }`}
             >
-              <ArrowUp size={22} strokeWidth={3} className={`transition-transform duration-300 ${input.trim() ? 'group-hover/send:-translate-y-0.5' : ''}`} />
+              <ArrowUp size={20} strokeWidth={3} className={`transition-transform duration-300 ${input.trim() ? 'group-hover/send:-translate-y-0.5' : ''}`} />
             </button>
           )}
         </div>
       </motion.div>
+
+      <div className="mt-3 flex flex-col gap-3 px-2 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          {statusChips.map((chip) => (
+            <span
+              key={chip}
+              className="rounded-full border border-border/60 bg-muted/20 px-3 py-1 text-[10px] font-black uppercase tracking-[0.1em] text-muted-foreground"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+        <p className={`text-xs ${sendDisabledReason ? 'text-primary' : 'text-muted-foreground'}`}>
+          {footerHint}
+        </p>
+      </div>
     </div>
   );
 };

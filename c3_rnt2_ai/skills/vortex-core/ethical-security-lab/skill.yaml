@@ -1,0 +1,15 @@
+id: ethical-security-lab
+name: Ethical Security Lab
+version: 1.0.0
+tags: ["security", "defensive", "lab", "ethical"]
+triggers:
+  keywords: ["security-lab", "owasp", "threat model", "cyber", "lab", "hardening"]
+  regex: ["\\blab\\b", "\\bthreat model\\b", "\\bowasp\\b"]
+token_budget: 360
+priority: 90
+safety:
+  network: false
+  filesystem_write: false
+  shell: false
+requires_approval: false
+source: local:vortex-core

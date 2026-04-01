@@ -1,20 +1,23 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { PanelLeft, Bot, Sparkles, Globe, Zap, MessageSquare, BarChart3, Terminal as TerminalIcon, FileCode } from 'lucide-react';
+import { PanelLeft, Globe, Zap, MessageSquare, BarChart3, Terminal as TerminalIcon, FileCode, FlaskConical } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import ChatInput from './components/ChatInput';
 import CommandPalette from './components/CommandPalette';
-import SettingsModal from './components/SettingsModal';
+import SettingsModal, { type SettingsTab } from './components/SettingsModal';
 import HelpModal from './components/HelpModal';
 import ReasoningDrawer from './components/ReasoningDrawer';
 import AnalysisView from './components/AnalysisView';
+import TrainingView from './components/TrainingView';
 import TerminalView from './components/TerminalView';
 import SelfEditsView from './components/SelfEditsView';
-import LocalStackStatus from './components/LocalStackStatus';
+import VortexLogo from './components/VortexLogo';
+import TopBarStackStatus from './components/TopBarStackStatus';
 import VirtualizedMessageList from './components/VirtualizedMessageList';
 import ModificationExplorerModal from './components/ModificationExplorerModal';
-import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language, OperationalStatus } from './types';
+import { ChatSession, Message, Role, UserSettings, ViewType, LogEntry, AppMode, Source, Language, OperationalStatus, ControlStatus, LocalAccount } from './types';
 import { vortexService } from './services/vortexService';
+import { controlService } from './services/controlService';
 import { translations } from './translations';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'framer-motion';
 
@@ -25,7 +28,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   language: 'es'
 };
 
-const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'edits': 2, 'terminal': 3 };
+const VIEW_INDEX: Record<ViewType, number> = { 'chat': 0, 'analysis': 1, 'training': 2, 'edits': 3, 'terminal': 4 };
 
 const repairMojibakeText = (value: string | null | undefined): string => {
   if (!value || !/[ÃÂ]/.test(value)) return value ?? '';
@@ -75,6 +78,25 @@ const createEmptySession = (language: Language): ChatSession => ({
   updatedAt: Date.now(),
 });
 
+const createLocalAccount = (name: string, email: string, handle?: string): LocalAccount => {
+  const normalizedHandle = handle?.trim()
+    ? (handle.trim().startsWith('@') ? handle.trim() : `@${handle.trim()}`)
+    : `@${name.toLowerCase().replace(/[^a-z0-9]+/gi, '').slice(0, 12) || 'vortex'}`;
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    email,
+    handle: normalizedHandle,
+    avatarHue: 198 + Math.floor(Math.random() * 24),
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+  };
+};
+
+const createDefaultAccount = (): LocalAccount => createLocalAccount('Vortex Local', 'local@vortex.dev', '@vortex');
+const accountSessionsKey = (accountId: string) => `chat-sessions:${accountId}`;
+const accountSettingsKey = (accountId: string) => `user-settings:${accountId}`;
+
 const getInitialDarkMode = (): boolean => {
   const savedMode = localStorage.getItem('dark-mode');
   if (savedMode !== null) return savedMode === 'true';
@@ -82,6 +104,9 @@ const getInitialDarkMode = (): boolean => {
 };
 
 const App: React.FC = () => {
+  const [accounts, setAccounts] = useState<LocalAccount[]>([]);
+  const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
+  const [isAccountHydrated, setIsAccountHydrated] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<ViewType>('chat');
@@ -92,6 +117,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
@@ -99,9 +125,13 @@ const App: React.FC = () => {
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [mode, setMode] = useState<AppMode>('ask');
   const [operationalStatus, setOperationalStatus] = useState<OperationalStatus | null>(null);
+  const [controlStatus, setControlStatus] = useState<ControlStatus | null>(null);
+  const [analysisFocusTab, setAnalysisFocusTab] = useState<'stack' | 'learning' | 'internet'>('stack');
+  const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [hasComposerDraft, setHasComposerDraft] = useState(false);
   
-  const [headerVisible, setHeaderVisible] = useState(false);
-  const [footerVisible, setFooterVisible] = useState(false);
+  const [headerVisible, setHeaderVisible] = useState(true);
+  const [footerVisible, setFooterVisible] = useState(true);
   const [activeModificationFiles, setActiveModificationFiles] = useState<{ path: string, diff: string }[] | null>(null);
   
   const inactivityTimerRef = useRef<number | null>(null);
@@ -116,8 +146,12 @@ const App: React.FC = () => {
   
   const { scrollY } = useScroll({ container: mainScrollRef });
   const t = translations[settings.language];
+  const currentAccount = accounts.find((account) => account.id === currentAccountId) || accounts[0] || null;
   const currentSession = sessions.find(s => s.id === currentSessionId);
   const hasMessages = currentSession && currentSession.messages && currentSession.messages.length > 0;
+  const internetAllowlist = controlStatus?.internet?.allowlist || [];
+  const canUseInternet = Boolean(controlStatus?.ok);
+  const canStartTraining = Boolean(controlStatus?.ok);
   const sendDisabledReason = operationalStatus?.ok
     ? undefined
     : operationalStatus?.degraded_reason
@@ -126,6 +160,27 @@ const App: React.FC = () => {
       || operationalStatus?.docker_reason
       || operationalStatus?.offline_reason
       || (settings.language === 'es' ? 'Stack local no listo.' : 'Local stack not ready.');
+  const activeModelLabel = operationalStatus?.active_model || (settings.language === 'es' ? 'Modelo base pendiente' : 'Base model pending');
+  const activeEngineLabel = (operationalStatus?.engine_kind || 'local').toUpperCase();
+  const readyLabel = operationalStatus?.ok
+    ? (settings.language === 'es' ? 'Listo' : 'Ready')
+    : (settings.language === 'es' ? 'Pendiente' : 'Pending');
+  const heroCards = settings.language === 'es'
+    ? [
+        { label: 'Modo', value: 'Consulta y agente' },
+        { label: 'Internet', value: 'Solo al activarlo' },
+        { label: 'Entreno', value: 'Visible y manual' },
+      ]
+    : [
+        { label: 'Mode', value: 'Query and agent' },
+        { label: 'Internet', value: 'Only when enabled' },
+        { label: 'Training', value: 'Visible and manual' },
+      ];
+
+  const openSettings = useCallback((tab: SettingsTab = 'general') => {
+    setSettingsInitialTab(tab);
+    setIsSettingsOpen(true);
+  }, []);
 
   const addLog = useCallback((level: LogEntry['level'], message: string) => {
     const newLog: LogEntry = { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), level, message };
@@ -194,10 +249,16 @@ const App: React.FC = () => {
   const resetInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current);
     if (activeModificationFiles) return;
-    if (isLoading || isSearching) { setFooterVisible(true); setHeaderVisible(true); return; }
+    if (isLoading || isSearching) { setFooterVisible(true); return; }
+    if (!hasMessages && activeView === 'chat') { setFooterVisible(true); return; }
+    if (isComposerFocused || hasComposerDraft) { setFooterVisible(true); return; }
     if (hasMessages) setFooterVisible(true);
-    inactivityTimerRef.current = window.setTimeout(() => { if (activeView === 'chat') { setFooterVisible(false); setHeaderVisible(false); } else { setHeaderVisible(false); } }, 6000);
-  }, [isLoading, isSearching, activeView, hasMessages, activeModificationFiles]);
+    inactivityTimerRef.current = window.setTimeout(() => {
+      if (activeView === 'chat') {
+        setFooterVisible(false);
+      }
+    }, 6000);
+  }, [isLoading, isSearching, activeView, hasMessages, activeModificationFiles, isComposerFocused, hasComposerDraft]);
 
   useEffect(() => { resetInactivityTimer(); return () => { if (inactivityTimerRef.current) window.clearTimeout(inactivityTimerRef.current); }; }, [resetInactivityTimer]);
 
@@ -205,8 +266,13 @@ const App: React.FC = () => {
     let disposed = false;
 
     const pollStatus = async () => {
-      const status = await vortexService.fetchOperationalStatus();
-      if (!disposed) setOperationalStatus(status);
+      const [runtimeStatus, nextControlStatus] = await Promise.all([
+        vortexService.fetchOperationalStatus(),
+        controlService.fetchStatus(),
+      ]);
+      if (disposed) return;
+      setOperationalStatus(runtimeStatus);
+      setControlStatus(nextControlStatus);
     };
 
     pollStatus();
@@ -400,13 +466,15 @@ const App: React.FC = () => {
     if (latest < 10) { if (hasMessages) setHeaderVisible(true); return; }
     if (Math.abs(diff) < 10) return;
     if (diff > 15) setHeaderVisible(false);
-    else if (diff < -20) { setHeaderVisible(true); resetInactivityTimer(); }
+    else if (diff < -20) setHeaderVisible(true);
   });
 
   useEffect(() => {
     const handleGlobalActivity = (e: MouseEvent) => {
       if (activeModificationFiles) return;
-      if (e.clientY < 80) { if (!headerVisible) setHeaderVisible(true); resetInactivityTimer(); }
+      if (e.clientY < 80 && lastScrollYRef.current < 10) {
+        if (!headerVisible) setHeaderVisible(true);
+      }
       if (e.clientY > window.innerHeight - 120) { if (!footerVisible) setFooterVisible(true); resetInactivityTimer(); }
     };
     window.addEventListener('mousemove', handleGlobalActivity);
@@ -416,7 +484,6 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       resetInactivityTimer();
-      if (!headerVisible) setHeaderVisible(true);
       if (!footerVisible) setFooterVisible(true);
       if (e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); setIsCommandPaletteOpen(prev => !prev); return; }
       if (e.key === 'Escape') {
@@ -425,16 +492,67 @@ const App: React.FC = () => {
         else if (isCommandPaletteOpen) setIsCommandPaletteOpen(false);
         else if (isHelpOpen) setIsHelpOpen(false);
         else if (isReasoningOpen) setIsReasoningOpen(false);
-        else setIsSettingsOpen(true);
+        else openSettings('general');
       }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [resetInactivityTimer, headerVisible, footerVisible, isCommandPaletteOpen, isHelpOpen, isReasoningOpen, isSettingsOpen, activeModificationFiles]);
+  }, [resetInactivityTimer, footerVisible, isCommandPaletteOpen, isHelpOpen, isReasoningOpen, isSettingsOpen, activeModificationFiles, openSettings]);
 
   useEffect(() => {
-    const savedSessions = localStorage.getItem('chat-sessions');
-    const savedSettings = localStorage.getItem('user-settings');
+    const savedAccounts = localStorage.getItem('vortex-accounts');
+    const savedCurrentAccountId = localStorage.getItem('vortex-current-account-id');
+    let nextAccounts: LocalAccount[] = [];
+
+    if (savedAccounts) {
+      try {
+        const parsed = JSON.parse(savedAccounts);
+        if (Array.isArray(parsed)) {
+          nextAccounts = parsed as LocalAccount[];
+        }
+      } catch {
+        nextAccounts = [];
+      }
+    }
+
+    if (nextAccounts.length === 0) {
+      const fallback = createDefaultAccount();
+      nextAccounts = [fallback];
+      const legacySessions = localStorage.getItem('chat-sessions');
+      const legacySettings = localStorage.getItem('user-settings');
+      if (legacySessions && !localStorage.getItem(accountSessionsKey(fallback.id))) {
+        localStorage.setItem(accountSessionsKey(fallback.id), legacySessions);
+      }
+      if (legacySettings && !localStorage.getItem(accountSettingsKey(fallback.id))) {
+        localStorage.setItem(accountSettingsKey(fallback.id), legacySettings);
+      }
+    }
+
+    const safeCurrentAccountId = nextAccounts.some((account) => account.id === savedCurrentAccountId)
+      ? savedCurrentAccountId
+      : nextAccounts[0].id;
+
+    setAccounts(nextAccounts);
+    setCurrentAccountId(safeCurrentAccountId);
+    setIsAccountHydrated(false);
+  }, []);
+
+  useEffect(() => {
+    if (!currentAccountId) return;
+
+    const savedSessions = localStorage.getItem(accountSessionsKey(currentAccountId));
+    const savedSettings = localStorage.getItem(accountSettingsKey(currentAccountId));
+
+    if (savedSettings) {
+      try {
+        setSettings(normalizeSettings(JSON.parse(savedSettings)));
+      } catch {
+        setSettings(DEFAULT_SETTINGS);
+      }
+    } else {
+      setSettings(DEFAULT_SETTINGS);
+    }
+
     if (savedSessions) {
       try {
         const parsedSessions = JSON.parse(savedSessions);
@@ -443,37 +561,72 @@ const App: React.FC = () => {
               .map((session) => normalizeSession(session))
               .filter((session): session is ChatSession => session !== null)
               .filter((session, index, all) => {
-              const isEmptyDraft = session.messages.length === 0;
-              if (!isEmptyDraft) return true;
-              return all.findIndex(candidate =>
-                candidate
-                && candidate.title === session.title
-                && candidate.messages.length === 0
-              ) === index;
-            })
+                const isEmptyDraft = session.messages.length === 0;
+                if (!isEmptyDraft) return true;
+                return all.findIndex(candidate =>
+                  candidate
+                  && candidate.title === session.title
+                  && candidate.messages.length === 0
+                ) === index;
+              })
           : [];
+
         if (normalizedSessions.length > 0) {
           setSessions(normalizedSessions);
           setCurrentSessionId(normalizedSessions[0].id);
         } else {
-          handleNewChat();
+          const freshSession = createEmptySession(DEFAULT_SETTINGS.language);
+          setSessions([freshSession]);
+          setCurrentSessionId(freshSession.id);
         }
       } catch {
-        handleNewChat();
+        const freshSession = createEmptySession(DEFAULT_SETTINGS.language);
+        setSessions([freshSession]);
+        setCurrentSessionId(freshSession.id);
       }
-    } else handleNewChat();
-    if (savedSettings) {
-      try {
-        setSettings(normalizeSettings(JSON.parse(savedSettings)));
-      } catch {
-        setSettings(DEFAULT_SETTINGS);
-      }
+    } else {
+      const freshSession = createEmptySession(DEFAULT_SETTINGS.language);
+      setSessions([freshSession]);
+      setCurrentSessionId(freshSession.id);
     }
-  }, []);
 
-  useEffect(() => { document.documentElement.classList.toggle('dark', isDarkMode); localStorage.setItem('dark-mode', String(isDarkMode)); }, [isDarkMode]);
-  useEffect(() => { if (sessions.length > 0) localStorage.setItem('chat-sessions', JSON.stringify(sessions)); }, [sessions]);
-  useEffect(() => { localStorage.setItem('user-settings', JSON.stringify(settings)); }, [settings]);
+    setAccounts((prev) => prev.map((account) => (
+      account.id === currentAccountId
+        ? { ...account, lastUsedAt: Date.now() }
+        : account
+    )));
+    setIsAccountHydrated(true);
+  }, [currentAccountId]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDarkMode);
+    document.body.classList.toggle('dark', isDarkMode);
+    document.documentElement.style.colorScheme = isDarkMode ? 'dark' : 'light';
+    document.body.style.colorScheme = isDarkMode ? 'dark' : 'light';
+    localStorage.setItem('dark-mode', String(isDarkMode));
+  }, [isDarkMode]);
+  useEffect(() => {
+    document.documentElement.dataset.appMode = mode;
+    document.body.dataset.appMode = mode;
+    return () => {
+      delete document.documentElement.dataset.appMode;
+      delete document.body.dataset.appMode;
+    };
+  }, [mode]);
+  useEffect(() => { localStorage.setItem('vortex-accounts', JSON.stringify(accounts)); }, [accounts]);
+  useEffect(() => {
+    if (currentAccountId) localStorage.setItem('vortex-current-account-id', currentAccountId);
+  }, [currentAccountId]);
+  useEffect(() => {
+    if (isAccountHydrated && currentAccountId) {
+      localStorage.setItem(accountSessionsKey(currentAccountId), JSON.stringify(sessions));
+    }
+  }, [currentAccountId, isAccountHydrated, sessions]);
+  useEffect(() => {
+    if (isAccountHydrated && currentAccountId) {
+      localStorage.setItem(accountSettingsKey(currentAccountId), JSON.stringify(settings));
+    }
+  }, [currentAccountId, isAccountHydrated, settings]);
   useEffect(() => {
     if (sessions.length === 0) {
       setCurrentSessionId(null);
@@ -497,6 +650,31 @@ const App: React.FC = () => {
       }
     }
   }, [sessions, isLoading, isSearching, activeView, currentSessionId, currentSession]);
+
+  const handleSelectAccount = useCallback((accountId: string) => {
+    if (accountId === currentAccountId) return;
+    setIsAccountHydrated(false);
+    setCurrentAccountId(accountId);
+    setHeaderVisible(true);
+    setFooterVisible(true);
+  }, [currentAccountId]);
+
+  const handleCreateAccount = useCallback((draft: { name: string; email: string; handle?: string }) => {
+    const nextAccount = createLocalAccount(draft.name.trim(), draft.email.trim(), draft.handle?.trim());
+    const freshSettings = { ...DEFAULT_SETTINGS, language: settings.language };
+    const freshSession = createEmptySession(freshSettings.language);
+
+    localStorage.setItem(accountSettingsKey(nextAccount.id), JSON.stringify(freshSettings));
+    localStorage.setItem(accountSessionsKey(nextAccount.id), JSON.stringify([freshSession]));
+
+    setAccounts((prev) => [nextAccount, ...prev]);
+    setIsAccountHydrated(false);
+    setCurrentAccountId(nextAccount.id);
+    setSessions([freshSession]);
+    setCurrentSessionId(freshSession.id);
+    setHeaderVisible(true);
+    setFooterVisible(true);
+  }, [settings.language]);
 
   const handleNewChat = useCallback(() => {
     const newSession = createEmptySession(settings.language);
@@ -535,7 +713,19 @@ const App: React.FC = () => {
   }, [addLog, settings.language]);
 
   const handleSelectView = useCallback((newView: ViewType) => {
+    if (newView === 'analysis') setAnalysisFocusTab('stack');
     setActiveView(prev => { setPrevView(prev); return newView; });
+    setHeaderVisible(true);
+  }, []);
+
+  const openAnalysisTab = useCallback((tab: 'stack' | 'learning' | 'internet') => {
+    setAnalysisFocusTab(tab);
+    setActiveView(prev => { setPrevView(prev); return 'analysis'; });
+    setHeaderVisible(true);
+  }, []);
+
+  const openTrainingView = useCallback(() => {
+    setActiveView(prev => { setPrevView(prev); return 'training'; });
     setHeaderVisible(true);
   }, []);
 
@@ -627,7 +817,7 @@ const VORTEX_CONFIG = {
     addLog('SYSTEM', settings.language === 'es' ? 'Carga de demostración completada.' : 'Demo load complete.');
   }, [currentSessionId, addLog, settings.language, t]);
 
-  const handleSendMessage = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true, autoTrain: boolean = true) => {
+  const handleSendMessageLocalFirst = async (content: string, useInternet: boolean = false, selectedMode: AppMode = 'ask', useThinking: boolean = true, autoTrain: boolean = true) => {
     if (sendDisabledReason) {
       addLog('SYSTEM', sendDisabledReason);
       return;
@@ -641,19 +831,22 @@ const VORTEX_CONFIG = {
       setCurrentSessionId(targetSessionId);
     }
     if (!targetSessionId) return;
+
     setMode(selectedMode);
     if (activeView !== 'chat') handleSelectView('chat');
-    setHeaderVisible(true); setFooterVisible(true); resetInactivityTimer();
+    setHeaderVisible(true);
+    setFooterVisible(true);
+    resetInactivityTimer();
     addLog('INFO', settings.language === 'es' ? `Prompt enviado (${content.length} chars) · modo=${selectedMode}` : `Prompt sent (${content.length} chars) · mode=${selectedMode}`);
     if (useInternet) {
-      addLog('SEARCH', settings.language === 'es' ? 'Internet activado: ingest + grounding.' : 'Internet enabled: ingest + grounding.');
+      addLog('SEARCH', settings.language === 'es' ? 'Internet activado para este prompt.' : 'Internet enabled for this prompt.');
     }
+
     const userMessage: Message = { id: Date.now().toString(), role: Role.USER, content, timestamp: Date.now() };
     const aiMessageId = (Date.now() + 1).toString();
     const initialAiMessage: Message = { id: aiMessageId, role: Role.AI, content: "", thought: "", requestId: undefined, sources: [], groundingSupports: [], timestamp: Date.now() };
     setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, userMessage, initialAiMessage], updatedAt: Date.now() } : s));
 
-    // Auto-name the chat on first message
     const currentMessages = targetSession.messages || [];
     if (currentMessages.length === 0) {
       vortexService.generateChatTitle(content, settings.language).then(result => {
@@ -664,24 +857,29 @@ const VORTEX_CONFIG = {
       }).catch(() => {});
     }
 
-    setIsLoading(true); setIsSearching(useInternet); abortControllerRef.current = false;
+    setIsLoading(true);
+    setIsSearching(useInternet);
+    abortControllerRef.current = false;
     try {
-      if (useInternet) {
-        const ingest: any = await vortexService.ingestOnce().catch((error) => ({ ok: false, error: String(error) }));
-        if (ingest.ok) {
-          addLog('SEARCH', settings.language === 'es' ? `Ingest web: ${ingest.newDocs ?? 0} docs.` : `Web ingest: ${ingest.newDocs ?? 0} docs.`);
-        } else {
-          addLog('SYSTEM', settings.language === 'es' ? `Ingest web falló: ${ingest.error || 'error'}` : `Web ingest failed: ${ingest.error || 'error'}`);
-        }
-      }
       const history = targetSession.messages || [];
-      const stream = vortexService.generateResponseStream(history, content, useInternet, useThinking, selectedMode, settings.language);
+      const stream = vortexService.generateResponseStream(
+        history,
+        content,
+        useInternet,
+        useThinking,
+        selectedMode,
+        settings.language,
+        internetAllowlist
+      );
       let started = false;
       let aborted = false;
       let lastText = '';
       let lastRequestId: string | undefined;
       for await (const chunk of stream) {
-        if (abortControllerRef.current) { aborted = true; break; }
+        if (abortControllerRef.current) {
+          aborted = true;
+          break;
+        }
         if (!started) {
           started = true;
           addLog('INFO', settings.language === 'es' ? 'Stream SSE conectado.' : 'SSE stream connected.');
@@ -693,24 +891,33 @@ const VORTEX_CONFIG = {
       }
       if (aborted) {
         addLog('SYSTEM', settings.language === 'es' ? 'Ejecución abortada por el usuario.' : 'Run aborted by user.');
-      } else {
-        if (autoTrain && lastRequestId && lastText) {
-          addLog('LEARN', settings.language === 'es' ? 'Auto-train: enviando feedback...' : 'Auto-train: sending feedback...');
-          const feedback = await vortexService.submitFeedback(lastRequestId, lastText);
-          if (feedback.ok && feedback.trainingEvent) {
-            addLog('LEARN', settings.language === 'es' ? 'Auto-train registrado (training_event creado).' : 'Auto-train logged (training_event created).');
-            setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, trainingEvent: true } : m) } : s));
-            await suggestPatchFromMessage(aiMessageId, 'auto-train');
-          } else if (feedback.ok) {
-            addLog('SYSTEM', settings.language === 'es' ? 'Auto-train OK, pero sin training_event.' : 'Auto-train OK, but no training_event.');
-          } else {
-            addLog('SYSTEM', settings.language === 'es' ? `Auto-train falló: ${feedback.error || 'error'}` : `Auto-train failed: ${feedback.error || 'error'}`);
+      } else if (autoTrain && lastRequestId && lastText) {
+        addLog('LEARN', settings.language === 'es' ? 'Auto-train: enviando feedback...' : 'Auto-train: sending feedback...');
+        const feedback = await vortexService.submitFeedback(lastRequestId, lastText);
+        if (feedback.ok && feedback.trainingEvent) {
+          addLog('LEARN', settings.language === 'es' ? 'Auto-train registrado (training_event creado).' : 'Auto-train logged (training_event created).');
+          setSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: s.messages.map(m => m.id === aiMessageId ? { ...m, trainingEvent: true } : m) } : s));
+          const quickTrain = await controlService.startTraining('quick').catch(() => null);
+          if (quickTrain?.ok && quickTrain.run_id) {
+            addLog('LEARN', settings.language === 'es' ? `Aprendizaje rápido lanzado: ${quickTrain.run_id}` : `Quick learning launched: ${quickTrain.run_id}`);
           }
-        } else if (autoTrain) {
-          addLog('SYSTEM', settings.language === 'es' ? 'Auto-train omitido: request_id ausente.' : 'Auto-train skipped: missing request_id.');
+          await suggestPatchFromMessage(aiMessageId, 'auto-train');
+        } else if (feedback.ok) {
+          addLog('SYSTEM', settings.language === 'es' ? 'Auto-train OK, pero sin training_event.' : 'Auto-train OK, but no training_event.');
+        } else {
+          addLog('SYSTEM', settings.language === 'es' ? `Auto-train falló: ${feedback.error || 'error'}` : `Auto-train failed: ${feedback.error || 'error'}`);
         }
+      } else if (autoTrain) {
+        addLog('SYSTEM', settings.language === 'es' ? 'Auto-train omitido: request_id ausente.' : 'Auto-train skipped: missing request_id.');
       }
-    } catch (error) { addLog('SYSTEM', 'Interrupción de flujo.'); } finally { setIsLoading(false); setIsSearching(false); resetInactivityTimer(); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : (settings.language === 'es' ? 'Interrupción de flujo.' : 'Flow interrupted.');
+      addLog('SYSTEM', repairMojibakeText(detail));
+    } finally {
+      setIsLoading(false);
+      setIsSearching(false);
+      resetInactivityTimer();
+    }
   };
 
   const handleOpenModificationExplorer = (files: { path: string, diff: string }[]) => {
@@ -723,23 +930,51 @@ const VORTEX_CONFIG = {
   const direction = VIEW_INDEX[activeView] > VIEW_INDEX[prevView] ? 1 : -1;
 
   return (
-    <div className={`flex h-screen w-full bg-background transition-colors duration-1000 overflow-hidden text-foreground accelerated ${mode === 'agent' ? 'ring-[6px] ring-primary/10' : ''}`}>
-      <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} onClearHistory={handleClearHistory} onExportChat={() => {}} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} isSidebarOpen={isSidebarOpen} onToggleSidebar={() => { const next = !isSidebarOpen; setIsSidebarOpen(next); if (next) setIsReasoningOpen(false); }} onOpenSettings={() => setIsSettingsOpen(true)} onOpenHelp={() => setIsHelpOpen(true)} categoryOrder={settings.categoryOrder} language={settings.language} onSetFontSize={(size) => setSettings({ ...settings, fontSize: size })} />
+    <div className={`relative flex h-screen w-full overflow-hidden bg-background text-foreground accelerated ${mode === 'agent' ? 'agent-shell' : 'ask-shell'}`}>
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.12),transparent)] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.03),transparent)]" />
+      </div>
+      <CommandPalette isOpen={isCommandPaletteOpen} onClose={() => setIsCommandPaletteOpen(false)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} onClearHistory={handleClearHistory} onExportChat={() => {}} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} isSidebarOpen={isSidebarOpen} onToggleSidebar={() => { const next = !isSidebarOpen; setIsSidebarOpen(next); if (next) setIsReasoningOpen(false); }} onOpenSettings={() => openSettings('general')} onOpenHelp={() => setIsHelpOpen(true)} categoryOrder={settings.categoryOrder} language={settings.language} onSetFontSize={(size) => setSettings({ ...settings, fontSize: size })} />
       <AnimatePresence initial={false}>{isSidebarOpen && !activeModificationFiles && (
-          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} isOpen={true} language={settings.language} selfEditsPendingCount={selfEditsPendingCount} /></motion.div>
+          <motion.div initial={{ width: 0, opacity: 0 }} animate={{ width: 280, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={springConfig} className="h-full overflow-hidden shrink-0 z-50 flex border-r border-border/50 shadow-2xl relative"><Sidebar sessions={sessions} currentSessionId={currentSessionId} activeView={activeView} onSelectSession={setCurrentSessionId} onSelectView={handleSelectView} onNewChat={handleNewChat} onDeleteSession={handleDeleteSession} isDarkMode={isDarkMode} toggleDarkMode={() => setIsDarkMode(!isDarkMode)} onClose={() => setIsSidebarOpen(false)} onOpenSettings={openSettings} isOpen={true} language={settings.language} selfEditsPendingCount={selfEditsPendingCount} currentAccount={currentAccount} accounts={accounts} currentAccountId={currentAccountId} onSelectAccount={handleSelectAccount} /></motion.div>
       )}</AnimatePresence>
       <div className="flex-1 flex overflow-hidden relative">
         <main className="flex-1 flex flex-col h-full bg-background relative z-0 overflow-hidden">
           {!activeModificationFiles && (
-            <motion.header initial={false} animate={{ y: headerVisible ? 0 : -100, opacity: headerVisible ? 1 : 0 }} transition={springConfig} className={`absolute top-0 left-0 right-0 h-24 border-b border-border/40 flex items-center justify-between px-10 bg-background/80 dark:bg-zinc-950/80 backdrop-blur-3xl z-40 shrink-0 shadow-sm pointer-events-auto accelerated ${mode === 'agent' ? 'bg-primary/5 border-primary/20' : ''}`}>
+          <motion.header initial={false} animate={{ y: headerVisible ? 0 : -100, opacity: headerVisible ? 1 : 0 }} transition={springConfig} className="absolute top-0 left-0 right-0 z-40 flex h-[72px] items-center justify-between border-b border-border/60 bg-background/90 px-5 backdrop-blur-xl pointer-events-auto accelerated lg:px-8">
               <div className="flex items-center gap-8">
                 <AnimatePresence mode="wait">{!isSidebarOpen && (<motion.button initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }} whileHover={{ scale: 1.1, backgroundColor: 'hsla(var(--muted-foreground) / 0.1)' }} whileTap={{ scale: 0.9 }} onClick={() => { setIsSidebarOpen(true); setIsReasoningOpen(false); }} className="p-3.5 rounded-2xl transition-all"><PanelLeft size={24} /></motion.button>)}</AnimatePresence>
-                <div className="flex items-center gap-5"><motion.div whileHover={{ rotate: -10, scale: 1.1 }} className="w-12 h-12 bg-primary rounded-[1.5rem] flex items-center justify-center text-primary-foreground shadow-xl transition-all duration-700"><Bot size={28} strokeWidth={2.5} /></motion.div><div className="flex flex-col"><h1 className="text-[17px] font-black tracking-tight leading-none">Vortex</h1><span className="text-[9px] font-black uppercase tracking-[0.3em] mt-2 transition-colors text-primary">{t.system_kernel}</span></div></div>
+                <div className="flex items-center gap-4">
+                  <motion.div whileHover={{ rotate: -8, scale: 1.04 }} transition={{ type: 'spring', stiffness: 320, damping: 18 }}>
+                    <VortexLogo size={40} alt="Vortex" />
+                  </motion.div>
+                  <div className="flex flex-col">
+                    <div className="flex items-center gap-3">
+                      <h1 className="text-[18px] font-black tracking-tight leading-none">Vortex</h1>
+                      <span className="rounded-full border border-border/60 bg-muted/25 px-3 py-1 text-[9px] font-black uppercase tracking-[0.14em] text-primary">
+                        {activeEngineLabel}
+                      </span>
+                    </div>
+                    <span className="mt-1 text-[9px] font-black uppercase tracking-[0.14em] text-muted-foreground">{t.system_kernel}</span>
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center gap-4">
-                <motion.button whileHover={{ scale: 1.1, backgroundColor: 'hsla(var(--primary) / 0.1)' }} whileTap={{ scale: 0.9 }} onClick={() => setSettings({ ...settings, language: settings.language === 'es' ? 'en' : 'es' })} className="w-12 h-12 flex items-center justify-center bg-muted/40 dark:bg-zinc-900/40 border border-border/50 rounded-2xl hover:border-primary/40 transition-all shadow-sm overflow-hidden"><img src={settings.language === 'es' ? 'https://flagcdn.com/w80/es.png' : 'https://flagcdn.com/w80/us.png'} alt={settings.language} className="w-7 h-auto object-contain rounded-sm select-none" /></motion.button>
-                <div className="flex items-center gap-1 bg-muted/40 dark:bg-zinc-900/40 p-1 rounded-2xl border border-border/50 relative">{['chat', 'analysis', 'edits', 'terminal'].map(v => (<button key={v} onClick={() => handleSelectView(v as ViewType)} className={`relative p-2.5 rounded-xl transition-all z-10 ${activeView === v ? 'text-primary-foreground' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>{v === 'chat' ? <MessageSquare size={16} /> : v === 'analysis' ? <BarChart3 size={16} /> : v === 'edits' ? <FileCode size={16} /> : <TerminalIcon size={16} />}{activeView === v && <motion.div layoutId="header-nav-indicator" className="absolute inset-0 bg-primary rounded-xl shadow-lg -z-10" transition={springConfig} />}</button>))}</div>
-                <motion.button whileHover={{ scale: 1.05, y: -2 }} whileTap={{ scale: 0.95 }} onClick={() => setIsCommandPaletteOpen(true)} className="flex items-center gap-3 px-5 py-2.5 bg-muted/50 dark:bg-zinc-900/50 hover:bg-primary/10 rounded-2xl border border-border/50 transition-all shadow-sm"><Zap size={16} className={'text-primary'} /><kbd className="hidden lg:inline-block px-2 py-0.5 bg-background border rounded-lg text-[8px] font-black opacity-40">ALT+K</kbd></motion.button>
+              <div className="flex items-center gap-3">
+                <motion.button whileHover={{ scale: 1.06, backgroundColor: 'hsla(var(--muted) / 0.8)' }} whileTap={{ scale: 0.94 }} onClick={() => setSettings({ ...settings, language: settings.language === 'es' ? 'en' : 'es' })} className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full border border-border/60 bg-muted/20 transition-all shadow-sm"><img src={settings.language === 'es' ? 'https://flagcdn.com/w80/es.png' : 'https://flagcdn.com/w80/us.png'} alt={settings.language} className="h-6 w-6 rounded-full object-cover select-none" /></motion.button>
+                <div className="flex items-center gap-1 rounded-[1rem] border border-border/60 bg-muted/20 p-1 relative">{(['chat', 'analysis', 'training', 'edits', 'terminal'] as ViewType[]).map(v => (<button key={v} onClick={() => handleSelectView(v)} className={`relative rounded-[0.85rem] p-2.5 transition-all z-10 ${activeView === v ? 'text-primary-foreground' : 'text-muted-foreground dark:text-zinc-400 hover:text-foreground'}`}>{v === 'chat' ? <MessageSquare size={16} /> : v === 'analysis' ? <BarChart3 size={16} /> : v === 'training' ? <FlaskConical size={16} /> : v === 'edits' ? <FileCode size={16} /> : <TerminalIcon size={16} />}{activeView === v && <motion.div layoutId="header-nav-indicator" className="absolute inset-0 bg-primary rounded-[0.85rem] -z-10" transition={springConfig} />}</button>))}</div>
+                <TopBarStackStatus
+                  status={operationalStatus}
+                  controlStatus={controlStatus}
+                  language={settings.language}
+                  onBootstrap={() => controlService.bootstrap(false)}
+                  onModelInit={() => controlService.initModel()}
+                  onRestartRuntime={() => controlService.restartRuntime()}
+                  onStartTraining={() => controlService.startTraining('quick')}
+                  onOpenTraining={openTrainingView}
+                  onStartAutonomy={() => controlService.startAutonomy()}
+                  onStopAutonomy={() => controlService.stopAutonomy()}
+                />
+                <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.95 }} onClick={() => setIsCommandPaletteOpen(true)} className="flex items-center gap-3 rounded-[1rem] border border-border/60 bg-muted/20 px-4 py-2.5 transition-all hover:bg-background"><Zap size={16} className={'text-primary'} /><kbd className="hidden lg:inline-block rounded-lg border bg-background px-2 py-0.5 text-[8px] font-black opacity-40">ALT+K</kbd></motion.button>
               </div>
             </motion.header>
           )}
@@ -748,12 +983,111 @@ const VORTEX_CONFIG = {
             {hasMessages && !activeModificationFiles && <div className="pt-24 shrink-0" />}
             <AnimatePresence mode="popLayout" custom={direction}>
               {activeView === 'chat' && (
-                <motion.div key="chat" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className={`mx-auto w-full flex-1 flex flex-col px-6 lg:px-16 min-h-full transition-all duration-500 ${!hasMessages ? 'justify-center max-w-[1200px]' : 'pt-6 max-w-full'}`}>
+                <motion.div key="chat" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className={`mx-auto flex min-h-full w-full flex-1 flex-col px-4 md:px-8 lg:px-12 transition-all duration-500 ${!hasMessages ? 'justify-center pt-24 pb-40 max-w-[960px]' : 'pt-8 max-w-[920px]'}`}>
                   {!hasMessages ? (
-                    <div className="flex flex-col items-center justify-center text-center space-y-12">
-                      <motion.div initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1, rotate: [0, 4, -4, 0] }} transition={{ duration: 8, repeat: Infinity }} whileHover={{ scale: 1.1, rotate: 10 }} className="relative w-40 h-40 bg-primary/10 rounded-[3.5rem] flex items-center justify-center text-primary border border-primary/20 shadow-2xl cursor-pointer"><Sparkles size={70} strokeWidth={1} /></motion.div>
-                      <h2 className="text-5xl font-black tracking-tighter leading-tight whitespace-pre-line">{t.welcome_title}</h2>
-                      <motion.button whileHover={{ scale: 1.05, boxShadow: '0 20px 40px -10px rgba(0,0,0,0.2)' }} whileTap={{ scale: 0.95 }} onClick={handleLoadDemo} className="flex items-center gap-5 px-12 py-6 bg-foreground text-background rounded-[2.5rem] font-black uppercase tracking-[0.3em] text-[10px] transition-all">{t.initialize_vortex}</motion.button>
+                    <div className="mx-auto flex w-full max-w-[860px] flex-col items-center justify-center gap-8 text-center">
+                      <div className="flex flex-col items-center gap-5">
+                        <div className="inline-flex items-center gap-3 rounded-full border border-border/60 bg-background px-4 py-2 text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground shadow-sm">
+                          <VortexLogo size={20} alt="Vortex" />
+                          <span>{settings.language === 'es' ? 'Vortex local core' : 'Vortex local core'}</span>
+                          <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                          <span className="text-primary">{activeEngineLabel}</span>
+                        </div>
+
+                        <div className="space-y-4">
+                          <h2 className="max-w-3xl text-4xl font-extrabold tracking-[-0.045em] leading-[1.02] text-foreground lg:text-5xl">
+                            {settings.language === 'es'
+                              ? 'Una sola consola para chatear, controlar y mejorar Vortex.'
+                              : 'One console to chat, control, and improve Vortex.'}
+                          </h2>
+                          <p className="mx-auto max-w-2xl text-[15px] leading-7 text-muted-foreground lg:text-base">
+                            {settings.language === 'es'
+                              ? 'La interfaz principal se comporta como una app de trabajo real: limpia, local y centrada en conversación, control del runtime y entrenamiento visible.'
+                              : 'The main interface behaves like a real work app: clean, local, and focused on conversation, runtime control, and visible training.'}
+                          </p>
+                        </div>
+
+                        <div className="grid w-full gap-3 md:grid-cols-3">
+                          {heroCards.map((card) => (
+                            <div key={card.label} className="surface-panel rounded-[1.2rem] px-5 py-5 text-left">
+                              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-muted-foreground">{card.label}</p>
+                              <p className="mt-2 text-[15px] font-bold tracking-tight text-foreground">{card.value}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-center gap-4">
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleLoadDemo} className="rounded-full bg-foreground px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-background transition-all dark:bg-primary dark:text-primary-foreground">
+                            {t.initialize_vortex}
+                          </motion.button>
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleSelectView('analysis')} className="rounded-full border border-border/70 bg-background px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-foreground shadow-sm">
+                            {settings.language === 'es' ? 'Abrir control' : 'Open control'}
+                          </motion.button>
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={openTrainingView} className="rounded-full border border-primary/25 bg-primary/[0.10] px-6 py-3 text-[10px] font-black uppercase tracking-[0.14em] text-primary shadow-sm">
+                            {settings.language === 'es' ? 'Entrenamiento' : 'Training'}
+                          </motion.button>
+                        </div>
+
+                        <p className="max-w-2xl text-sm font-medium text-muted-foreground">
+                          {operationalStatus?.ok
+                            ? (settings.language === 'es' ? 'Stack local listo para trabajar, buscar y entrenar desde una sola interfaz.' : 'The local stack is ready to work, browse, and train from one interface.')
+                            : sendDisabledReason}
+                        </p>
+                      </div>
+
+                      <motion.div initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, ease: 'easeOut' }} className="surface-panel relative isolate w-full max-w-[760px] overflow-hidden rounded-[1.6rem] p-5 text-foreground">
+                        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.10),transparent)] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.03),transparent)]" />
+
+                        <div className="relative z-10 flex flex-col gap-5">
+                          <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground">
+                            <span>{settings.language === 'es' ? 'Estado base' : 'Base status'}</span>
+                            <span>{readyLabel}</span>
+                          </div>
+
+                          <div className="flex items-center gap-4 rounded-[1.2rem] border border-border/60 bg-muted/20 px-4 py-4">
+                            <motion.div animate={{ rotate: [0, 2, -2, 0], scale: [1, 1.01, 1] }} transition={{ duration: 12, repeat: Infinity, ease: 'easeInOut' }}>
+                              <VortexLogo size={52} alt="Vortex mark" className="max-w-full" />
+                            </motion.div>
+                            <div className="text-left">
+                              <p className="text-sm font-bold tracking-tight text-foreground">
+                                {operationalStatus?.ok
+                                  ? (settings.language === 'es' ? 'Stack local listo para trabajar.' : 'Local stack is ready to work.')
+                                  : (settings.language === 'es' ? 'Revisa el estado antes de empezar.' : 'Review the stack before you start.')}
+                              </p>
+                              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                                {operationalStatus?.ok
+                                  ? (settings.language === 'es'
+                                    ? 'Consulta, agente, navegación puntual y entrenamiento siguen visibles desde la misma interfaz.'
+                                    : 'Query, agent mode, prompt browsing, and training stay visible from the same interface.')
+                                  : sendDisabledReason}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="rounded-[1rem] border border-border/60 bg-muted/20 p-4">
+                              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-muted-foreground">
+                                {settings.language === 'es' ? 'Runtime' : 'Runtime'}
+                              </p>
+                              <p className="mt-2 text-sm font-bold tracking-tight text-foreground">{activeEngineLabel}</p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {operationalStatus?.engine_base_url || '127.0.0.1'}
+                              </p>
+                            </div>
+                            <div className="rounded-[1rem] border border-border/60 bg-muted/20 p-4">
+                              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-muted-foreground">
+                                {settings.language === 'es' ? 'Modelo activo' : 'Active model'}
+                              </p>
+                              <p className="mt-2 text-sm font-bold tracking-tight text-foreground break-words">{activeModelLabel}</p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {operationalStatus?.web_disabled
+                                  ? (settings.language === 'es' ? 'Internet solo al activarlo' : 'Internet only when enabled')
+                                  : (settings.language === 'es' ? 'Política web editable' : 'Editable web policy')}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
                     </div>
                   ) : (
                     <div className="pb-40">
@@ -769,32 +1103,36 @@ const VORTEX_CONFIG = {
                         containerRef={mainScrollRef} 
                       />
                       {isSearching && (
-                        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-5 px-8 py-5 mt-6 bg-primary/5 border border-primary/20 rounded-[2.5rem] text-primary shadow-xl w-fit glass-card accelerated"><Globe size={22} className="animate-spin-slow" /><p className="text-[12px] font-black uppercase tracking-widest">{settings.language === 'es' ? 'Capas de conocimiento activas...' : 'Active knowledge layers...'}</p></motion.div>
+                        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="glass-card mt-6 flex w-fit items-center gap-3 rounded-full border border-primary/20 px-4 py-2.5 text-primary accelerated"><Globe size={16} className="animate-spin-slow" /><p className="text-[10px] font-black uppercase tracking-[0.14em]">{settings.language === 'es' ? 'Internet activo en este prompt' : 'Internet enabled on this prompt'}</p></motion.div>
                       )}
                     </div>
                   )}
                 </motion.div>
               )}
-              {activeView === 'analysis' && <motion.div key="analysis" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><AnalysisView sessions={sessions} onNavigateToChat={handleNavigateToChat} onAddLog={addLog} language={settings.language}/></motion.div>}
+              {activeView === 'analysis' && <motion.div key="analysis" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><AnalysisView sessions={sessions} onNavigateToChat={handleNavigateToChat} onAddLog={addLog} language={settings.language} controlStatus={controlStatus} operationalStatus={operationalStatus} onBootstrap={() => controlService.bootstrap(false)} onModelInit={() => controlService.initModel()} onRestartRuntime={() => controlService.restartRuntime()} onReloadInstructions={() => controlService.reloadInstructions()} onStartTraining={(trainingMode) => controlService.startTraining(trainingMode)} onSaveAllowlist={(domains) => controlService.saveAllowlist(domains)} focusTab={analysisFocusTab} /></motion.div>}
+              {activeView === 'training' && <motion.div key="training" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><TrainingView sessions={sessions} language={settings.language} controlStatus={controlStatus} onAddLog={addLog} onStartTraining={(trainingMode) => controlService.startTraining(trainingMode)} onStartAutonomy={() => controlService.startAutonomy()} onStopAutonomy={() => controlService.stopAutonomy()} onConfigureAutonomy={(config) => controlService.configureAutonomy(config)} /></motion.div>}
               {activeView === 'edits' && <motion.div key="edits" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><SelfEditsView language={settings.language} onAddLog={addLog} onPendingCountChange={setSelfEditsPendingCount} /></motion.div>}
               {activeView === 'terminal' && <motion.div key="terminal" custom={direction} variants={{ initial: (d: number) => ({ opacity: 0, x: d * 40, filter: 'blur(10px)' }), animate: { opacity: 1, x: 0, filter: 'blur(0px)', transition: springConfig }, exit: (d: number) => ({ opacity: 0, x: -d * 40, filter: 'blur(10px)', transition: { duration: 0.3 } }) }} initial="initial" animate="animate" exit="exit" className="flex-1"><TerminalView logs={logs} onClear={() => setLogs([])} language={settings.language} /></motion.div>}
             </AnimatePresence>
           </div>
 
           {!activeModificationFiles && activeView === 'chat' && (
-            <motion.div initial={false} animate={{ y: footerVisible ? 0 : 200, opacity: footerVisible ? 1 : 0 }} transition={{ type: 'spring', damping: 30, stiffness: 200 }} className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-8 z-30 pointer-events-auto accelerated ${mode === 'agent' ? 'from-primary/5' : ''}`}>
+            <motion.div initial={false} animate={{ y: footerVisible ? 0 : 200, opacity: footerVisible ? 1 : 0 }} transition={{ type: 'spring', damping: 30, stiffness: 200 }} className="absolute bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-background via-background/95 to-transparent pt-10 pb-8 pointer-events-auto accelerated">
               <div className="pointer-events-auto">
-                <LocalStackStatus status={operationalStatus} language={settings.language} />
                 <ChatInput
-                  onSend={handleSendMessage}
+                  onSend={handleSendMessageLocalFirst}
                   isLoading={isLoading}
                   isDarkMode={isDarkMode}
-                  canUseInternet={false}
-                  allowAutoTrain={false}
+                  mode={mode}
+                  onModeChange={setMode}
+                  canUseInternet={canUseInternet}
+                  allowAutoTrain={canStartTraining}
                   sendDisabledReason={sendDisabledReason}
                   onStop={() => { abortControllerRef.current = true; }}
                   language={settings.language}
                   onInteraction={() => { resetInactivityTimer(); if (!footerVisible) setFooterVisible(true); }}
+                  onFocusChange={setIsComposerFocused}
+                  onDraftChange={setHasComposerDraft}
                 />
               </div>
             </motion.div>
@@ -816,7 +1154,17 @@ const VORTEX_CONFIG = {
         )}
       </AnimatePresence>
 
-      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} settings={settings} onUpdateSettings={setSettings} />
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        initialTab={settingsInitialTab}
+        settings={settings}
+        onUpdateSettings={setSettings}
+        accounts={accounts}
+        currentAccountId={currentAccountId}
+        onSelectAccount={handleSelectAccount}
+        onCreateAccount={handleCreateAccount}
+      />
       <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} isDarkMode={isDarkMode} language={settings.language} />
     </div>
   );

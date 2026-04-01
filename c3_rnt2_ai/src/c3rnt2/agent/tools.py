@@ -4,6 +4,7 @@ import html
 import json
 import re
 import subprocess
+import sys
 from urllib.parse import quote_plus
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,7 +206,12 @@ class AgentTools:
         return ToolResult(ok=True, output=output, meta=dict(result.meta))
 
     def run_tests(self, repo_path: Path) -> ToolResult:
-        result = run_sandbox_command(repo_path, ["pytest", "-q"], self.sandbox_root, timeout_s=300)
+        result = run_sandbox_command(
+            repo_path,
+            [sys.executable, "-m", "pytest", "-q"],
+            self.sandbox_root,
+            timeout_s=300,
+        )
         out = (result.get("stdout", "") + result.get("stderr", "")).strip()
         return ToolResult(ok=bool(result.get("ok")), output=out)
 

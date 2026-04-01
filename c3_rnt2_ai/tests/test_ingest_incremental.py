@@ -42,3 +42,46 @@ def test_ingest_incremental_logs_and_episodes(tmp_path: Path) -> None:
 
     third = ingest_sources(base_dir, allowlist=[], settings=settings)
     assert third > 0
+
+
+def test_ingest_local_sources_excludes_web_cache_and_noise(tmp_path: Path) -> None:
+    base_dir = tmp_path
+    (base_dir / "src").mkdir(parents=True, exist_ok=True)
+    (base_dir / "src" / "main.py").write_text("print('repo file')\n", encoding="utf-8")
+    (base_dir / "data" / "corpora" / "programming" / "python").mkdir(parents=True, exist_ok=True)
+    (base_dir / "data" / "corpora" / "programming" / "python" / "tips.md").write_text("Python tips\n", encoding="utf-8")
+    (base_dir / "data" / "web_cache").mkdir(parents=True, exist_ok=True)
+    (base_dir / "data" / "web_cache" / "cached.txt").write_text("do not ingest\n", encoding="utf-8")
+    (base_dir / "data" / "sample.log").write_text("ignore logs\n", encoding="utf-8")
+
+    settings = {
+        "continuous": {
+            "knowledge_path": str(base_dir / "data" / "continuous" / "knowledge.sqlite"),
+            "ingest_web": False,
+            "local_sources": {
+                "enabled": True,
+                "include_repo": True,
+                "include_local_corpus": True,
+                "include_lessons": False,
+                "include_logs": False,
+                "include_memory": False,
+                "repo_paths": ["src"],
+                "corpus_paths": ["data/corpora/programming"],
+                "lesson_paths": [],
+                "include_globs": ["*.py", "*.md", "*.txt"],
+                "exclude_globs": ["data/web_cache/**"],
+            },
+            "ingest": {
+                "max_files_per_tick": 20,
+                "max_bytes_per_file": 1024 * 1024,
+                "max_total_bytes_per_tick": 1024 * 1024,
+                "web": {"cooldown_minutes": 60},
+            },
+        },
+        "rag": {"enabled": False},
+    }
+
+    first = ingest_sources(base_dir, allowlist=[], settings=settings)
+    second = ingest_sources(base_dir, allowlist=[], settings=settings)
+    assert first >= 2
+    assert second == 0

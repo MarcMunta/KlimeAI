@@ -1,0 +1,18 @@
+[MASTER]
+ignore-patterns=__pycache__
+
+[MESSAGES CONTROL]
+disable=
+    broad-exception-caught,
+    try-except-raise,
+    raise-missing-from,
+    redefined-builtin,
+    unused-argument,
+    arguments-differ,
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    line-too-long,
+    import-outside-toplevel,
+    superfluous-parens
+

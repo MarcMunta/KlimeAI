@@ -94,3 +94,34 @@ def test_dataset_builder_chat_feedback(tmp_path: Path) -> None:
     assert stats.written == 1
     payload = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
     assert payload.get("response") == "ideal"
+
+
+def test_dataset_builder_includes_extra_training_paths(tmp_path: Path) -> None:
+    extra = tmp_path / "extra.jsonl"
+    extra.write_text(
+        json.dumps(
+            {
+                "messages": [{"role": "user", "content": "Explain FastAPI"}],
+                "response": "FastAPI is a Python web framework.",
+                "source_kind": "chat_feedback",
+                "quality": 0.9,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "sft_extra.jsonl"
+    stats = build_sft_dataset(
+        chunks=[],
+        episodes_path=tmp_path / "episodes.jsonl",
+        output_path=out,
+        system_prompt="You are a helpful assistant.",
+        extra_training_paths=[extra],
+        min_chars=1,
+        max_repeat_ratio=0.99,
+        semantic_dedup_threshold=0.99,
+        embedding_backend=None,
+    )
+    assert stats.written == 1
+    payload = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assert payload.get("response") == "FastAPI is a Python web framework."

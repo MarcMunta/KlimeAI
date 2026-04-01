@@ -1,0 +1,15 @@
+{
+  "include": [
+    "src",
+    "tests"
+  ],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportUnknownImportSymbol": "none",
+  "extraPaths": [
+    "src"
+  ],
+  "venvPath": "..",
+  "venv": ".venv",
+  "typeCheckingMode": "basic"
+}

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# pylint: disable=broad-exception-caught
+# ruff: noqa: BLE001
+
 import json
 import shutil
 import time
@@ -9,7 +12,7 @@ from typing import Any
 
 try:
     import torch
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     torch = None
 
 from ..promotion.gating import bench_gate, log_promotion_decision, resolve_bench_thresholds
@@ -27,6 +30,14 @@ class PromotionResult:
     run_id: str | None = None
     adapter_path: str | None = None
     current_adapter_path: str | None = None
+
+
+def _estimate_text_tokens(text: str, *, fallback: int) -> int:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return max(1, int(fallback))
+    # Fast approximation: word-ish chunks are enough for relative bench comparisons.
+    return max(1, len(stripped.split()))
 
 
 def quarantine_root(base_dir: Path) -> Path:
@@ -61,7 +72,7 @@ def _load_json(path: Path) -> dict[str, Any]:
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -116,7 +127,7 @@ def _build_core_model_with_adapter(settings: dict, *, adapter_path: Path | None)
     load_lora_state(model, adapter_path)
     try:
         model.adapter_path = str(adapter_path)
-    except Exception:
+    except (AttributeError, TypeError):
         pass
     return model
 
@@ -126,24 +137,32 @@ def _bench_short(settings: dict, *, adapter_path: Path | None, max_new_tokens: i
     if torch is not None and torch.cuda.is_available():
         try:
             torch.cuda.reset_peak_memory_stats()
-        except Exception:
+        except RuntimeError:
             pass
     model = _build_core_model_with_adapter(settings, adapter_path=adapter_path)
     start = time.perf_counter()
-    _ = model.generate(prompt, max_new_tokens=int(max_new_tokens)) if hasattr(model, "generate") else ""
+    generated = ""
+    generate_fn = getattr(model, "generate", None)
+    if callable(generate_fn):
+        generated = str(generate_fn(prompt, max_new_tokens=int(max_new_tokens)) or "")
+    _ = generated
     elapsed = max(1e-6, time.perf_counter() - start)
     vram_peak = None
     if torch is not None and torch.cuda.is_available():
         try:
             vram_peak = float(torch.cuda.max_memory_allocated() / (1024**2))
-        except Exception:
+        except RuntimeError:
             vram_peak = None
-    tokens_per_sec = float(max_new_tokens) / elapsed
+    tokens_out_est = _estimate_text_tokens(generated, fallback=int(max_new_tokens))
+    tokens_per_sec = float(tokens_out_est) / elapsed
     return {
         "ok": True,
         "tokens_per_sec": float(tokens_per_sec),
         "vram_peak_mb": vram_peak,
+        "latency_p95_ms": float(elapsed * 1000.0),
+        "error_rate": 0.0,
         "elapsed_s": float(elapsed),
+        "tokens_out_est": int(tokens_out_est),
         "max_new_tokens": int(max_new_tokens),
     }
 
@@ -229,13 +248,13 @@ def promote_quarantine_run(
     )
 
 
-def _load_profile_bench_baseline_tps(base_dir: Path, *, profile: str, backend: str) -> float | None:
+def _load_profile_bench_baseline(base_dir: Path, *, profile: str, backend: str) -> dict[str, Any] | None:
     path = base_dir / "data" / "bench" / "baseline.json"
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -245,10 +264,23 @@ def _load_profile_bench_baseline_tps(base_dir: Path, *, profile: str, backend: s
     entry = prof.get(str(backend))
     if not isinstance(entry, dict):
         return None
-    val = entry.get("tokens_per_sec")
+    return {
+        "tokens_per_sec": entry.get("tokens_per_sec"),
+        "latency_p95_ms": entry.get("latency_p95_ms"),
+        "error_rate": entry.get("error_rate"),
+        "ctx": entry.get("ctx"),
+        "vram_peak_mb": entry.get("vram_peak_mb"),
+    }
+
+
+def _load_profile_bench_baseline_tps(base_dir: Path, *, profile: str, backend: str) -> float | None:
+    baseline = _load_profile_bench_baseline(base_dir, profile=profile, backend=backend)
+    if baseline is None:
+        return None
+    val = baseline.get("tokens_per_sec")
     try:
         return float(val) if val is not None else None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -297,13 +329,23 @@ def promote_hf_expert(
             return {"ok": True, "promoted": False, "reason": "approval_missing", "domain": domain, "run_id": run_id, "approval_file": str(approval)}
 
     thresholds = resolve_bench_thresholds(settings)
-    bench = manifest.get("bench") if isinstance(manifest.get("bench"), dict) else {}
+    raw_bench = manifest.get("bench")
+    bench: dict[str, Any] = raw_bench if isinstance(raw_bench, dict) else {}
     candidate = {
         "tokens_per_sec": bench.get("tokens_per_sec"),
         "vram_peak_mb": bench.get("vram_peak_mb"),
         "ctx": bench.get("ctx"),
+        "latency_p95_ms": bench.get("latency_p95_ms"),
+        "error_rate": bench.get("error_rate"),
     }
-    baseline_tps = _load_profile_bench_baseline_tps(base_dir, profile=profile, backend="hf")
+    baseline_payload = _load_profile_bench_baseline(base_dir, profile=profile, backend="hf")
+    baseline_tps = None
+    if baseline_payload is not None:
+        val = baseline_payload.get("tokens_per_sec")
+        try:
+            baseline_tps = float(val) if val is not None else None
+        except (TypeError, ValueError):
+            baseline_tps = None
     allow_no_baseline = bool((settings.get("security", {}) or {}).get("allow_promotion_without_baseline", False))
     if profile == "rtx4080_16gb_120b_like" and baseline_tps is None and not allow_no_baseline:
         log_promotion_decision(
@@ -323,7 +365,7 @@ def promote_hf_expert(
             },
         )
         return {"ok": True, "promoted": False, "reason": "baseline_missing", "domain": domain, "run_id": run_id}
-    baseline = {"tokens_per_sec": baseline_tps} if baseline_tps is not None else None
+    baseline = baseline_payload if baseline_payload is not None else None
     verdict = bench_gate(candidate, baseline, thresholds)
     bench_ok = bool(verdict.get("ok", False))
     if not bench_ok:

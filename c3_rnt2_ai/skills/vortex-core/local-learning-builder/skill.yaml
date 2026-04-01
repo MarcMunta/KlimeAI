@@ -1,0 +1,15 @@
+id: local-learning-builder
+name: Local Learning Builder
+version: 1.0.0
+tags: ["learning", "builder", "sandbox", "tests"]
+triggers:
+  keywords: ["build", "fix", "exercise", "workspace", "sandbox", "pytest"]
+  regex: ["\\bexercise\\b", "\\bpytest\\b", "\\bsandbox\\b"]
+token_budget: 360
+priority: 70
+safety:
+  network: false
+  filesystem_write: false
+  shell: false
+requires_approval: false
+source: local:vortex-core
